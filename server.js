@@ -34,13 +34,47 @@ dotenv.config();
 
 const app = express();
 
-/** -------------------- Middleware FIRST -------------------- */
+/** -------------------- CORS (FIXED FOR HTTPS + APP DOMAIN) -------------------- */
+/**
+ * IMPORTANT:
+ * Your frontend is https://app.atlasrevenueai.com
+ * Your backend is https://atlas-backend.onrender.com
+ *
+ * The browser will BLOCK requests unless the backend returns:
+ *   Access-Control-Allow-Origin: https://app.atlasrevenueai.com
+ *   Access-Control-Allow-Credentials: true
+ *
+ * Using origin:true is NOT reliable for credentialed requests on some setups.
+ * This config explicitly whitelists your domains + supports local dev.
+ */
+const ALLOWED_ORIGINS = new Set([
+  "https://app.atlasrevenueai.com",
+  "http://localhost:5173",
+  "http://localhost:3000",
+]);
+
 app.use(
   cors({
-    origin: true,
+    origin: (origin, cb) => {
+      // Allow server-to-server, curl, Render health checks, etc. (no Origin header)
+      if (!origin) return cb(null, true);
+
+      if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
+
+      return cb(new Error(`CORS blocked for origin: ${origin}`), false);
+    },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-org-id"],
+    exposedHeaders: ["Content-Length"],
+    optionsSuccessStatus: 204,
   })
 );
+
+// Ensure preflight requests always get a response
+app.options("*", cors());
+
+/** -------------------- Body parsing -------------------- */
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "2mb" }));
 
@@ -61,17 +95,6 @@ app.get("/api/health", (req, res) => {
     mongoDb: mongoose.connection?.name ?? null,
   });
 });
-
-app.use(
-  cors({
-    origin: [
-      "https://app.atlasrevenueai.com",
-      "http://localhost:5173",
-      "http://localhost:3000"
-    ],
-    credentials: true
-  })
-);
 
 /** -------------------- Routes -------------------- */
 app.use("/api/auth", authRoutes);
