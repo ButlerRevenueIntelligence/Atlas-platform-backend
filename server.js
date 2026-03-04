@@ -33,34 +33,36 @@ dotenv.config();
 const app = express();
 app.set("trust proxy", 1);
 
-/** -------------------- Middleware FIRST -------------------- */
+/** -------------------- Body parsers FIRST -------------------- */
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "2mb" }));
+
+/** -------------------- CORS (ONLY ONCE) -------------------- */
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   "http://localhost:3000",
   "http://localhost:5173",
 ].filter(Boolean);
 
-app.use(
-  cors({
-    origin: function (origin, cb) {
-      // allow non-browser tools with no origin
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked: " + origin));
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const corsOptions = {
+  origin: function (origin, cb) {
+    // allow non-browser tools with no origin
+    if (!origin) return cb(null, true);
 
-app.use(cors());
+    // exact match
+    if (allowedOrigins.includes(origin)) return cb(null, true);
 
-app.options("*", cors());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json({ limit: "2mb" }));
+    return cb(new Error("CORS blocked: " + origin));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
 
-// If JSON parsing fails, return JSON (not HTML)
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+/** -------------------- If JSON parsing fails, return JSON -------------------- */
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
     return res.status(400).json({ ok: false, error: "Invalid JSON body" });
@@ -109,7 +111,9 @@ app.use("/api/attribution", attributionRoutes);
 
 /** -------------------- 404 fallback LAST -------------------- */
 app.use((req, res) => {
-  res.status(404).json({ ok: false, message: "Not Found", path: req.originalUrl });
+  res
+    .status(404)
+    .json({ ok: false, message: "Not Found", path: req.originalUrl });
 });
 
 /** -------------------- Boot -------------------- */
@@ -120,6 +124,7 @@ async function start() {
   try {
     console.log("ENV PORT:", PORT);
     console.log("ENV MONGO_URI exists?", !!MONGO_URI);
+    console.log("Allowed origins:", allowedOrigins);
 
     if (!MONGO_URI) {
       console.error("❌ Missing MONGO_URI (or MONGODB_URI) in backend/.env");
@@ -140,5 +145,9 @@ async function start() {
 
 start();
 
-process.on("unhandledRejection", (err) => console.error("❌ unhandledRejection:", err));
-process.on("uncaughtException", (err) => console.error("❌ uncaughtException:", err));
+process.on("unhandledRejection", (err) =>
+  console.error("❌ unhandledRejection:", err)
+);
+process.on("uncaughtException", (err) =>
+  console.error("❌ uncaughtException:", err)
+);
