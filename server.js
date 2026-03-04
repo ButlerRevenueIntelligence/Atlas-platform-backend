@@ -55,21 +55,19 @@ const ALLOWED_ORIGINS = new Set([
 
 app.use(
   cors({
-    origin: (origin, cb) => {
-      // Allow server-to-server, curl, Render health checks, etc. (no Origin header)
-      if (!origin) return cb(null, true);
-
-      if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
-
-      return cb(new Error(`CORS blocked for origin: ${origin}`), false);
-    },
+    origin: [
+      "https://app.atlasrevenueai.com",
+      "https://butler-dashboard.onrender.com",
+      "http://localhost:5173",
+      "http://localhost:3000"
+    ],
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-org-id"],
-    exposedHeaders: ["Content-Length"],
-    optionsSuccessStatus: 204,
+    allowedHeaders: ["Content-Type", "Authorization", "x-org-id"]
   })
 );
+
+app.options("*", cors());
 
 // Ensure preflight requests always get a response
 app.options("*", cors());
