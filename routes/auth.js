@@ -12,6 +12,20 @@ import { requireAuth } from "../middleware/auth.js";
 const router = express.Router();
 
 /* ------------------------------------------------ */
+/* Defaults */
+/* ------------------------------------------------ */
+const FULL_PERMS = [
+  "overview.view",
+  "revenue_intel.view",
+  "command_center.view",
+  "deal_room.view",
+  "market_signals.view",
+  "accounts.view",
+  "partners.view",
+  "admin.view",
+];
+
+/* ------------------------------------------------ */
 /* JWT helper */
 /* ------------------------------------------------ */
 function signToken({ userId, email, role, orgId }) {
@@ -78,6 +92,7 @@ router.post("/signup", async (req, res) => {
       orgId: org._id,
       role: "owner",
       status: "active",
+      permissions: FULL_PERMS, // ✅ give owner full perms on signup
     });
 
     const token = signToken({
@@ -90,6 +105,16 @@ router.post("/signup", async (req, res) => {
     return res.status(201).json({
       ok: true,
       token,
+      user: {
+        id: String(user._id),
+        name: user.name,
+        email: user.email,
+        role: "owner",
+        orgId: String(org._id),
+        orgName: org.name || "",
+        plan: org.plan || "SCALE",
+        permissions: FULL_PERMS,
+      },
     });
   } catch (err) {
     console.error("Signup error:", err);
@@ -98,7 +123,7 @@ router.post("/signup", async (req, res) => {
 });
 
 /* ------------------------------------------------ */
-/* LOGIN */
+/* LOGIN (✅ FIXED) */
 /* ------------------------------------------------ */
 router.post("/login", async (req, res) => {
   try {
@@ -119,14 +144,59 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ ok: false, message: "Invalid credentials" });
     }
 
+    // ✅ Determine active org
+    const orgId = user.orgId ? String(user.orgId) : "";
+
+    // ✅ Load membership + org (plan/name)
+    let membership = null;
+    let org = null;
+
+    if (orgId) {
+      membership = await Membership.findOne({ userId: user._id, orgId: user.orgId });
+      org = await Organization.findById(user.orgId).lean();
+    } else {
+      // fallback: if user has any membership, use the first one
+      membership = await Membership.findOne({ userId: user._id });
+      if (membership?.orgId) {
+        org = await Organization.findById(membership.orgId).lean();
+      }
+    }
+
+    const orgRole = membership?.role || user.role || "member";
+
+    // ✅ permissions:
+    // - if admin/owner => always full perms
+    // - else use membership.permissions
+    let permissions = Array.isArray(membership?.permissions) ? membership.permissions : [];
+    if (orgRole === "admin" || orgRole === "owner") {
+      permissions = FULL_PERMS;
+    }
+
+    // ✅ plan comes from org (not from frontend guessing)
+    const plan = org?.plan || "SCALE";
+
+    // ✅ Sign token using orgRole (so backend auth knows you're admin/owner)
     const token = signToken({
       userId: user._id,
       email: user.email,
-      role: user.role,
-      orgId: user.orgId,
+      role: orgRole,
+      orgId: membership?.orgId || user.orgId,
     });
 
-    return res.json({ ok: true, token });
+    return res.json({
+      ok: true,
+      token,
+      user: {
+        id: String(user._id),
+        name: user.name,
+        email: user.email,
+        role: orgRole,
+        orgId: membership?.orgId ? String(membership.orgId) : (user.orgId ? String(user.orgId) : ""),
+        orgName: org?.name || "",
+        plan,
+        permissions,
+      },
+    });
   } catch (err) {
     console.error("Login error:", err);
     return res.status(500).json({ ok: false, message: "Server error" });
