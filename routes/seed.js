@@ -79,15 +79,20 @@ router.post("/refresh", requireAuth, async (req, res) => {
       });
     }
 
+    // ----------------------------
     // 5) Wipe existing demo data
+    // ----------------------------
     await Promise.all([
       Deal.deleteMany({ orgId }),
       Client.deleteMany({ orgId }),
-      db.collection("integrations").deleteMany({ orgId }),
       db.collection("metrics_daily").deleteMany({ orgId }),
+      // IMPORTANT: if integrations has unique indexes, don't leave old docs
+      db.collection("integrations").deleteMany({ orgId }),
     ]);
 
+    // ----------------------------
     // 6) Seed demo data
+    // ----------------------------
     const emailA = `demo-owner+${String(orgId)}@atlasrevenueai.com`;
     const emailB = `ops-director+${String(orgId)}@atlasrevenueai.com`;
 
@@ -150,11 +155,46 @@ router.post("/refresh", requireAuth, async (req, res) => {
       },
     ]);
 
-    await db.collection("integrations").insertMany([
-      { orgId, type: "google_ads", status: "disconnected", createdAt: new Date() },
-      { orgId, type: "meta_ads", status: "disconnected", createdAt: new Date() },
-      { orgId, type: "hubspot", status: "disconnected", createdAt: new Date() },
-    ]);
+    // ✅ Integrations: MUST include a unique `key` so your (orgId, key) unique index never collides.
+    // ✅ Also use upsert so re-seeding never crashes even if something remains.
+    const integrations = [
+      {
+        key: "google_ads",
+        type: "google_ads",
+        status: "disconnected",
+      },
+      {
+        key: "meta_ads",
+        type: "meta_ads",
+        status: "disconnected",
+      },
+      {
+        key: "hubspot",
+        type: "hubspot",
+        status: "disconnected",
+      },
+    ];
+
+    await Promise.all(
+      integrations.map((it) =>
+        db.collection("integrations").updateOne(
+          { orgId, key: it.key },
+          {
+            $set: {
+              orgId,
+              key: it.key,
+              type: it.type,
+              status: it.status,
+              updatedAt: new Date(),
+            },
+            $setOnInsert: {
+              createdAt: new Date(),
+            },
+          },
+          { upsert: true }
+        )
+      )
+    );
 
     const days = 30;
     const metrics = [];
@@ -167,6 +207,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
         revenue: i % 7 === 0 ? 0 : Math.round(800 + Math.random() * 1200),
         spend: Math.round(200 + Math.random() * 400),
         leads: Math.round(2 + Math.random() * 8),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       });
     }
     await db.collection("metrics_daily").insertMany(metrics);
@@ -176,6 +218,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
       orgId: String(orgId),
       clientsInserted: clients.length,
       dealsInserted: 3,
+      integrationsUpserted: integrations.length,
+      metricsInserted: metrics.length,
     });
   } catch (e) {
     console.error("seed/refresh error:", e);
