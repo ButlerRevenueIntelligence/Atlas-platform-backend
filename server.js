@@ -39,7 +39,9 @@ app.use(express.json({ limit: "2mb" }));
 
 /** -------------------- CORS (ONLY ONCE) -------------------- */
 const allowedOrigins = [
-  process.env.FRONTEND_URL,
+  process.env.FRONTEND_URL, // make sure this is set to https://butler-platform-frontend.onrender.com in Render
+  "https://butler-platform-frontend.onrender.com",
+  "https://butler-dashboard.onrender.com",
   "http://localhost:3000",
   "http://localhost:5173",
 ].filter(Boolean);
@@ -49,14 +51,20 @@ const corsOptions = {
     // allow non-browser tools with no origin
     if (!origin) return cb(null, true);
 
-    // exact match
     if (allowedOrigins.includes(origin)) return cb(null, true);
 
     return cb(new Error("CORS blocked: " + origin));
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-org-id",          // ✅ IMPORTANT: your frontend sends this
+    "X-Requested-With",
+  ],
+  exposedHeaders: ["x-org-id"],
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
@@ -111,9 +119,7 @@ app.use("/api/attribution", attributionRoutes);
 
 /** -------------------- 404 fallback LAST -------------------- */
 app.use((req, res) => {
-  res
-    .status(404)
-    .json({ ok: false, message: "Not Found", path: req.originalUrl });
+  res.status(404).json({ ok: false, message: "Not Found", path: req.originalUrl });
 });
 
 /** -------------------- Boot -------------------- */
@@ -145,9 +151,5 @@ async function start() {
 
 start();
 
-process.on("unhandledRejection", (err) =>
-  console.error("❌ unhandledRejection:", err)
-);
-process.on("uncaughtException", (err) =>
-  console.error("❌ uncaughtException:", err)
-);
+process.on("unhandledRejection", (err) => console.error("❌ unhandledRejection:", err));
+process.on("uncaughtException", (err) => console.error("❌ uncaughtException:", err));
