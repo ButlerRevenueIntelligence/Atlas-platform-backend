@@ -7,10 +7,6 @@ import Membership from "../models/Membership.js";
 import Client from "../models/Client.js";
 import Deal from "../models/Deal.js";
 
-// ⚠️ You need an Org model/collection. If you already have one, import it here.
-// If your project uses a different name (Workspace/Org), change this import.
-import Org from "../models/Org.js";
-
 const router = express.Router();
 
 const toObjectId = (v) => {
@@ -19,80 +15,116 @@ const toObjectId = (v) => {
   return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
 };
 
+const now = () => new Date();
+
+const slugify = (s) =>
+  String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+
+async function ensureOrgAndMembership({ db, userId, headerOrgId, userOrgId }) {
+  // 1) Prefer header org
+  let orgId = headerOrgId || userOrgId;
+
+  // 2) If missing, find first active membership
+  if (!orgId) {
+    const m = await Membership.findOne({ userId, status: { $ne: "disabled" } })
+      .select("orgId")
+      .lean();
+    orgId = toObjectId(m?.orgId);
+  }
+
+  // 3) If still missing, create a new org in "orgs" collection
+  if (!orgId) {
+    const name = "Butler & Co Workspace";
+    const slug = `${slugify(name)}-${String(userId).slice(-6)}`;
+    const t = now();
+
+    const ins = await db.collection("orgs").insertOne({
+      name,
+      slug,
+      type: "agency",
+      ownerId: userId,
+      plan: "SCALE",
+      createdAt: t,
+      updatedAt: t,
+    });
+
+    orgId = ins.insertedId;
+
+    await Membership.create({
+      userId,
+      orgId,
+      role: "owner",
+      status: "active",
+      createdAt: t,
+      updatedAt: t,
+    });
+  }
+
+  // 4) Ensure membership exists for this org
+  const membership = await Membership.findOne({
+    userId,
+    orgId,
+    status: { $ne: "disabled" },
+  })
+    .select("_id")
+    .lean();
+
+  if (!membership) {
+    const t = now();
+    await Membership.create({
+      userId,
+      orgId,
+      role: "owner",
+      status: "active",
+      createdAt: t,
+      updatedAt: t,
+    });
+  }
+
+  return orgId;
+}
+
 router.post("/refresh", requireAuth, async (req, res) => {
   try {
-    const db = mongoose.connection;
+    // ✅ Use native Mongo DB handle
+    const db = mongoose.connection?.db;
+    if (!db) {
+      return res.status(500).json({ ok: false, message: "DB not ready" });
+    }
 
     const userId = toObjectId(req.user?.userId || req.user?._id);
     if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
 
-    // 1) Try to resolve orgId from header or user payload
     const headerOrgId = toObjectId(req.headers["x-org-id"]);
-    const defaultOrgId = toObjectId(req.user?.orgId);
-    let orgId = headerOrgId || defaultOrgId;
+    const userOrgId = toObjectId(req.user?.orgId);
 
-    // 2) If still missing, try membership lookup
-    if (!orgId) {
-      const m = await Membership.findOne({ userId, status: { $ne: "disabled" } })
-        .select("orgId")
-        .lean();
-      orgId = toObjectId(m?.orgId);
-    }
-
-    // 3) If STILL missing, create a brand new org + membership
-    if (!orgId) {
-      const org = await Org.create({
-        name: "Butler & Co (Demo Workspace)",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      orgId = toObjectId(org?._id);
-
-      await Membership.create({
-        userId,
-        orgId,
-        role: "owner",
-        status: "active",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-    }
-
-    // 4) Ensure membership exists (if orgId exists but membership doesn't)
-    const membership = await Membership.findOne({
+    const orgId = await ensureOrgAndMembership({
+      db,
       userId,
-      orgId,
-      status: { $ne: "disabled" },
-    })
-      .select("_id status role")
-      .lean();
+      headerOrgId,
+      userOrgId,
+    });
 
-    if (!membership) {
-      await Membership.create({
-        userId,
-        orgId,
-        role: "owner",
-        status: "active",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-    }
-
-    // ----------------------------
-    // 5) Wipe existing demo data
-    // ----------------------------
+    // -------------------- Wipe existing demo data --------------------
     await Promise.all([
       Deal.deleteMany({ orgId }),
       Client.deleteMany({ orgId }),
-      db.collection("metrics_daily").deleteMany({ orgId }),
-      // IMPORTANT: if integrations has unique indexes, don't leave old docs
+
+      // Integrations: wipe by org + also remove any bad docs with null/missing key
       db.collection("integrations").deleteMany({ orgId }),
+      db.collection("integrations").deleteMany({
+        orgId,
+        $or: [{ key: null }, { key: { $exists: false } }],
+      }),
+
+      db.collection("metrics_daily").deleteMany({ orgId }),
     ]);
 
-    // ----------------------------
-    // 6) Seed demo data
-    // ----------------------------
+    // -------------------- Seed Clients + Deals --------------------
     const emailA = `demo-owner+${String(orgId)}@atlasrevenueai.com`;
     const emailB = `ops-director+${String(orgId)}@atlasrevenueai.com`;
 
@@ -109,6 +141,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
         notes: "Seeded client for demo.",
         createdBy: userId,
         updatedBy: userId,
+        createdAt: now(),
+        updatedAt: now(),
       },
       {
         orgId,
@@ -122,6 +156,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
         notes: "Seeded client for demo.",
         createdBy: userId,
         updatedBy: userId,
+        createdAt: now(),
+        updatedAt: now(),
       },
     ]);
 
@@ -134,6 +170,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
         amount: 15000,
         probability: 0.35,
         nextAction: "Schedule discovery call",
+        createdAt: now(),
+        updatedAt: now(),
       },
       {
         orgId,
@@ -143,6 +181,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
         amount: 48000,
         probability: 0.55,
         nextAction: "Send proposal + confirm stakeholders",
+        createdAt: now(),
+        updatedAt: now(),
       },
       {
         orgId,
@@ -152,66 +192,62 @@ router.post("/refresh", requireAuth, async (req, res) => {
         amount: 22000,
         probability: 0.45,
         nextAction: "Book technical walkthrough",
+        createdAt: now(),
+        updatedAt: now(),
       },
     ]);
 
-    // ✅ Integrations: MUST include a unique `key` so your (orgId, key) unique index never collides.
-    // ✅ Also use upsert so re-seeding never crashes even if something remains.
+    // -------------------- Seed Integrations (FIX: never key:null) --------------------
+    // DB has unique index: { orgId: 1, key: 1 }
     const integrations = [
-      {
-        key: "google_ads",
-        type: "google_ads",
-        status: "disconnected",
-      },
-      {
-        key: "meta_ads",
-        type: "meta_ads",
-        status: "disconnected",
-      },
-      {
-        key: "hubspot",
-        type: "hubspot",
-        status: "disconnected",
-      },
+      { type: "google_ads", key: "google_ads", status: "disconnected" },
+      { type: "meta_ads", key: "meta_ads", status: "disconnected" },
+      { type: "hubspot", key: "hubspot", status: "disconnected" },
     ];
 
-    await Promise.all(
-      integrations.map((it) =>
-        db.collection("integrations").updateOne(
-          { orgId, key: it.key },
-          {
+    await db.collection("integrations").bulkWrite(
+      integrations.map((i) => ({
+        updateOne: {
+          filter: { orgId, key: i.key },
+          update: {
             $set: {
               orgId,
-              key: it.key,
-              type: it.type,
-              status: it.status,
-              updatedAt: new Date(),
+              type: i.type,
+              key: i.key,
+              status: i.status,
+              updatedAt: now(),
             },
-            $setOnInsert: {
-              createdAt: new Date(),
-            },
+            $setOnInsert: { createdAt: now() },
           },
-          { upsert: true }
-        )
-      )
+          upsert: true,
+        },
+      })),
+      { ordered: false }
     );
 
+    // -------------------- Seed Metrics (30 days) --------------------
     const days = 30;
     const metrics = [];
     for (let i = 0; i < days; i++) {
       const d = new Date();
       d.setDate(d.getDate() - i);
+
+      // normalize to date-only
+      const dateOnly = new Date(d.toISOString().slice(0, 10));
+
       metrics.push({
         orgId,
-        date: new Date(d.toISOString().slice(0, 10)),
+        date: dateOnly,
         revenue: i % 7 === 0 ? 0 : Math.round(800 + Math.random() * 1200),
         spend: Math.round(200 + Math.random() * 400),
         leads: Math.round(2 + Math.random() * 8),
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: now(),
+        updatedAt: now(),
       });
     }
-    await db.collection("metrics_daily").insertMany(metrics);
+    if (metrics.length) {
+      await db.collection("metrics_daily").insertMany(metrics, { ordered: false });
+    }
 
     return res.json({
       ok: true,
@@ -223,7 +259,10 @@ router.post("/refresh", requireAuth, async (req, res) => {
     });
   } catch (e) {
     console.error("seed/refresh error:", e);
-    return res.status(500).json({ ok: false, message: e?.message || "seed failed" });
+    return res.status(500).json({
+      ok: false,
+      message: e?.message || "seed failed",
+    });
   }
 });
 
