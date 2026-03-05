@@ -3,7 +3,6 @@ import express from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
-import Deal from "../models/Deal.js";
 
 const router = express.Router();
 
@@ -13,80 +12,59 @@ const toObjectId = (v) => {
   return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
 };
 
-async function resolveOrgId(req) {
-  const headerOrgId = toObjectId(req.headers["x-org-id"]);
-  const defaultOrgId = toObjectId(req.user?.orgId);
-  let orgId = headerOrgId || defaultOrgId;
-
-  if (!orgId) {
-    const userId = toObjectId(req.user?.userId || req.user?._id);
-    if (!userId) return null;
-
-    const m = await Membership.findOne({ userId, status: "active" })
-      .select("orgId")
-      .lean();
-
-    orgId = toObjectId(m?.orgId);
-  }
-
-  return orgId;
-}
-
-async function requireWorkspaceMember(req, res, next) {
+/**
+ * GET /api/revenue-intel/board
+ * Auth: requires a valid session + active membership in org
+ * Org context: x-org-id header OR req.user.orgId OR membership fallback
+ */
+router.get("/board", requireAuth, async (req, res) => {
   try {
     const userId = toObjectId(req.user?.userId || req.user?._id);
     if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
 
-    const orgId = await resolveOrgId(req);
+    // org from header first
+    const headerOrgId = toObjectId(req.headers["x-org-id"]);
+    const defaultOrgId = toObjectId(req.user?.orgId);
+    let orgId = headerOrgId || defaultOrgId;
+
+    // fallback membership lookup
+    if (!orgId) {
+      const m = await Membership.findOne({ userId, status: "active" })
+        .select("orgId")
+        .lean();
+      orgId = toObjectId(m?.orgId);
+    }
+
     if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
+    // validate membership
     const membership = await Membership.findOne({
       userId,
       orgId,
       status: { $ne: "disabled" },
     })
-      .select("_id role status orgId")
+      .select("role status orgId userId")
       .lean();
 
     if (!membership) {
-      return res.status(403).json({ ok: false, message: "Not authorized for this workspace" });
+      return res.status(403).json({ ok: false, message: "Not authorized for this org" });
     }
 
-    req.orgId = orgId;
-    req.membership = membership;
-    next();
+    // For now return an empty board but authorized
+    return res.json({
+      ok: true,
+      orgId: String(orgId),
+      membership,
+      board: [],
+    });
   } catch (e) {
-    console.error("requireWorkspaceMember error:", e);
-    res.status(500).json({ ok: false, message: "Auth check failed" });
+    console.error("revenue-intel/board error:", e);
+    return res.status(500).json({ ok: false, message: e?.message || "server error" });
   }
-}
-
-/**
- * GET /api/revenue-intel/board
- * Now authorized by membership (not requirePerm).
- */
-router.get("/board", requireAuth, requireWorkspaceMember, async (req, res) => {
-  const reactivateAfterDays = Number(req.query.reactivateAfterDays ?? 30) || 30;
-
-  // Minimal “board” payload so UI loads (you can expand later)
-  const deals = await Deal.find({ orgId: req.orgId }).select("stage amount probability createdAt").lean();
-
-  return res.json({
-    ok: true,
-    orgId: String(req.orgId),
-    reactivateAfterDays,
-    summary: {
-      totalDeals: deals.length,
-      pipelineValue: Math.round(
-        deals.reduce((sum, d) => sum + (Number(d.amount || 0) * Number(d.probability ?? 1)), 0)
-      ),
-    },
-    board: deals,
-  });
 });
 
-router.get("/health", requireAuth, requireWorkspaceMember, (req, res) => {
-  res.json({ ok: true, orgId: String(req.orgId) });
+router.get("/health", requireAuth, (req, res) => {
+  res.json({ ok: true });
 });
 
 export default router;
