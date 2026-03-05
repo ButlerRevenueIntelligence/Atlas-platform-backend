@@ -2,10 +2,14 @@
 import express from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
-import Membership from "../models/Membership.js";
 
+import Membership from "../models/Membership.js";
 import Client from "../models/Client.js";
 import Deal from "../models/Deal.js";
+
+// ⚠️ You need an Org model/collection. If you already have one, import it here.
+// If your project uses a different name (Workspace/Org), change this import.
+import Org from "../models/Org.js";
 
 const router = express.Router();
 
@@ -22,32 +26,28 @@ router.post("/refresh", requireAuth, async (req, res) => {
     const userId = toObjectId(req.user?.userId || req.user?._id);
     if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
 
-    // 1) Resolve org context (header -> user default -> membership)
+    // 1) Try to resolve orgId from header or user payload
     const headerOrgId = toObjectId(req.headers["x-org-id"]);
     const defaultOrgId = toObjectId(req.user?.orgId);
     let orgId = headerOrgId || defaultOrgId;
 
+    // 2) If still missing, try membership lookup
     if (!orgId) {
-      const m = await Membership.findOne({ userId, status: "active" })
+      const m = await Membership.findOne({ userId, status: { $ne: "disabled" } })
         .select("orgId")
         .lean();
       orgId = toObjectId(m?.orgId);
     }
 
-    // 2) If STILL no orgId, create an org + membership automatically
+    // 3) If STILL missing, create a brand new org + membership
     if (!orgId) {
-      const orgName =
-        req.user?.orgName ||
-        req.user?.company ||
-        (req.user?.email ? `${req.user.email.split("@")[0]} Workspace` : "Demo Workspace");
-
-      const orgInsert = await db.collection("organizations").insertOne({
-        name: orgName,
+      const org = await Org.create({
+        name: "Butler & Co (Demo Workspace)",
         createdAt: new Date(),
         updatedAt: new Date(),
       });
 
-      orgId = orgInsert.insertedId;
+      orgId = toObjectId(org?._id);
 
       await Membership.create({
         userId,
@@ -57,29 +57,29 @@ router.post("/refresh", requireAuth, async (req, res) => {
         createdAt: new Date(),
         updatedAt: new Date(),
       });
-    } else {
-      // 3) If org exists but user is not a member, auto-create membership for seed
-      const membership = await Membership.findOne({
-        userId,
-        orgId,
-        status: { $ne: "disabled" },
-      })
-        .select("_id status")
-        .lean();
-
-      if (!membership) {
-        await Membership.create({
-          userId,
-          orgId,
-          role: "owner",
-          status: "active",
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-      }
     }
 
-    // 4) Wipe existing demo data for org
+    // 4) Ensure membership exists (if orgId exists but membership doesn't)
+    const membership = await Membership.findOne({
+      userId,
+      orgId,
+      status: { $ne: "disabled" },
+    })
+      .select("_id status role")
+      .lean();
+
+    if (!membership) {
+      await Membership.create({
+        userId,
+        orgId,
+        role: "owner",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
+    // 5) Wipe existing demo data
     await Promise.all([
       Deal.deleteMany({ orgId }),
       Client.deleteMany({ orgId }),
@@ -87,11 +87,10 @@ router.post("/refresh", requireAuth, async (req, res) => {
       db.collection("metrics_daily").deleteMany({ orgId }),
     ]);
 
-    // generate unique demo emails per org
+    // 6) Seed demo data
     const emailA = `demo-owner+${String(orgId)}@atlasrevenueai.com`;
     const emailB = `ops-director+${String(orgId)}@atlasrevenueai.com`;
 
-    // create demo clients
     const clients = await Client.insertMany([
       {
         orgId,
@@ -121,7 +120,6 @@ router.post("/refresh", requireAuth, async (req, res) => {
       },
     ]);
 
-    // create demo deals
     await Deal.insertMany([
       {
         orgId,
@@ -152,21 +150,17 @@ router.post("/refresh", requireAuth, async (req, res) => {
       },
     ]);
 
-    // integrations
     await db.collection("integrations").insertMany([
       { orgId, type: "google_ads", status: "disconnected", createdAt: new Date() },
       { orgId, type: "meta_ads", status: "disconnected", createdAt: new Date() },
       { orgId, type: "hubspot", status: "disconnected", createdAt: new Date() },
     ]);
 
-    // metrics
     const days = 30;
     const metrics = [];
-
     for (let i = 0; i < days; i++) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-
       metrics.push({
         orgId,
         date: new Date(d.toISOString().slice(0, 10)),
@@ -175,7 +169,6 @@ router.post("/refresh", requireAuth, async (req, res) => {
         leads: Math.round(2 + Math.random() * 8),
       });
     }
-
     await db.collection("metrics_daily").insertMany(metrics);
 
     return res.json({
