@@ -22,12 +22,11 @@ router.post("/refresh", requireAuth, async (req, res) => {
     const userId = toObjectId(req.user?.userId || req.user?._id);
     if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
 
-    // org from header first
+    // 1) Resolve org context (header -> user default -> membership)
     const headerOrgId = toObjectId(req.headers["x-org-id"]);
     const defaultOrgId = toObjectId(req.user?.orgId);
     let orgId = headerOrgId || defaultOrgId;
 
-    // fallback membership lookup
     if (!orgId) {
       const m = await Membership.findOne({ userId, status: "active" })
         .select("orgId")
@@ -35,25 +34,52 @@ router.post("/refresh", requireAuth, async (req, res) => {
       orgId = toObjectId(m?.orgId);
     }
 
-    if (!orgId)
-      return res.status(400).json({ ok: false, message: "Missing org context" });
+    // 2) If STILL no orgId, create an org + membership automatically
+    if (!orgId) {
+      const orgName =
+        req.user?.orgName ||
+        req.user?.company ||
+        (req.user?.email ? `${req.user.email.split("@")[0]} Workspace` : "Demo Workspace");
 
-    // validate membership
-    const membership = await Membership.findOne({
-      userId,
-      orgId,
-      status: { $ne: "disabled" },
-    })
-      .select("_id")
-      .lean();
+      const orgInsert = await db.collection("organizations").insertOne({
+        name: orgName,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
 
-    if (!membership) {
-      return res
-        .status(403)
-        .json({ ok: false, message: "Not authorized for this workspace" });
+      orgId = orgInsert.insertedId;
+
+      await Membership.create({
+        userId,
+        orgId,
+        role: "owner",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    } else {
+      // 3) If org exists but user is not a member, auto-create membership for seed
+      const membership = await Membership.findOne({
+        userId,
+        orgId,
+        status: { $ne: "disabled" },
+      })
+        .select("_id status")
+        .lean();
+
+      if (!membership) {
+        await Membership.create({
+          userId,
+          orgId,
+          role: "owner",
+          status: "active",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
     }
 
-    // wipe existing demo data
+    // 4) Wipe existing demo data for org
     await Promise.all([
       Deal.deleteMany({ orgId }),
       Client.deleteMany({ orgId }),
@@ -160,9 +186,7 @@ router.post("/refresh", requireAuth, async (req, res) => {
     });
   } catch (e) {
     console.error("seed/refresh error:", e);
-    return res
-      .status(500)
-      .json({ ok: false, message: e?.message || "seed failed" });
+    return res.status(500).json({ ok: false, message: e?.message || "seed failed" });
   }
 });
 
