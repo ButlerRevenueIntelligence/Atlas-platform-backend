@@ -218,7 +218,7 @@ router.get("/me", requireAuth, async (req, res) => {
         orgName: req.user.org?.name || "",
         role: req.user.orgRole || req.user.role || "analyst",
         plan: req.user.plan || "SCALE",
-        perms: req.user.perms || [],
+        perms: req.user.permissions || req.user.perms || [],
       },
     });
   } catch (err) {
