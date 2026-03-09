@@ -6,7 +6,7 @@ import mongoose from "mongoose";
 
 import authRoutes from "./routes/auth.js";
 import dashboardRoutes from "./routes/dashboard.js";
-import integrationsRoutes from "./routes/integrations.js";
+import integrationsRoute from "./routes/integrations.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import invitesRoutes from "./routes/invites.js";
 import membersRoutes from "./routes/members.js";
@@ -19,7 +19,9 @@ import forecastRoutes from "./routes/forecast.js";
 import partnersRoutes from "./routes/partners.js";
 import orgRoutes from "./routes/org.js";
 import organizationsRoutes from "./routes/organizations.js";
-
+import atlasRoutes from "./routes/atlas.js";
+import atlasOperator from "./routes/atlasOperator.js";
+import operatorRoutes from "./routes/operator.js";
 import accountsRoutes from "./routes/accounts.js";
 import metricsRoutes from "./routes/metrics.js";
 import meRoutes from "./routes/me.js";
@@ -39,7 +41,10 @@ app.use(express.json({ limit: "2mb" }));
 
 /** -------------------- CORS (ONLY ONCE) -------------------- */
 const allowedOrigins = [
-  process.env.FRONTEND_URL, // make sure this is set to https://butler-platform-frontend.onrender.com in Render
+  process.env.FRONTEND_URL,
+  "https://app.atlasrevenueai.com",
+  "https://atlasrevenueai.com",
+  "https://www.atlasrevenueai.com",
   "https://butler-platform-frontend.onrender.com",
   "https://butler-dashboard.onrender.com",
   "http://localhost:3000",
@@ -47,20 +52,17 @@ const allowedOrigins = [
 ].filter(Boolean);
 
 const corsOptions = {
-  origin: function (origin, cb) {
-    // allow non-browser tools with no origin
+  origin(origin, cb) {
     if (!origin) return cb(null, true);
-
     if (allowedOrigins.includes(origin)) return cb(null, true);
-
-    return cb(new Error("CORS blocked: " + origin));
+    return cb(new Error(`CORS blocked: ${origin}`));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
     "Authorization",
-    "x-org-id",          // ✅ IMPORTANT: your frontend sends this
+    "x-org-id",
     "X-Requested-With",
   ],
   exposedHeaders: ["x-org-id"],
@@ -68,14 +70,14 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
-/** -------------------- If JSON parsing fails, return JSON -------------------- */
+/** -------------------- Invalid JSON handler -------------------- */
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
     return res.status(400).json({ ok: false, error: "Invalid JSON body" });
   }
-  next(err);
+  return next(err);
 });
 
 /** -------------------- Health check -------------------- */
@@ -91,7 +93,7 @@ app.get("/api/health", (req, res) => {
 /** -------------------- Routes -------------------- */
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
-app.use("/api/integrations", integrationsRoutes);
+app.use("/api/integrations", integrationsRoute);
 app.use("/api/pipeline", pipelineRoutes);
 
 app.use("/api/invites", invitesRoutes);
@@ -106,6 +108,9 @@ app.use("/api/clients", clientsRouter);
 app.use("/api/deals", dealsRouter);
 app.use("/api/deal-intel", dealIntelRouter);
 
+app.use("/api/atlas", atlasRoutes);
+app.use("/api/atlas", atlasOperator);
+
 app.use("/api/org", orgRoutes);
 app.use("/api/organizations", organizationsRoutes);
 
@@ -116,10 +121,15 @@ app.use("/api/me", meRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/export", exportRoutes);
 app.use("/api/attribution", attributionRoutes);
+app.use("/api/operator", operatorRoutes);
 
 /** -------------------- 404 fallback LAST -------------------- */
 app.use((req, res) => {
-  res.status(404).json({ ok: false, message: "Not Found", path: req.originalUrl });
+  res.status(404).json({
+    ok: false,
+    message: "Not Found",
+    path: req.originalUrl,
+  });
 });
 
 /** -------------------- Boot -------------------- */
@@ -151,5 +161,10 @@ async function start() {
 
 start();
 
-process.on("unhandledRejection", (err) => console.error("❌ unhandledRejection:", err));
-process.on("uncaughtException", (err) => console.error("❌ uncaughtException:", err));
+process.on("unhandledRejection", (err) => {
+  console.error("❌ unhandledRejection:", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ uncaughtException:", err);
+});
