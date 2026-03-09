@@ -20,14 +20,14 @@ const toObjectId = (v) => {
 router.get("/board", requireAuth, async (req, res) => {
   try {
     const userId = toObjectId(req.user?.userId || req.user?._id);
-    if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
+    if (!userId) {
+      return res.status(401).json({ ok: false, message: "Unauthorized" });
+    }
 
-    // org from header first
     const headerOrgId = toObjectId(req.headers["x-org-id"]);
     const defaultOrgId = toObjectId(req.user?.orgId);
     let orgId = headerOrgId || defaultOrgId;
 
-    // fallback membership lookup
     if (!orgId) {
       const m = await Membership.findOne({ userId, status: "active" })
         .select("orgId")
@@ -35,9 +35,10 @@ router.get("/board", requireAuth, async (req, res) => {
       orgId = toObjectId(m?.orgId);
     }
 
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+    if (!orgId) {
+      return res.status(400).json({ ok: false, message: "Missing org context" });
+    }
 
-    // validate membership
     const membership = await Membership.findOne({
       userId,
       orgId,
@@ -50,16 +51,43 @@ router.get("/board", requireAuth, async (req, res) => {
       return res.status(403).json({ ok: false, message: "Not authorized for this org" });
     }
 
-    // For now return an empty board but authorized
+    const reactivateAfterDays = Number(req.query?.reactivateAfterDays || 30);
+
     return res.json({
       ok: true,
       orgId: String(orgId),
       membership,
-      board: [],
+      execution: {
+        overdue: [],
+        dueToday: [],
+        upcoming: [],
+        counts: {
+          overdue: 0,
+          dueToday: 0,
+          upcoming: 0,
+        },
+      },
+      reactivation: {
+        items: [],
+        count: 0,
+        reactivateAfterDays,
+      },
+      winLoss: {
+        won: 0,
+        lost: 0,
+        winRate: 0,
+        avgWon: 0,
+        avgLost: 0,
+        avgCycleDaysWon: 0,
+        avgCycleDaysLost: 0,
+      },
     });
   } catch (e) {
     console.error("revenue-intel/board error:", e);
-    return res.status(500).json({ ok: false, message: e?.message || "server error" });
+    return res.status(500).json({
+      ok: false,
+      message: e?.message || "server error",
+    });
   }
 });
 
