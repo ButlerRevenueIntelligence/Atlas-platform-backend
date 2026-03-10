@@ -76,60 +76,94 @@ router.post(
       const eventType = event.type;
       const data = event.data.object;
 
+      console.log("Stripe webhook received:", eventType);
+
       if (eventType === "checkout.session.completed") {
         const orgId = data.metadata?.orgId;
+        const plan = data.metadata?.plan;
 
-        if (orgId) {
-          await Organization.findByIdAndUpdate(orgId, {
-            "billing.status": "active",
-            "billing.stripeCustomerId": data.customer,
-            "billing.stripeSubscriptionId": data.subscription,
-            "billing.plan": data.metadata?.plan || "unknown",
-          });
+        if (!orgId) {
+          console.log(
+            "checkout.session.completed received without orgId metadata; likely Stripe dashboard test event"
+          );
+          return res.json({ received: true, skipped: true });
         }
+
+        await Organization.findByIdAndUpdate(orgId, {
+          "billing.status": "active",
+          "billing.stripeCustomerId": data.customer,
+          "billing.stripeSubscriptionId": data.subscription,
+          "billing.plan": plan || "unknown",
+        });
+
+        console.log("Organization billing activated:", orgId);
       }
 
       if (eventType === "invoice.payment_succeeded") {
         const subscriptionId = data.subscription;
 
-        await Organization.findOneAndUpdate(
-          { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": "active" }
-        );
+        if (subscriptionId) {
+          await Organization.findOneAndUpdate(
+            { "billing.stripeSubscriptionId": subscriptionId },
+            { "billing.status": "active" }
+          );
+
+          console.log("Billing marked active for subscription:", subscriptionId);
+        }
       }
 
       if (eventType === "invoice.payment_failed") {
         const subscriptionId = data.subscription;
 
-        await Organization.findOneAndUpdate(
-          { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": "past_due" }
-        );
+        if (subscriptionId) {
+          await Organization.findOneAndUpdate(
+            { "billing.stripeSubscriptionId": subscriptionId },
+            { "billing.status": "past_due" }
+          );
+
+          console.log("Billing marked past_due for subscription:", subscriptionId);
+        }
       }
 
       if (eventType === "customer.subscription.deleted") {
         const subscriptionId = data.id;
 
-        await Organization.findOneAndUpdate(
-          { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": "cancelled" }
-        );
+        if (subscriptionId) {
+          await Organization.findOneAndUpdate(
+            { "billing.stripeSubscriptionId": subscriptionId },
+            { "billing.status": "cancelled" }
+          );
+
+          console.log("Billing marked cancelled for subscription:", subscriptionId);
+        }
       }
 
       if (eventType === "customer.subscription.updated") {
         const subscriptionId = data.id;
         const status = data.status;
 
-        await Organization.findOneAndUpdate(
-          { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": status }
-        );
+        if (subscriptionId) {
+          await Organization.findOneAndUpdate(
+            { "billing.stripeSubscriptionId": subscriptionId },
+            { "billing.status": status }
+          );
+
+          console.log(
+            "Billing status synced from Stripe:",
+            subscriptionId,
+            "->",
+            status
+          );
+        }
       }
 
-      res.json({ received: true });
+      return res.json({ received: true });
     } catch (err) {
       console.error("Webhook processing error:", err);
-      res.status(500).json({ error: "Webhook handler failed" });
+      return res.status(500).json({
+        error: "Webhook handler failed",
+        message: err?.message || "Unknown webhook error",
+      });
     }
   }
 );
