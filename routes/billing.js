@@ -3,6 +3,7 @@ dotenv.config();
 
 import express from "express";
 import Stripe from "stripe";
+import mongoose from "mongoose";
 import Organization from "../models/Organization.js";
 
 const router = express.Router();
@@ -43,10 +44,10 @@ router.post("/checkout", async (req, res) => {
       },
     });
 
-    res.json({ url: session.url });
+    return res.json({ url: session.url });
   } catch (err) {
     console.error("Stripe checkout error:", err);
-    res.status(500).json({
+    return res.status(500).json({
       error: "Checkout session failed",
       message: err?.message || "Unknown Stripe error",
     });
@@ -79,16 +80,16 @@ router.post("/webhook", async (req, res) => {
       const orgId = data.metadata?.orgId;
       const plan = data.metadata?.plan;
 
-      // Skip Stripe dashboard test events or invalid org ids
-      if (!orgId || typeof orgId !== "string" || orgId.length !== 24) {
+      // Ignore Stripe dashboard test events or invalid Mongo ids
+      if (!orgId || !mongoose.isValidObjectId(orgId)) {
         console.log("Skipping test webhook event — invalid orgId:", orgId);
         return res.json({ received: true, skipped: true });
       }
 
       await Organization.findByIdAndUpdate(orgId, {
         "billing.status": "active",
-        "billing.stripeCustomerId": data.customer,
-        "billing.stripeSubscriptionId": data.subscription,
+        "billing.stripeCustomerId": data.customer || null,
+        "billing.stripeSubscriptionId": data.subscription || null,
         "billing.plan": plan || "unknown",
       });
 
