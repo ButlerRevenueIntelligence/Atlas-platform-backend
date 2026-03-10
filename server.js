@@ -1,9 +1,12 @@
 // backend/server.js
 import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 
+import billingRoutes from "./routes/billing.js";
 import authRoutes from "./routes/auth.js";
 import dashboardRoutes from "./routes/dashboard.js";
 import integrationsRoute from "./routes/integrations.js";
@@ -29,15 +32,10 @@ import aiRoutes from "./routes/ai.js";
 import seedRoutes from "./routes/seed.js";
 import exportRoutes from "./routes/export.js";
 import attributionRoutes from "./routes/attribution.js";
-
-dotenv.config();
+import stripeRoutes from "./routes/stripe.js";
 
 const app = express();
 app.set("trust proxy", 1);
-
-/** -------------------- Body parsers FIRST -------------------- */
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json({ limit: "2mb" }));
 
 /** -------------------- CORS (ONLY ONCE) -------------------- */
 const allowedOrigins = [
@@ -64,6 +62,7 @@ const corsOptions = {
     "Authorization",
     "x-org-id",
     "X-Requested-With",
+    "stripe-signature",
   ],
   exposedHeaders: ["x-org-id"],
   optionsSuccessStatus: 204,
@@ -71,6 +70,14 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
+
+/** -------------------- STRIPE/BILLING ROUTES FIRST -------------------- */
+/** billingRoutes contains /webhook which needs express.raw() before express.json() */
+app.use("/api/billing", billingRoutes);
+
+/** -------------------- BODY PARSERS AFTER BILLING WEBHOOK -------------------- */
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "2mb" }));
 
 /** -------------------- Invalid JSON handler -------------------- */
 app.use((err, req, res, next) => {
@@ -122,6 +129,7 @@ app.use("/api/ai", aiRoutes);
 app.use("/api/export", exportRoutes);
 app.use("/api/attribution", attributionRoutes);
 app.use("/api/operator", operatorRoutes);
+app.use("/api/stripe", stripeRoutes);
 
 /** -------------------- 404 fallback LAST -------------------- */
 app.use((req, res) => {
@@ -140,6 +148,8 @@ async function start() {
   try {
     console.log("ENV PORT:", PORT);
     console.log("ENV MONGO_URI exists?", !!MONGO_URI);
+    console.log("ENV STRIPE_SECRET_KEY exists?", !!process.env.STRIPE_SECRET_KEY);
+    console.log("ENV APP_BASE_URL:", process.env.APP_BASE_URL);
     console.log("Allowed origins:", allowedOrigins);
 
     if (!MONGO_URI) {

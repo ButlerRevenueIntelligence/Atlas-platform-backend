@@ -45,85 +45,18 @@ function signToken({ userId, email, role, orgId }) {
 }
 
 /* ------------------------------------------------ */
-/* SIGNUP */
+/* Public signup disabled */
 /* ------------------------------------------------ */
 router.post("/signup", async (req, res) => {
-  try {
-    const name = String(req.body?.name || "").trim();
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const password = String(req.body?.password || "");
-    const company = String(req.body?.company || "").trim();
-
-    if (!name || !email || !password) {
-      return res.status(400).json({ ok: false, message: "Name, email, password required" });
-    }
-
-    if (password.length < 8) {
-      return res.status(400).json({ ok: false, message: "Password must be 8+ characters" });
-    }
-
-    const existing = await User.findOne({ email }).lean();
-    if (existing) {
-      return res.status(409).json({ ok: false, message: "Email already exists" });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    const user = await User.create({
-      name,
-      email,
-      passwordHash,
-      company,
-      role: "admin",
-      orgId: null,
-    });
-
-    const org = await Organization.create({
-      name: company || `${name}'s Organization`,
-      slug: `org-${Date.now()}`,
-      ownerId: user._id,
-      plan: "SCALE", // default
-    });
-
-    await User.updateOne({ _id: user._id }, { $set: { orgId: org._id } });
-
-    await Membership.create({
-      userId: user._id,
-      orgId: org._id,
-      role: "owner",
-      status: "active",
-      permissions: FULL_PERMS, // ✅ give owner full perms on signup
-    });
-
-    const token = signToken({
-      userId: user._id,
-      email: user.email,
-      role: "owner",
-      orgId: org._id,
-    });
-
-    return res.status(201).json({
-      ok: true,
-      token,
-      user: {
-        id: String(user._id),
-        name: user.name,
-        email: user.email,
-        role: "owner",
-        orgId: String(org._id),
-        orgName: org.name || "",
-        plan: org.plan || "SCALE",
-        permissions: FULL_PERMS,
-      },
-    });
-  } catch (err) {
-    console.error("Signup error:", err);
-    return res.status(500).json({ ok: false, message: "Server error" });
-  }
+  return res.status(403).json({
+    ok: false,
+    message:
+      "Public signup is disabled. Atlas access is granted after a live demo, approved billing, and workspace invitation.",
+  });
 });
 
 /* ------------------------------------------------ */
-/* LOGIN (✅ FIXED) */
+/* LOGIN */
 /* ------------------------------------------------ */
 router.post("/login", async (req, res) => {
   try {
@@ -144,43 +77,70 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ ok: false, message: "Invalid credentials" });
     }
 
-    // ✅ Determine active org
-    const orgId = user.orgId ? String(user.orgId) : "";
-
-    // ✅ Load membership + org (plan/name)
     let membership = null;
     let org = null;
 
-    if (orgId) {
-      membership = await Membership.findOne({ userId: user._id, orgId: user.orgId });
+    if (user.orgId) {
+      membership = await Membership.findOne({
+        userId: user._id,
+        orgId: user.orgId,
+        status: { $ne: "disabled" },
+      }).lean();
+
       org = await Organization.findById(user.orgId).lean();
-    } else {
-      // fallback: if user has any membership, use the first one
-      membership = await Membership.findOne({ userId: user._id });
+    }
+
+    if (!membership) {
+      membership = await Membership.findOne({
+        userId: user._id,
+        status: { $ne: "disabled" },
+      }).lean();
+
       if (membership?.orgId) {
         org = await Organization.findById(membership.orgId).lean();
       }
     }
 
+    if (!org) {
+      return res.status(403).json({
+        ok: false,
+        message: "No workspace is attached to this account.",
+      });
+    }
+
+    const accessStatus = String(org?.accessStatus || "pending");
+    const paymentStatus = String(org?.paymentStatus || "pending");
+    const approvedForAccess = Boolean(org?.approvedForAccess);
+    const demoCompleted = Boolean(org?.demoCompleted);
+
+    if (
+      accessStatus !== "active" ||
+      paymentStatus !== "paid" ||
+      !approvedForAccess ||
+      !demoCompleted
+    ) {
+      return res.status(403).json({
+        ok: false,
+        message:
+          "Your workspace is not active yet. Atlas access is enabled after demo completion, approved billing, and workspace activation.",
+      });
+    }
+
     const orgRole = membership?.role || user.role || "member";
 
-    // ✅ permissions:
-    // - if admin/owner => always full perms
-    // - else use membership.permissions
-    let permissions = Array.isArray(membership?.permissions) ? membership.permissions : [];
+    let permissions = Array.isArray(membership?.permissions)
+      ? membership.permissions
+      : [];
+
     if (orgRole === "admin" || orgRole === "owner") {
       permissions = FULL_PERMS;
     }
 
-    // ✅ plan comes from org (not from frontend guessing)
-    const plan = org?.plan || "SCALE";
-
-    // ✅ Sign token using orgRole (so backend auth knows you're admin/owner)
     const token = signToken({
       userId: user._id,
       email: user.email,
       role: orgRole,
-      orgId: membership?.orgId || user.orgId,
+      orgId: membership?.orgId || user.orgId || org?._id,
     });
 
     return res.json({
@@ -191,9 +151,15 @@ router.post("/login", async (req, res) => {
         name: user.name,
         email: user.email,
         role: orgRole,
-        orgId: membership?.orgId ? String(membership.orgId) : (user.orgId ? String(user.orgId) : ""),
+        orgId: membership?.orgId
+          ? String(membership.orgId)
+          : user.orgId
+          ? String(user.orgId)
+          : org?._id
+          ? String(org._id)
+          : "",
         orgName: org?.name || "",
-        plan,
+        plan: org?.plan || "SCALE",
         permissions,
       },
     });
@@ -204,7 +170,7 @@ router.post("/login", async (req, res) => {
 });
 
 /* ------------------------------------------------ */
-/* ME (LOCKED VERSION) */
+/* ME */
 /* ------------------------------------------------ */
 router.get("/me", requireAuth, async (req, res) => {
   try {

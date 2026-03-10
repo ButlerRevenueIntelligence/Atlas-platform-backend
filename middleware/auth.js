@@ -6,6 +6,15 @@ import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
 import { computePermissions } from "../utils/permissions.js";
 
+// SUPER ADMIN CONFIG
+const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "admin@butlerco.com")
+  .trim()
+  .toLowerCase();
+
+function isSuperAdminEmail(email) {
+  return String(email || "").trim().toLowerCase() === SUPER_ADMIN_EMAIL;
+}
+
 const toStr = (v) => (v == null ? "" : String(v));
 const isObjId = (v) => mongoose.Types.ObjectId.isValid(toStr(v));
 
@@ -26,12 +35,6 @@ async function findMembershipForOrg({ userId, orgId }) {
   return Membership.findOne({ userId: uid, orgId: oid }).lean();
 }
 
-/**
- * requireUser
- * - verifies JWT
- * - loads user
- * - DOES NOT require x-org-id
- */
 export async function requireUser(req, res, next) {
   try {
     const token = getToken(req);
@@ -53,7 +56,6 @@ export async function requireUser(req, res, next) {
     const user = await User.findById(userId).select("_id email name orgId role").lean();
     if (!user) return res.status(401).json({ ok: false, error: "User not found" });
 
-    // IMPORTANT: provide both id and userId so old routes don’t break
     req.user = {
       id: String(user._id),
       userId: String(user._id),
@@ -71,47 +73,56 @@ export async function requireUser(req, res, next) {
   }
 }
 
-/**
- * requireAuth (ORG-LOCKED)
- * - requires x-org-id OR token orgId OR user.orgId
- * - requires membership for that org
- * - computes permissions
- */
 export async function requireAuth(req, res, next) {
   try {
-    // First, just authenticate the user
     await new Promise((resolve) => requireUser(req, res, resolve));
-    if (!req.user) return; // requireUser already responded
+    if (!req.user) return;
 
-    // Resolve org context
     const headerOrgId = req.headers["x-org-id"] || req.headers["X-Org-Id"];
-    const orgId = headerOrgId || req.user.tokenOrgId || req.user.defaultOrgId || null;
+    const resolvedOrgId = headerOrgId || req.user.tokenOrgId || req.user.defaultOrgId || null;
 
-    if (!orgId) {
+    // ✅ SUPER ADMIN OVERRIDE (fix: provide plan + perms + permissions)
+    if (req.user.email === SUPER_ADMIN_EMAIL) {
+      const orgId = resolvedOrgId;
+
+      req.user = {
+        ...req.user,
+        orgId: orgId ? String(orgId) : null,
+        orgName: "Butler & Co",
+        plan: "ENTERPRISE",
+        orgRole: "owner",
+        perms: ["*"],        // <-- THIS is what /auth/me reads
+        permissions: ["*"],  // <-- keep compatibility with requirePerm()
+      };
+
+      return next();
+    }
+
+    if (!resolvedOrgId) {
       return res.status(400).json({ ok: false, error: "Missing org context (x-org-id)" });
     }
 
-    const membership = await findMembershipForOrg({ userId: req.user.userId, orgId });
+    const membership = await findMembershipForOrg({ userId: req.user.userId, orgId: resolvedOrgId });
     if (!membership) return res.status(403).json({ ok: false, error: "Not authorized for this org" });
     if (membership.status && membership.status !== "active") {
       return res.status(403).json({ ok: false, error: "Membership inactive" });
     }
 
-    const org = await Organization.findById(orgId).select("_id name plan").lean();
+    const org = await Organization.findById(resolvedOrgId).select("_id name plan").lean();
     const plan = String(org?.plan || "SCALE").toUpperCase();
 
     const orgRole = String(membership?.role || "analyst").toLowerCase();
     const overrides = Array.isArray(membership?.permissions) ? membership.permissions : [];
     const perms = computePermissions({ plan, role: orgRole, overrides });
 
-    // Expand req.user with org context
     req.user = {
       ...req.user,
-      orgId: String(orgId),
+      orgId: String(resolvedOrgId),
       orgName: org?.name || "",
       plan,
       orgRole,
-      permissions: perms,
+      perms,          // <-- /auth/me expects this
+      permissions: perms, // <-- requirePerm() expects this
       membership,
     };
 
