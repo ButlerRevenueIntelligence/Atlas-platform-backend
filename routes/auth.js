@@ -108,24 +108,6 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const accessStatus = String(org?.accessStatus || "pending");
-    const paymentStatus = String(org?.paymentStatus || "pending");
-    const approvedForAccess = Boolean(org?.approvedForAccess);
-    const demoCompleted = Boolean(org?.demoCompleted);
-
-    if (
-      accessStatus !== "active" ||
-      paymentStatus !== "paid" ||
-      !approvedForAccess ||
-      !demoCompleted
-    ) {
-      return res.status(403).json({
-        ok: false,
-        message:
-          "Your workspace is not active yet. Atlas access is enabled after demo completion, approved billing, and workspace activation.",
-      });
-    }
-
     const orgRole = membership?.role || user.role || "member";
 
     let permissions = Array.isArray(membership?.permissions)
@@ -134,6 +116,43 @@ router.post("/login", async (req, res) => {
 
     if (orgRole === "admin" || orgRole === "owner") {
       permissions = FULL_PERMS;
+    }
+
+    /* ------------------------------------------------ */
+    /* Workspace access logic */
+    /* Accept both old and new org field structures     */
+    /* ------------------------------------------------ */
+    const accessStatus = String(
+      org?.accessStatus ?? org?.status ?? "pending"
+    ).toLowerCase();
+
+    const paymentStatus = String(
+      org?.paymentStatus ?? org?.billingStatus ?? "pending"
+    ).toLowerCase();
+
+    const approvedForAccess =
+      typeof org?.approvedForAccess === "boolean"
+        ? org.approvedForAccess
+        : Boolean(org?.isActive);
+
+    const demoCompleted =
+      typeof org?.demoCompleted === "boolean"
+        ? org.demoCompleted
+        : true;
+
+    const workspaceActive =
+      accessStatus === "active" &&
+      (paymentStatus === "paid" || paymentStatus === "active") &&
+      approvedForAccess &&
+      demoCompleted;
+
+    // Founder/admin/owner override
+    if (!workspaceActive && orgRole !== "admin" && orgRole !== "owner") {
+      return res.status(403).json({
+        ok: false,
+        message:
+          "Your workspace is not active yet. Atlas access is enabled after demo completion, approved billing, and workspace activation.",
+      });
     }
 
     const token = signToken({
