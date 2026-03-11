@@ -5,6 +5,7 @@ import express from "express";
 import Stripe from "stripe";
 import mongoose from "mongoose";
 import Organization from "../models/Organization.js";
+import User from "../models/User.js";
 
 const router = express.Router();
 
@@ -14,6 +15,12 @@ const STRIPE_PLANS = {
   SCALE: "price_1T9ElhKK5ZvMP3dusIFTijQg",
   GROWTH: "price_1T9EoiKK5ZvMP3du6LNA5PDk",
   ENTERPRISE: "price_1T9EpWKK5ZvMP3duGAsFkUyP",
+};
+
+const PRICE_TO_PLAN = {
+  price_1T9ElhKK5ZvMP3dusIFTijQg: "SCALE",
+  price_1T9EoiKK5ZvMP3du6LNA5PDk: "GROWTH",
+  price_1T9EpWKK5ZvMP3duGAsFkUyP: "ENTERPRISE",
 };
 
 router.post("/checkout", async (req, res) => {
@@ -39,8 +46,9 @@ router.post("/checkout", async (req, res) => {
       success_url: `${process.env.APP_BASE_URL}/login?payment=success`,
       cancel_url: `${process.env.APP_BASE_URL}/login?payment=cancelled`,
       metadata: {
-        orgId,
-        plan,
+        orgId: orgId || "",
+        plan: plan || "",
+        email: email || "",
       },
     });
 
@@ -54,7 +62,52 @@ router.post("/checkout", async (req, res) => {
   }
 });
 
-router.post("/webhook", async (req, res) => {
+async function activateOrganization({
+  orgId,
+  email,
+  plan,
+  customerId,
+  subscriptionId,
+}) {
+  let targetOrgId = null;
+
+  if (orgId && mongoose.isValidObjectId(orgId)) {
+    targetOrgId = orgId;
+  }
+
+  // Fallback: match org from user email when payment link doesn't send metadata
+  if (!targetOrgId && email) {
+    const user = await User.findOne({ email: String(email).toLowerCase().trim() }).lean();
+    if (user?.orgId && mongoose.isValidObjectId(user.orgId)) {
+      targetOrgId = String(user.orgId);
+    }
+  }
+
+  if (!targetOrgId) {
+    console.log("No valid org found for Stripe activation", {
+      orgId,
+      email,
+      plan,
+    });
+    return false;
+  }
+
+  await Organization.findByIdAndUpdate(targetOrgId, {
+    status: "active",
+    isActive: true,
+    billingStatus: "active",
+    plan: plan || "GROWTH",
+    "billing.status": "active",
+    "billing.plan": plan || "GROWTH",
+    "billing.stripeCustomerId": customerId || null,
+    "billing.stripeSubscriptionId": subscriptionId || null,
+  });
+
+  console.log("Organization billing activated:", targetOrgId);
+  return true;
+}
+
+router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
   let event;
@@ -77,33 +130,68 @@ router.post("/webhook", async (req, res) => {
     console.log("Stripe webhook received:", eventType);
 
     if (eventType === "checkout.session.completed") {
-      const orgId = data.metadata?.orgId;
-      const plan = data.metadata?.plan;
+      const metadataOrgId = data.metadata?.orgId || "";
+      const metadataPlan = data.metadata?.plan || "";
+      const metadataEmail = data.metadata?.email || "";
 
-      // Ignore Stripe dashboard test events or invalid Mongo ids
-      if (!orgId || !mongoose.isValidObjectId(orgId)) {
-        console.log("Skipping test webhook event — invalid orgId:", orgId);
-        return res.json({ received: true, skipped: true });
+      const email =
+        metadataEmail ||
+        data.customer_details?.email ||
+        data.customer_email ||
+        "";
+
+      let plan = metadataPlan;
+
+      if (!plan && Array.isArray(data.line_items?.data) && data.line_items.data[0]?.price?.id) {
+        plan = PRICE_TO_PLAN[data.line_items.data[0].price.id] || "";
       }
 
-      await Organization.findByIdAndUpdate(orgId, {
-        "billing.status": "active",
-        "billing.stripeCustomerId": data.customer || null,
-        "billing.stripeSubscriptionId": data.subscription || null,
-        "billing.plan": plan || "unknown",
-      });
+      // If line items are not present on the event object, fetch the session with line items
+      if (!plan) {
+        const fullSession = await stripe.checkout.sessions.retrieve(data.id, {
+          expand: ["line_items.data.price"],
+        });
 
-      console.log("Organization billing activated:", orgId);
+        const priceId = fullSession?.line_items?.data?.[0]?.price?.id;
+        if (priceId) {
+          plan = PRICE_TO_PLAN[priceId] || "";
+        }
+      }
+
+      await activateOrganization({
+        orgId: metadataOrgId,
+        email,
+        plan,
+        customerId: data.customer || null,
+        subscriptionId: data.subscription || null,
+      });
     }
 
     if (eventType === "invoice.payment_succeeded") {
       const subscriptionId = data.subscription;
+      const customerId = data.customer;
+      const email = data.customer_email || data.customer_details?.email || "";
 
       if (subscriptionId) {
-        await Organization.findOneAndUpdate(
+        const existingOrg = await Organization.findOneAndUpdate(
           { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": "active" }
+          {
+            "billing.status": "active",
+            billingStatus: "active",
+            status: "active",
+            isActive: true,
+          }
         );
+
+        if (!existingOrg) {
+          await activateOrganization({
+            orgId: "",
+            email,
+            plan: "",
+            customerId,
+            subscriptionId,
+          });
+        }
 
         console.log("Billing marked active for subscription:", subscriptionId);
       }
@@ -115,7 +203,10 @@ router.post("/webhook", async (req, res) => {
       if (subscriptionId) {
         await Organization.findOneAndUpdate(
           { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": "past_due" }
+          {
+            "billing.status": "past_due",
+            billingStatus: "past_due",
+          }
         );
 
         console.log("Billing marked past_due for subscription:", subscriptionId);
@@ -128,7 +219,10 @@ router.post("/webhook", async (req, res) => {
       if (subscriptionId) {
         await Organization.findOneAndUpdate(
           { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": "cancelled" }
+          {
+            "billing.status": "cancelled",
+            billingStatus: "cancelled",
+          }
         );
 
         console.log("Billing marked cancelled for subscription:", subscriptionId);
@@ -142,7 +236,10 @@ router.post("/webhook", async (req, res) => {
       if (subscriptionId) {
         await Organization.findOneAndUpdate(
           { "billing.stripeSubscriptionId": subscriptionId },
-          { "billing.status": status }
+          {
+            "billing.status": status,
+            billingStatus: status,
+          }
         );
 
         console.log(

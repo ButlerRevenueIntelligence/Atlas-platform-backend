@@ -71,14 +71,11 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
-/** -------------------- STRIPE WEBHOOK RAW BODY FIRST -------------------- */
-/** This must be before express.json() so Stripe signature verification works */
-app.use(
-  "/api/billing/webhook",
-  express.raw({ type: "application/json" })
-);
+/** -------------------- STRIPE/BILLING ROUTES FIRST -------------------- */
+/** billingRoutes contains /webhook and must load before express.json() */
+app.use("/api/billing", billingRoutes);
 
-/** -------------------- BODY PARSERS AFTER WEBHOOK -------------------- */
+/** -------------------- BODY PARSERS AFTER BILLING WEBHOOK -------------------- */
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "2mb" }));
 
@@ -132,9 +129,6 @@ app.use("/api/ai", aiRoutes);
 app.use("/api/export", exportRoutes);
 app.use("/api/attribution", attributionRoutes);
 app.use("/api/operator", operatorRoutes);
-
-/** Billing and Stripe routes */
-app.use("/api/billing", billingRoutes);
 app.use("/api/stripe", stripeRoutes);
 
 /** -------------------- 404 fallback LAST -------------------- */
