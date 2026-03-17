@@ -26,16 +26,24 @@ const FULL_PERMS = [
 ];
 
 const STRIPE_PLANS = {
-  SCALE: "price_1T9ElhKK5ZvMP3dusIFTijQg",
-  GROWTH: "price_1T9EoiKK5ZvMP3du6LNA5PDk",
-  ENTERPRISE: "price_1T9EpWKK5ZvMP3duGAsFkUyP",
+  CORE: process.env.STRIPE_PRICE_CORE || "price_1T9ElhKK5ZvMP3dusIFTijQg",
+  GROWTH: process.env.STRIPE_PRICE_GROWTH || "price_1T9EoiKK5ZvMP3du6LNA5PDk",
+  ENTERPRISE: process.env.STRIPE_PRICE_ENTERPRISE || "price_1T9EpWKK5ZvMP3duGAsFkUyP",
 };
 
 const PRICE_TO_PLAN = {
-  price_1T9ElhKK5ZvMP3dusIFTijQg: "SCALE",
-  price_1T9EoiKK5ZvMP3du6LNA5PDk: "GROWTH",
-  price_1T9EpWKK5ZvMP3duGAsFkUyP: "ENTERPRISE",
+  [STRIPE_PLANS.CORE]: "CORE",
+  [STRIPE_PLANS.GROWTH]: "GROWTH",
+  [STRIPE_PLANS.ENTERPRISE]: "ENTERPRISE",
 };
+
+function normalizePlan(plan = "") {
+  const p = String(plan || "").toUpperCase().trim();
+  if (p === "SCALE") return "CORE";
+  if (p === "GROWTH") return "GROWTH";
+  if (p === "ENTERPRISE") return "ENTERPRISE";
+  return "CORE";
+}
 
 function slugify(value = "") {
   return String(value)
@@ -52,7 +60,6 @@ async function uniqueOrgSlug(baseName) {
   let slug = base;
   let i = 1;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const exists = await Organization.findOne({ slug }).lean();
     if (!exists) return slug;
@@ -68,7 +75,8 @@ router.post("/checkout", async (req, res) => {
   try {
     const { email, orgId, plan } = req.body;
 
-    const priceId = STRIPE_PLANS[plan];
+    const normalizedPlan = normalizePlan(plan);
+    const priceId = STRIPE_PLANS[normalizedPlan];
 
     if (!priceId) {
       return res.status(400).json({ error: "Invalid plan selected" });
@@ -83,8 +91,15 @@ router.post("/checkout", async (req, res) => {
       cancel_url: `${process.env.APP_BASE_URL}/login?payment=cancelled`,
       metadata: {
         orgId: orgId || "",
-        plan: plan || "",
+        plan: normalizedPlan,
         email: email || "",
+      },
+      subscription_data: {
+        metadata: {
+          orgId: orgId || "",
+          plan: normalizedPlan,
+          email: email || "",
+        },
       },
     });
 
@@ -175,7 +190,7 @@ async function createClientWorkspaceAndUser({
             type: "client",
             slug,
             ownerId: createdUser._id,
-            plan: plan || "GROWTH",
+            plan: normalizePlan(plan),
             demoCompleted: true,
             approvedForAccess: true,
             accessStatus: "active",
@@ -193,6 +208,7 @@ async function createClientWorkspaceAndUser({
       ).then((docs) => docs[0]);
 
       createdUser.orgId = createdOrg._id;
+      createdUser.activeWorkspace = createdOrg._id;
       await createdUser.save({ session });
 
       createdMembership = await Membership.create(
@@ -200,6 +216,7 @@ async function createClientWorkspaceAndUser({
           {
             userId: createdUser._id,
             orgId: createdOrg._id,
+            workspaceId: createdOrg._id,
             role: "owner",
             permissions: FULL_PERMS,
             status: "active",
@@ -215,6 +232,7 @@ async function createClientWorkspaceAndUser({
   console.log("Created new Atlas client workspace:", {
     email: normalizedEmail,
     orgId: String(createdOrg?._id || ""),
+    plan: normalizePlan(plan),
     tempPassword,
   });
 
@@ -242,7 +260,7 @@ async function activateExistingOrganization({
   }
 
   await Organization.findByIdAndUpdate(targetOrgId, {
-    plan: plan || "GROWTH",
+    plan: normalizePlan(plan),
     demoCompleted: true,
     approvedForAccess: true,
     accessStatus: "active",
@@ -267,10 +285,12 @@ async function ensurePaidClientAccess({
   priceId,
   currentPeriodEnd,
 }) {
+  const normalizedPlan = normalizePlan(plan);
+
   const activatedExisting = await activateExistingOrganization({
     orgId,
     email,
-    plan,
+    plan: normalizedPlan,
     customerId,
     subscriptionId,
     priceId,
@@ -287,7 +307,7 @@ async function ensurePaidClientAccess({
     await activateExistingOrganization({
       orgId: String(existingUser.orgId),
       email,
-      plan,
+      plan: normalizedPlan,
       customerId,
       subscriptionId,
       priceId,
@@ -298,7 +318,7 @@ async function ensurePaidClientAccess({
 
   const created = await createClientWorkspaceAndUser({
     email,
-    plan,
+    plan: normalizedPlan,
     customerId,
     subscriptionId,
     priceId,
@@ -311,6 +331,7 @@ async function ensurePaidClientAccess({
       tempPassword: created.tempPassword,
       email,
       orgId: String(created.org._id),
+      plan: normalizedPlan,
     };
   }
 
@@ -344,7 +365,7 @@ router.post(
 
       if (eventType === "checkout.session.completed") {
         const metadataOrgId = data.metadata?.orgId || "";
-        const metadataPlan = data.metadata?.plan || "";
+        const metadataPlan = normalizePlan(data.metadata?.plan || "");
         const metadataEmail = data.metadata?.email || "";
 
         const email =
@@ -363,7 +384,7 @@ router.post(
         priceId = fullSession?.line_items?.data?.[0]?.price?.id || null;
 
         if (!plan && priceId) {
-          plan = PRICE_TO_PLAN[priceId] || "";
+          plan = normalizePlan(PRICE_TO_PLAN[priceId] || "");
         }
 
         const currentPeriodEndUnix =
@@ -388,7 +409,7 @@ router.post(
         const subscriptionId = data.subscription;
         const customerId = data.customer;
         const priceId = data.lines?.data?.[0]?.price?.id || null;
-        const plan = priceId ? PRICE_TO_PLAN[priceId] || "" : "";
+        const plan = normalizePlan(priceId ? PRICE_TO_PLAN[priceId] || "" : "");
         const periodEndUnix = data.lines?.data?.[0]?.period?.end || null;
         const email = data.customer_email || "";
 
@@ -400,7 +421,7 @@ router.post(
               accessStatus: "active",
               approvedForAccess: true,
               demoCompleted: true,
-              ...(plan ? { plan } : {}),
+              plan,
               "billing.stripeCustomerId": customerId || null,
               "billing.stripePriceId": priceId || null,
               "billing.status": "active",
@@ -468,7 +489,7 @@ router.post(
         const subscriptionId = data.id;
         const status = data.status;
         const priceId = data.items?.data?.[0]?.price?.id || null;
-        const plan = priceId ? PRICE_TO_PLAN[priceId] || "" : "";
+        const plan = normalizePlan(priceId ? PRICE_TO_PLAN[priceId] || "" : "");
         const currentPeriodEndUnix = data.current_period_end || null;
 
         if (subscriptionId) {
@@ -487,7 +508,7 @@ router.post(
           await Organization.findOneAndUpdate(
             { "billing.stripeSubscriptionId": subscriptionId },
             {
-              ...(plan ? { plan } : {}),
+              plan,
               paymentStatus: mappedPaymentStatus,
               accessStatus: mappedAccessStatus,
               approvedForAccess: mappedAccessStatus === "active",
