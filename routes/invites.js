@@ -179,16 +179,19 @@ router.post("/", requireAuth, async (req, res) => {
         code: "WORKSPACE_NOT_FOUND",
       });
     }
-    
+
+    // Allow invites in development; enforce billing only in production
     if (
-      workspace.billing?.status !== "active" &&
+      org?.billing?.status !== "active" &&
       process.env.NODE_ENV === "production"
     ) {
       return res.status(403).json({
-        error: "Invites can only be created for active workspaces with approved billing."
+        ok: false,
+        message:
+          "Invites can only be created for active workspaces with approved billing.",
+        code: "WORKSPACE_BILLING_INACTIVE",
       });
     }
-    
 
     const email = String(req.body?.email || "").trim().toLowerCase();
     const role = String(req.body?.role || "analyst").trim().toLowerCase();
