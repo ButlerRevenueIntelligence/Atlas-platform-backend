@@ -33,6 +33,7 @@ import seedRoutes from "./routes/seed.js";
 import exportRoutes from "./routes/export.js";
 import attributionRoutes from "./routes/attribution.js";
 import stripeRoutes from "./routes/stripe.js";
+import workspaceRoutes from "./routes/workspaces.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -58,12 +59,13 @@ const corsOptions = {
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "x-org-id",
-    "X-Requested-With",
-    "stripe-signature",
-  ],
+  "Content-Type",
+  "Authorization",
+  "x-org-id",
+  "x-workspace-id",
+  "X-Requested-With",
+  "stripe-signature",
+],
   exposedHeaders: ["x-org-id"],
   optionsSuccessStatus: 204,
 };
@@ -94,11 +96,14 @@ app.get("/api/health", (req, res) => {
     mongoReadyState: mongoose.connection?.readyState ?? null,
     mongoHost: mongoose.connection?.host ?? null,
     mongoDb: mongoose.connection?.name ?? null,
+    env: process.env.NODE_ENV || "development",
   });
 });
 
 /** -------------------- Routes -------------------- */
 app.use("/api/auth", authRoutes);
+app.use("/api/workspaces", workspaceRoutes);
+
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/integrations", integrationsRoute);
 app.use("/api/pipeline", pipelineRoutes);
@@ -140,9 +145,25 @@ app.use((req, res) => {
   });
 });
 
+/** -------------------- Global error handler -------------------- */
+app.use((err, req, res, next) => {
+  console.error("❌ Express error:", err);
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  return res.status(err.status || 500).json({
+    ok: false,
+    message: err.message || "Internal Server Error",
+  });
+});
+
 /** -------------------- Boot -------------------- */
 const PORT = Number(process.env.PORT) || 5001;
 const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
+
+let server;
 
 async function start() {
   try {
@@ -160,7 +181,7 @@ async function start() {
     await mongoose.connect(MONGO_URI);
     console.log("✅ MongoDB connected");
 
-    app.listen(PORT, "0.0.0.0", () => {
+    server = app.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Server listening on port ${PORT}`);
     });
   } catch (err) {
@@ -171,6 +192,7 @@ async function start() {
 
 start();
 
+/** -------------------- Process safety -------------------- */
 process.on("unhandledRejection", (err) => {
   console.error("❌ unhandledRejection:", err);
 });
@@ -178,3 +200,30 @@ process.on("unhandledRejection", (err) => {
 process.on("uncaughtException", (err) => {
   console.error("❌ uncaughtException:", err);
 });
+
+async function shutdown(signal) {
+  try {
+    console.log(`\n${signal} received. Shutting down gracefully...`);
+
+    if (server) {
+      await new Promise((resolve, reject) => {
+        server.close((err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      console.log("✅ HTTP server closed");
+    }
+
+    await mongoose.connection.close();
+    console.log("✅ MongoDB connection closed");
+
+    process.exit(0);
+  } catch (err) {
+    console.error("❌ Error during shutdown:", err);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

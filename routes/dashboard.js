@@ -4,8 +4,6 @@ import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
-
-// ✅ Add this model (from earlier fix)
 import MetricDaily from "../models/MetricDaily.js";
 
 const router = express.Router();
@@ -13,7 +11,9 @@ const router = express.Router();
 const toObjectId = (v) => {
   if (!v) return null;
   const s = String(v);
-  return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
+  return mongoose.Types.ObjectId.isValid(s)
+    ? new mongoose.Types.ObjectId(s)
+    : null;
 };
 
 const coerceNumber = (v, fallback = 0) => {
@@ -21,97 +21,172 @@ const coerceNumber = (v, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-// Some older data can accidentally store orgId as string.
-// This lets dashboard still work even if some docs were inserted with string orgId.
+function pickUserId(req) {
+  return (
+    toObjectId(req.user?.userId) ||
+    toObjectId(req.user?.id) ||
+    toObjectId(req.user?._id) ||
+    null
+  );
+}
+
+function pickOrgId(req) {
+  const headerOrgId =
+    toObjectId(req.headers["x-org-id"]) ||
+    toObjectId(req.headers["x-workspace-id"]) ||
+    null;
+
+  const defaultOrgId =
+    toObjectId(req.user?.orgId) ||
+    toObjectId(req.user?.organizationId) ||
+    toObjectId(req.user?.org) ||
+    toObjectId(req.user?.activeWorkspace) ||
+    null;
+
+  return headerOrgId || defaultOrgId || null;
+}
+
+// Supports older records where orgId may have been stored as string
 const orgIdMatch = (orgId) => ({
-  $or: [
-    { orgId }, // ObjectId
-    { orgId: String(orgId) }, // string
-  ],
+  $or: [{ orgId }, { orgId: String(orgId) }],
 });
 
 const normalizeMetric = (m) => {
   const d = m?.date ? new Date(m.date) : null;
+  const valid = d && !Number.isNaN(d.getTime());
+
   return {
-    // keep both to be safe for frontend chart keys
-    date: d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : null, // YYYY-MM-DD
-    dateISO: d && !Number.isNaN(d.getTime()) ? d.toISOString() : null,
+    date: valid ? d.toISOString().slice(0, 10) : null,
+    dateISO: valid ? d.toISOString() : null,
     revenue: coerceNumber(m?.revenue, 0),
     spend: coerceNumber(m?.spend, 0),
     leads: coerceNumber(m?.leads, 0),
   };
 };
 
+async function getOrgContext(req) {
+  const userId = pickUserId(req);
+  if (!userId) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Unauthorized",
+      code: "UNAUTHORIZED",
+    };
+  }
+
+  const orgId = pickOrgId(req);
+  if (!orgId) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Missing org context (x-org-id).",
+      code: "ORG_CONTEXT_REQUIRED",
+      userId,
+      orgId: null,
+    };
+  }
+
+  const membership = await Membership.findOne({
+    userId,
+    orgId,
+    status: { $ne: "disabled" },
+  })
+    .select("_id role status userId orgId")
+    .lean();
+
+  if (!membership) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Not a member of this workspace",
+      code: "ORG_ACCESS_DENIED",
+    };
+  }
+
+  return {
+    ok: true,
+    userId,
+    orgId,
+    membership,
+  };
+}
+
 /**
  * GET /api/dashboard
- * Org-scoped dashboard using x-org-id header (tenant switch)
- * Validates membership to prevent spoofing.
+ * Workspace-aware / org-scoped dashboard
  */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const db = mongoose.connection;
+    const ctx = await getOrgContext(req);
 
-    const userId = toObjectId(req.user?.userId || req.user?._id);
-    if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
-
-    // Prefer org from header (workspace switch), fallback to user's default org
-    const headerOrgId = toObjectId(req.headers["x-org-id"]);
-    const defaultOrgId = toObjectId(req.user?.orgId);
-    const orgId = headerOrgId || defaultOrgId;
-
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
-
-    // Validate user belongs to this org (prevents x-org-id spoofing)
-    const membership = await Membership.findOne({
-      userId,
-      orgId,
-      status: { $ne: "disabled" },
-    })
-      .select("_id role status")
-      .lean();
-
-    if (!membership) {
-      return res.status(403).json({ ok: false, message: "Not a member of this workspace" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
     }
 
-    // Pull org (for display in UI)
-    const org = await Organization.findById(orgId).select("_id name").lean();
+    const db = mongoose.connection;
 
-    // Org-scoped data pulls
-    const integrations = await db.collection("integrations").find(orgIdMatch(orgId)).toArray();
-    const deals = await db.collection("deals").find(orgIdMatch(orgId)).toArray();
+    const org = await Organization.findById(ctx.orgId)
+      .select("_id name slug plan status billing")
+      .lean();
 
-    // ✅ Metrics (last 30 days) — prefer Mongoose model, fallback to raw collection
+    // Pull tenant-scoped data
+    const integrations = await db
+      .collection("integrations")
+      .find(orgIdMatch(ctx.orgId))
+      .toArray();
+
+    const deals = await db
+      .collection("deals")
+      .find(orgIdMatch(ctx.orgId))
+      .toArray();
+
     let metricsRaw = [];
     try {
-      metricsRaw = await MetricDaily.find(orgIdMatch(orgId)).sort({ date: -1 }).limit(30).lean();
+      metricsRaw = await MetricDaily.find(orgIdMatch(ctx.orgId))
+        .sort({ date: -1 })
+        .limit(30)
+        .lean();
     } catch (e) {
-      // fallback if model missing/misconfigured in some environments
       metricsRaw = await db
         .collection("metrics_daily")
-        .find(orgIdMatch(orgId))
+        .find(orgIdMatch(ctx.orgId))
         .sort({ date: -1 })
         .limit(30)
         .toArray();
     }
 
-    // Normalize and sort ASC for charts (Recharts usually expects left-to-right time)
     const metrics = (metricsRaw || [])
       .map(normalizeMetric)
-      .filter((m) => !!m.date) // keep only valid dates
+      .filter((m) => !!m.date)
       .sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
     const dataAsOf =
-      metrics?.length && metrics[metrics.length - 1]?.dateISO
+      metrics.length && metrics[metrics.length - 1]?.dateISO
         ? metrics[metrics.length - 1].dateISO
         : new Date().toISOString();
 
     const lastUpdated = new Date().toISOString();
 
-    // --- KPI calculations ---
-    const revenue30d = metrics.reduce((sum, m) => sum + coerceNumber(m.revenue, 0), 0);
-    const spend30d = metrics.reduce((sum, m) => sum + coerceNumber(m.spend, 0), 0);
-    const leads30d = metrics.reduce((sum, m) => sum + coerceNumber(m.leads, 0), 0);
+    // KPI calculations
+    const revenue30d = metrics.reduce(
+      (sum, m) => sum + coerceNumber(m.revenue, 0),
+      0
+    );
+
+    const spend30d = metrics.reduce(
+      (sum, m) => sum + coerceNumber(m.spend, 0),
+      0
+    );
+
+    const leads30d = metrics.reduce(
+      (sum, m) => sum + coerceNumber(m.leads, 0),
+      0
+    );
 
     const cac = leads30d > 0 ? spend30d / leads30d : 0;
 
@@ -123,10 +198,21 @@ router.get("/", requireAuth, async (req, res) => {
       return sum + v;
     }, 0);
 
+    const openDeals = (deals || []).filter(
+      (d) => !["Closed Won", "Closed Lost"].includes(String(d?.stage || ""))
+    ).length;
+
+    const wonDeals = (deals || []).filter(
+      (d) => String(d?.stage || "") === "Closed Won"
+    ).length;
+
+    const lostDeals = (deals || []).filter(
+      (d) => String(d?.stage || "") === "Closed Lost"
+    ).length;
+
     const avgDailyRevenue = metrics.length ? revenue30d / metrics.length : 0;
     const forecast90d = avgDailyRevenue * 90;
 
-    // Demo health score
     let revenueHealth = 70;
     if (pipelineValue > 0) revenueHealth += 10;
     if (cac > 0 && cac < 300) revenueHealth += 10;
@@ -139,11 +225,36 @@ router.get("/", requireAuth, async (req, res) => {
       dataAsOf,
 
       org,
+      activeWorkspace: org
+        ? {
+            _id: org._id,
+            id: org._id,
+            name: org.name || "Workspace",
+            slug: org.slug || null,
+            plan: org.plan || null,
+            status: org.status || null,
+            billing: org.billing || null,
+          }
+        : null,
+
       membership: {
-        role: (membership.role || "analyst").toString(),
-        status: (membership.status || "active").toString(),
+        role: String(ctx.membership.role || "analyst"),
+        status: String(ctx.membership.status || "active"),
       },
 
+      summary: {
+        revenue: Math.round(revenue30d),
+        pipelineValue: Math.round(pipelineValue),
+        cac: Math.round(cac),
+        forecast90d: Math.round(forecast90d),
+        revenueHealth,
+        openDeals,
+        wonDeals,
+        lostDeals,
+        integrationsCount: integrations.length,
+      },
+
+      // Keep legacy top-level fields for compatibility
       revenue: Math.round(revenue30d),
       pipelineValue: Math.round(pipelineValue),
       cac: Math.round(cac),
@@ -152,11 +263,14 @@ router.get("/", requireAuth, async (req, res) => {
 
       integrations,
       deals,
-      metrics, // ✅ now guaranteed normalized + sorted for charts
+      metrics,
     });
   } catch (err) {
     console.error("Dashboard route error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Server error" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Server error",
+    });
   }
 });
 

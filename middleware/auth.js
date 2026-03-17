@@ -1,4 +1,3 @@
-// backend/middleware/auth.js
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import User from "../models/User.js";
@@ -11,19 +10,40 @@ const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || "admin@butlerco.com"
   .trim()
   .toLowerCase();
 
-function isSuperAdminEmail(email) {
-  return String(email || "").trim().toLowerCase() === SUPER_ADMIN_EMAIL;
-}
-
 const toStr = (v) => (v == null ? "" : String(v));
 const isObjId = (v) => mongoose.Types.ObjectId.isValid(toStr(v));
 
 function getToken(req) {
   const h = req.headers.authorization || req.headers.Authorization;
   if (!h) return null;
+
   const parts = String(h).split(" ");
-  if (parts.length === 2 && parts[0].toLowerCase() === "bearer") return parts[1];
+  if (parts.length === 2 && parts[0].toLowerCase() === "bearer") {
+    return parts[1];
+  }
+
   return null;
+}
+
+function normalizeRole(role) {
+  return String(role || "").trim().toLowerCase();
+}
+
+function normalizeStatus(status) {
+  return String(status || "").trim().toLowerCase();
+}
+
+function resolveOrgId(req, decoded, user) {
+  return (
+    req.headers["x-org-id"] ||
+    req.headers["x-workspace-id"] ||
+    decoded?.activeWorkspace ||
+    decoded?.orgId ||
+    decoded?.organizationId ||
+    user?.activeWorkspace ||
+    user?.orgId ||
+    null
+  );
 }
 
 async function findMembershipForOrg({ userId, orgId }) {
@@ -38,10 +58,14 @@ async function findMembershipForOrg({ userId, orgId }) {
 export async function requireUser(req, res, next) {
   try {
     const token = getToken(req);
-    if (!token) return res.status(401).json({ ok: false, error: "Missing auth token" });
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "Missing auth token" });
+    }
 
     const secret = process.env.JWT_SECRET;
-    if (!secret) return res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
+    if (!secret) {
+      return res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
+    }
 
     let decoded;
     try {
@@ -51,19 +75,34 @@ export async function requireUser(req, res, next) {
     }
 
     const userId = decoded?.userId || decoded?.id || decoded?._id;
-    if (!userId) return res.status(401).json({ ok: false, error: "Invalid token payload" });
+    if (!userId) {
+      return res.status(401).json({ ok: false, error: "Invalid token payload" });
+    }
 
-    const user = await User.findById(userId).select("_id email name orgId role").lean();
-    if (!user) return res.status(401).json({ ok: false, error: "User not found" });
+    const user = await User.findById(userId)
+      .select("_id email name orgId activeWorkspace role status")
+      .lean();
+
+    if (!user) {
+      return res.status(401).json({ ok: false, error: "User not found" });
+    }
+
+    const userStatus = normalizeStatus(user.status || "active");
+    if (userStatus === "disabled" || userStatus === "suspended") {
+      return res.status(403).json({ ok: false, error: "User account is inactive" });
+    }
 
     req.user = {
       id: String(user._id),
       userId: String(user._id),
       email: user.email,
       name: user.name,
-      role: toStr(user?.role || "").toLowerCase() || null,
+      role: normalizeRole(user.role) || null,
       tokenOrgId: decoded?.orgId || decoded?.organizationId || null,
+      tokenActiveWorkspace: decoded?.activeWorkspace || null,
       defaultOrgId: user?.orgId ? String(user.orgId) : null,
+      activeWorkspace: user?.activeWorkspace ? String(user.activeWorkspace) : null,
+      status: userStatus,
     };
 
     next();
@@ -78,52 +117,112 @@ export async function requireAuth(req, res, next) {
     await new Promise((resolve) => requireUser(req, res, resolve));
     if (!req.user) return;
 
-    const headerOrgId = req.headers["x-org-id"] || req.headers["X-Org-Id"];
-    const resolvedOrgId = headerOrgId || req.user.tokenOrgId || req.user.defaultOrgId || null;
+    const resolvedOrgId = resolveOrgId(
+      req,
+      {
+        orgId: req.user.tokenOrgId,
+        activeWorkspace: req.user.tokenActiveWorkspace,
+      },
+      {
+        orgId: req.user.defaultOrgId,
+        activeWorkspace: req.user.activeWorkspace,
+      }
+    );
 
-    // ✅ SUPER ADMIN OVERRIDE (fix: provide plan + perms + permissions)
-    if (req.user.email === SUPER_ADMIN_EMAIL) {
-      const orgId = resolvedOrgId;
+    // SUPER ADMIN OVERRIDE
+    if (String(req.user.email || "").trim().toLowerCase() === SUPER_ADMIN_EMAIL) {
+      const orgId = resolvedOrgId ? String(resolvedOrgId) : null;
+
+      let org = null;
+      if (orgId && isObjId(orgId)) {
+        org = await Organization.findById(orgId).select("_id name slug plan status billing").lean();
+      }
 
       req.user = {
         ...req.user,
-        orgId: orgId ? String(orgId) : null,
-        orgName: "Butler & Co",
-        plan: "ENTERPRISE",
+        orgId,
+        activeWorkspace: orgId,
+        orgName: org?.name || "Butler & Co",
+        workspaceName: org?.name || "Butler & Co",
+        workspaceSlug: org?.slug || null,
+        plan: String(org?.plan || "ENTERPRISE").toUpperCase(),
         orgRole: "owner",
-        perms: ["*"],        // <-- THIS is what /auth/me reads
-        permissions: ["*"],  // <-- keep compatibility with requirePerm()
+        workspaceRole: "owner",
+        perms: ["*"],
+        permissions: ["*"],
+        membership: {
+          role: "owner",
+          status: "active",
+        },
       };
 
       return next();
     }
 
     if (!resolvedOrgId) {
-      return res.status(400).json({ ok: false, error: "Missing org context (x-org-id)" });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing org context (x-org-id)",
+        code: "ORG_CONTEXT_REQUIRED",
+      });
     }
 
-    const membership = await findMembershipForOrg({ userId: req.user.userId, orgId: resolvedOrgId });
-    if (!membership) return res.status(403).json({ ok: false, error: "Not authorized for this org" });
-    if (membership.status && membership.status !== "active") {
-      return res.status(403).json({ ok: false, error: "Membership inactive" });
+    const membership = await findMembershipForOrg({
+      userId: req.user.userId,
+      orgId: resolvedOrgId,
+    });
+
+    if (!membership) {
+      return res.status(403).json({
+        ok: false,
+        error: "Not authorized for this org",
+        code: "ORG_ACCESS_DENIED",
+      });
     }
 
-    const org = await Organization.findById(resolvedOrgId).select("_id name plan").lean();
+    const membershipStatus = normalizeStatus(membership.status || "active");
+    if (membershipStatus === "disabled" || membershipStatus === "suspended") {
+      return res.status(403).json({
+        ok: false,
+        error: "Membership inactive",
+        code: "MEMBERSHIP_INACTIVE",
+      });
+    }
+
+    const org = await Organization.findById(resolvedOrgId)
+      .select("_id name slug plan status accessStatus billing paymentStatus")
+      .lean();
+
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        error: "Workspace not found",
+        code: "WORKSPACE_NOT_FOUND",
+      });
+    }
+
     const plan = String(org?.plan || "SCALE").toUpperCase();
-
-    const orgRole = String(membership?.role || "analyst").toLowerCase();
+    const orgRole = normalizeRole(membership?.role || "analyst");
     const overrides = Array.isArray(membership?.permissions) ? membership.permissions : [];
     const perms = computePermissions({ plan, role: orgRole, overrides });
 
     req.user = {
       ...req.user,
       orgId: String(resolvedOrgId),
+      activeWorkspace: String(resolvedOrgId),
       orgName: org?.name || "",
+      workspaceName: org?.name || "",
+      workspaceSlug: org?.slug || null,
       plan,
       orgRole,
-      perms,          // <-- /auth/me expects this
-      permissions: perms, // <-- requirePerm() expects this
+      workspaceRole: orgRole,
+      perms,
+      permissions: perms,
       membership,
+      billing: org?.billing || {
+        status: org?.paymentStatus || "inactive",
+      },
+      workspaceStatus: org?.status || org?.accessStatus || null,
     };
 
     next();
@@ -134,13 +233,15 @@ export async function requireAuth(req, res, next) {
 }
 
 export function requireOrgRole(minRole = "analyst") {
-  const order = ["sales", "analyst", "manager", "admin", "owner"];
-  const minIdx = order.indexOf(String(minRole).toLowerCase());
+  const order = ["viewer", "member", "analyst", "manager", "admin", "owner"];
+  const minIdx = order.indexOf(normalizeRole(minRole));
 
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ ok: false, error: "Unauthorized" });
+    if (!req.user) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
 
-    const role = String(req.user.orgRole || "analyst").toLowerCase();
+    const role = normalizeRole(req.user.orgRole || req.user.workspaceRole || "analyst");
     const idx = order.indexOf(role);
 
     if (idx === -1 || idx < minIdx) {
@@ -153,13 +254,19 @@ export function requireOrgRole(minRole = "analyst") {
 
 export function requirePerm(perm) {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ ok: false, error: "Unauthorized" });
+    if (!req.user) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
 
     const perms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
     if (perms.includes("*")) return next();
 
     if (!perm || !perms.includes(perm)) {
-      return res.status(403).json({ ok: false, error: "Insufficient permissions", perm });
+      return res.status(403).json({
+        ok: false,
+        error: "Insufficient permissions",
+        perm,
+      });
     }
 
     next();

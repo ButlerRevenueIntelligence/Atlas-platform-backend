@@ -5,7 +5,7 @@ const { Schema } = mongoose;
 
 const AccountSchema = new Schema(
   {
-    // Tenant/workspace (the agency org that "owns" this client record)
+    // Tenant/workspace that owns this account
     orgId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
@@ -13,7 +13,15 @@ const AccountSchema = new Schema(
       index: true,
     },
 
-    // Who created/owns the record (optional but useful)
+    // Future-friendly alias for workspace-based architecture
+    workspaceId: {
+      type: Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true,
+    },
+
+    // User who created / owns the record
     ownerUserId: {
       type: Schema.Types.ObjectId,
       ref: "User",
@@ -21,10 +29,32 @@ const AccountSchema = new Schema(
       default: null,
     },
 
-    // Client company details
-    name: { type: String, required: true, trim: true },
-    industry: { type: String, default: "", trim: true },
-    website: { type: String, default: "", trim: true },
+    // Client / company details
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+
+    industry: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    website: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    domain: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
 
     status: {
       type: String,
@@ -33,15 +63,57 @@ const AccountSchema = new Schema(
       index: true,
     },
 
-    notes: { type: String, default: "", trim: true },
+    notes: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    archivedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true }
 );
 
-// Prevent duplicate client names per org (optional but recommended)
+/**
+ * Keep workspaceId aligned with orgId during transition
+ */
+AccountSchema.pre("save", function (next) {
+  if (!this.workspaceId && this.orgId) {
+    this.workspaceId = this.orgId;
+  }
+
+  if (!this.domain && this.website) {
+    try {
+      const normalized = this.website.startsWith("http")
+        ? this.website
+        : `https://${this.website}`;
+      const url = new URL(normalized);
+      this.domain = url.hostname.replace(/^www\./, "");
+    } catch {
+      this.domain = "";
+    }
+  }
+
+  next();
+});
+
+/**
+ * Unique account name per org/workspace
+ */
 AccountSchema.index({ orgId: 1, name: 1 }, { unique: true });
 
-// Prevent OverwriteModelError in dev/hot reload
-const Account = mongoose.models.Account || mongoose.model("Account", AccountSchema);
+/**
+ * Helpful compound indexes for tenant filtering
+ */
+AccountSchema.index({ orgId: 1, status: 1, createdAt: -1 });
+AccountSchema.index({ orgId: 1, industry: 1 });
+AccountSchema.index({ orgId: 1, archivedAt: 1 });
+
+const Account =
+  mongoose.models.Account || mongoose.model("Account", AccountSchema);
 
 export default Account;

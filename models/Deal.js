@@ -3,23 +3,59 @@ import mongoose from "mongoose";
 
 const activitySchema = new mongoose.Schema(
   {
-    type: { type: String, default: "note" }, // note/call/email/meeting/task/stage_move/system
-    note: { type: String, default: "" },
-    nextAction: { type: String, default: "" },
-    createdAt: { type: Date, default: Date.now },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, default: null },
+    type: {
+      type: String,
+      default: "note",
+      trim: true,
+    }, // note/call/email/meeting/task/stage_move/system
+    note: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    nextAction: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   { _id: false }
 );
 
-const STAGES = ["Discovery", "Proposal", "Follow-Up", "Negotiation", "Closed Won", "Closed Lost"];
+const STAGES = [
+  "Discovery",
+  "Proposal",
+  "Follow-Up",
+  "Negotiation",
+  "Closed Won",
+  "Closed Lost",
+];
 
 const dealSchema = new mongoose.Schema(
   {
+    // Current tenant source of truth
     orgId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Organization",
       required: true,
+      index: true,
+    },
+
+    // Future-friendly workspace alias
+    workspaceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
       index: true,
     },
 
@@ -58,33 +94,104 @@ const dealSchema = new mongoose.Schema(
       max: 1,
     },
 
-    closeDate: { type: Date },
+    closeDate: {
+      type: Date,
+      default: null,
+    },
 
-    // ✅ Execution layer
-    nextAction: { type: String, default: "" },
-    nextActionDueAt: { type: Date, default: null, index: true },
+    // Execution layer
+    nextAction: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
-    // ✅ Activity timeline
-    lastActivityAt: { type: Date, default: null, index: true },
-    lastActivityType: { type: String, default: "" },
-    lastActivityNote: { type: String, default: "" },
-    activities: { type: [activitySchema], default: [] },
+    nextActionDueAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
 
-    // ✅ Win/Loss / Reactivation intel
-    closedAt: { type: Date, default: null, index: true },
-    closedReason: { type: String, default: "" },
-    competitor: { type: String, default: "" },
-    reactivationAt: { type: Date, default: null, index: true },
+    // Activity timeline
+    lastActivityAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    lastActivityType: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    lastActivityNote: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    activities: {
+      type: [activitySchema],
+      default: [],
+    },
+
+    // Outcome / win-loss / reactivation intel
+    closedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    closedReason: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    competitor: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    reactivationAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    archivedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true }
 );
 
-// Helpful compound indexes
+/**
+ * Keep workspaceId aligned with orgId during transition
+ */
+dealSchema.pre("save", function (next) {
+  if (!this.workspaceId && this.orgId) {
+    this.workspaceId = this.orgId;
+  }
+  next();
+});
+
+/**
+ * Helpful compound indexes
+ */
 dealSchema.index({ orgId: 1, stage: 1, createdAt: -1 });
 dealSchema.index({ orgId: 1, clientId: 1, createdAt: -1 });
-
-// extra “work queue” indexes
 dealSchema.index({ orgId: 1, nextActionDueAt: 1 });
 dealSchema.index({ orgId: 1, reactivationAt: 1 });
+dealSchema.index({ orgId: 1, closedAt: 1 });
+dealSchema.index({ orgId: 1, archivedAt: 1 });
+dealSchema.index({ orgId: 1, competitor: 1 });
 
-export default mongoose.model("Deal", dealSchema);
+const Deal = mongoose.models.Deal || mongoose.model("Deal", dealSchema);
+
+export default Deal;

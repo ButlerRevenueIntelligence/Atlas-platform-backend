@@ -3,21 +3,105 @@ import mongoose from "mongoose";
 
 const InviteSchema = new mongoose.Schema(
   {
-    orgId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, required: true },
+    // Primary tenant reference
+    orgId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      required: true,
+      index: true,
+    },
 
-    email: { type: String, required: true, trim: true, lowercase: true, index: true },
-    role: { type: String, default: "analyst" }, // owner/admin/analyst/viewer
-    status: { type: String, default: "pending" }, // pending/accepted/expired/revoked
+    // Future workspace alias
+    workspaceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true,
+    },
 
-    token: { type: String, required: true, unique: true, index: true },
-    expiresAt: { type: Date, required: true, index: true },
-    acceptedAt: { type: Date, default: null },
-    acceptedBy: { type: mongoose.Schema.Types.ObjectId, default: null },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+
+    email: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
+
+    role: {
+      type: String,
+      default: "analyst",
+      enum: ["owner", "admin", "manager", "analyst", "member", "viewer"],
+      index: true,
+    },
+
+    status: {
+      type: String,
+      default: "pending",
+      enum: ["pending", "accepted", "expired", "revoked"],
+      index: true,
+    },
+
+    token: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+
+    expiresAt: {
+      type: Date,
+      required: true,
+      index: true,
+    },
+
+    acceptedAt: {
+      type: Date,
+      default: null,
+    },
+
+    acceptedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
-InviteSchema.index({ orgId: 1, email: 1, status: 1 });
+/**
+ * Bridge orgId -> workspaceId automatically
+ */
+InviteSchema.pre("save", function (next) {
+  if (!this.workspaceId && this.orgId) {
+    this.workspaceId = this.orgId;
+  }
+  next();
+});
 
-export default mongoose.model("Invite", InviteSchema);
+/**
+ * Helpful indexes
+ */
+
+// prevent duplicate pending invites for same email + workspace
+InviteSchema.index(
+  { orgId: 1, email: 1, status: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: "pending" },
+  }
+);
+
+// useful for cleanup jobs
+InviteSchema.index({ expiresAt: 1 });
+
+const Invite =
+  mongoose.models.Invite || mongoose.model("Invite", InviteSchema);
+
+export default Invite;

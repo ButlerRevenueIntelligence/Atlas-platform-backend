@@ -11,47 +11,108 @@ const router = express.Router();
 const toObjectId = (v) => {
   if (!v) return null;
   const s = String(v);
-  return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
+  return mongoose.Types.ObjectId.isValid(s)
+    ? new mongoose.Types.ObjectId(s)
+    : null;
 };
 
 const toDateOrNull = (v) => {
-  if (v === undefined) return undefined; // means "do not change"
+  if (v === undefined) return undefined;
   if (!v) return null;
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
+function pickUserId(req) {
+  return (
+    toObjectId(req.user?.userId) ||
+    toObjectId(req.user?.id) ||
+    toObjectId(req.user?._id) ||
+    null
+  );
+}
+
+function pickOrgId(req) {
+  const headerOrgId =
+    toObjectId(req.headers["x-org-id"]) ||
+    toObjectId(req.headers["x-workspace-id"]) ||
+    null;
+
+  const defaultOrgId =
+    toObjectId(req.user?.orgId) ||
+    toObjectId(req.user?.organizationId) ||
+    toObjectId(req.user?.org) ||
+    toObjectId(req.user?.activeWorkspace) ||
+    null;
+
+  return headerOrgId || defaultOrgId || null;
+}
+
 async function getOrgContext(req) {
-  const userId = toObjectId(req.user?.userId);
-  if (!userId) return { ok: false, status: 401, message: "Unauthorized" };
+  const userId = pickUserId(req);
+  if (!userId) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Unauthorized",
+      code: "UNAUTHORIZED",
+    };
+  }
 
-  const headerOrgId = toObjectId(req.headers["x-org-id"]);
-  const defaultOrgId = toObjectId(req.user?.orgId);
-  const orgId = headerOrgId || defaultOrgId;
-
-  if (!orgId) return { ok: false, status: 200, message: "No org selected", userId, orgId: null };
+  const orgId = pickOrgId(req);
+  if (!orgId) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Missing org context (x-org-id).",
+      code: "ORG_CONTEXT_REQUIRED",
+      userId,
+      orgId: null,
+    };
+  }
 
   const membership = await Membership.findOne({
     userId,
     orgId,
     status: { $ne: "disabled" },
   })
-    .select("_id role status")
+    .select("_id role status userId orgId")
     .lean();
 
-  if (!membership) return { ok: false, status: 403, message: "Not a member of this workspace" };
+  if (!membership) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Not a member of this workspace",
+      code: "ORG_ACCESS_DENIED",
+    };
+  }
 
-  const role = (membership.role || "analyst").toLowerCase();
-  const canWrite = role === "owner" || role === "admin" || role === "manager";
+  const role = String(membership.role || "analyst").toLowerCase();
+  const canWrite = ["owner", "admin", "manager"].includes(role);
 
-  return { ok: true, userId, orgId, membership, canWrite };
+  return {
+    ok: true,
+    userId,
+    orgId,
+    membership,
+    canWrite,
+  };
 }
 
-const STAGES = ["Discovery", "Proposal", "Follow-Up", "Negotiation", "Closed Won", "Closed Lost"];
+const STAGES = [
+  "Discovery",
+  "Proposal",
+  "Follow-Up",
+  "Negotiation",
+  "Closed Won",
+  "Closed Lost",
+];
 
 function normalizeStage(s) {
   const val = (s || "").toString().trim();
   if (!val) return "Discovery";
+
   const lower = val.toLowerCase();
   if (lower.includes("disc")) return "Discovery";
   if (lower.includes("prop")) return "Proposal";
@@ -60,24 +121,37 @@ function normalizeStage(s) {
   if (lower.includes("won")) return "Closed Won";
   if (lower.includes("lost")) return "Closed Lost";
   if (STAGES.includes(val)) return val;
+
   return "Discovery";
 }
 
-const isClosedStage = (stage) => stage === "Closed Won" || stage === "Closed Lost";
+const isClosedStage = (stage) =>
+  stage === "Closed Won" || stage === "Closed Lost";
 
 // LIST deals
 router.get("/", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.orgId) return res.status(200).json({ ok: true, deals: [] });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
 
     const q = (req.query.q || "").toString().trim();
     const stage = (req.query.stage || "").toString().trim();
 
     const filter = { orgId: ctx.orgId };
-    if (stage) filter.stage = normalizeStage(stage);
-    if (q) filter.name = { $regex: q, $options: "i" };
+
+    if (stage) {
+      filter.stage = normalizeStage(stage);
+    }
+
+    if (q) {
+      filter.name = { $regex: q, $options: "i" };
+    }
 
     const deals = await Deal.find(filter)
       .sort({ createdAt: -1 })
@@ -85,10 +159,21 @@ router.get("/", requireAuth, async (req, res) => {
       .populate({ path: "clientId", select: "name industry website status" })
       .lean();
 
-    return res.status(200).json({ ok: true, deals });
+    return res.status(200).json({
+      ok: true,
+      orgId: ctx.orgId,
+      membership: {
+        role: ctx.membership.role,
+        status: ctx.membership.status,
+      },
+      deals,
+    });
   } catch (err) {
     console.error("Deals list error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to list deals" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to list deals",
+    });
   }
 });
 
@@ -96,22 +181,47 @@ router.get("/", requireAuth, async (req, res) => {
 router.get("/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.orgId) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
 
     const id = toObjectId(req.params.id);
-    if (!id) return res.status(400).json({ ok: false, message: "Invalid deal id" });
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid deal id",
+      });
+    }
 
     const deal = await Deal.findOne({ _id: id, orgId: ctx.orgId })
       .populate({ path: "clientId", select: "name industry website status" })
       .lean();
 
-    if (!deal) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!deal) {
+      return res.status(404).json({
+        ok: false,
+        message: "Deal not found",
+      });
+    }
 
-    return res.status(200).json({ ok: true, deal });
+    return res.status(200).json({
+      ok: true,
+      deal,
+      membership: {
+        role: ctx.membership.role,
+        status: ctx.membership.status,
+      },
+    });
   } catch (err) {
     console.error("Deal get error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to get deal" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to get deal",
+    });
   }
 });
 
@@ -119,11 +229,21 @@ router.get("/:id", requireAuth, async (req, res) => {
 router.get("/:id/activity", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.orgId) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
 
     const id = toObjectId(req.params.id);
-    if (!id) return res.status(400).json({ ok: false, message: "Invalid deal id" });
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid deal id",
+      });
+    }
 
     const deal = await Deal.findOne({ _id: id, orgId: ctx.orgId })
       .select(
@@ -131,10 +251,17 @@ router.get("/:id/activity", requireAuth, async (req, res) => {
       )
       .lean();
 
-    if (!deal) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!deal) {
+      return res.status(404).json({
+        ok: false,
+        message: "Deal not found",
+      });
+    }
 
     const activities = Array.isArray(deal.activities) ? deal.activities : [];
-    activities.sort((a, b) => new Date(b?.createdAt || 0) - new Date(a?.createdAt || 0));
+    activities.sort(
+      (a, b) => new Date(b?.createdAt || 0) - new Date(a?.createdAt || 0)
+    );
 
     return res.status(200).json({
       ok: true,
@@ -151,7 +278,10 @@ router.get("/:id/activity", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Deal activity timeline error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to load activity" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to load activity",
+    });
   }
 });
 
@@ -159,19 +289,53 @@ router.get("/:id/activity", requireAuth, async (req, res) => {
 router.post("/", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.canWrite) return res.status(403).json({ ok: false, message: "Insufficient permissions" });
-    if (!ctx.orgId) return res.status(400).json({ ok: false, message: "No org selected" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canWrite) {
+      return res.status(403).json({
+        ok: false,
+        message: "Insufficient permissions",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
 
     const payload = req.body || {};
     const name = (payload.name || "").toString().trim();
     const clientId = toObjectId(payload.clientId);
 
-    if (!name) return res.status(400).json({ ok: false, message: "Deal name is required" });
-    if (!clientId) return res.status(400).json({ ok: false, message: "clientId is required" });
+    if (!name) {
+      return res.status(400).json({
+        ok: false,
+        message: "Deal name is required",
+      });
+    }
 
-    const client = await Client.findOne({ _id: clientId, orgId: ctx.orgId }).select("_id").lean();
-    if (!client) return res.status(400).json({ ok: false, message: "Client not found for this org" });
+    if (!clientId) {
+      return res.status(400).json({
+        ok: false,
+        message: "clientId is required",
+      });
+    }
+
+    const client = await Client.findOne({
+      _id: clientId,
+      orgId: ctx.orgId,
+    })
+      .select("_id")
+      .lean();
+
+    if (!client) {
+      return res.status(400).json({
+        ok: false,
+        message: "Client not found for this org",
+      });
+    }
 
     const stage = normalizeStage(payload.stage || "Discovery");
     const now = new Date();
@@ -182,16 +346,15 @@ router.post("/", requireAuth, async (req, res) => {
 
     const doc = await Deal.create({
       orgId: ctx.orgId,
+      workspaceId: ctx.orgId,
       clientId,
       name,
       stage,
       amount: Number(payload.amount ?? 0) || 0,
       probability: payload.probability == null ? 0.5 : Number(payload.probability),
       closeDate,
-
       nextAction,
       nextActionDueAt: nextActionDueAt === undefined ? null : nextActionDueAt,
-
       lastActivityAt: now,
       lastActivityType: "system",
       lastActivityNote: `Deal created in stage: ${stage}`,
@@ -204,8 +367,6 @@ router.post("/", requireAuth, async (req, res) => {
           createdBy: ctx.userId,
         },
       ],
-
-      // structured outcome fields default empty
       closedAt: isClosedStage(stage) ? now : null,
       closedReason: (payload.closedReason || "").toString().trim(),
       competitor: (payload.competitor || "").toString().trim(),
@@ -216,10 +377,16 @@ router.post("/", requireAuth, async (req, res) => {
       .populate({ path: "clientId", select: "name industry website status" })
       .lean();
 
-    return res.status(201).json({ ok: true, deal });
+    return res.status(201).json({
+      ok: true,
+      deal,
+    });
   } catch (err) {
     console.error("Deal create error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to create deal" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to create deal",
+    });
   }
 });
 
@@ -227,12 +394,29 @@ router.post("/", requireAuth, async (req, res) => {
 router.put("/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.canWrite) return res.status(403).json({ ok: false, message: "Insufficient permissions" });
-    if (!ctx.orgId) return res.status(400).json({ ok: false, message: "No org selected" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canWrite) {
+      return res.status(403).json({
+        ok: false,
+        message: "Insufficient permissions",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
 
     const id = toObjectId(req.params.id);
-    if (!id) return res.status(400).json({ ok: false, message: "Invalid deal id" });
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid deal id",
+      });
+    }
 
     const payload = req.body || {};
     const update = {};
@@ -242,16 +426,26 @@ router.put("/:id", requireAuth, async (req, res) => {
     if (payload.probability !== undefined) update.probability = Number(payload.probability);
     if (payload.closeDate !== undefined) update.closeDate = toDateOrNull(payload.closeDate);
 
-    // ✅ execution layer
-    if (payload.nextAction !== undefined) update.nextAction = String(payload.nextAction || "").trim();
-    if (payload.nextActionDueAt !== undefined) update.nextActionDueAt = toDateOrNull(payload.nextActionDueAt);
+    if (payload.nextAction !== undefined) {
+      update.nextAction = String(payload.nextAction || "").trim();
+    }
 
-    // ✅ structured outcome
-    if (payload.closedReason !== undefined) update.closedReason = String(payload.closedReason || "").trim();
-    if (payload.competitor !== undefined) update.competitor = String(payload.competitor || "").trim();
-    if (payload.reactivationAt !== undefined) update.reactivationAt = toDateOrNull(payload.reactivationAt);
+    if (payload.nextActionDueAt !== undefined) {
+      update.nextActionDueAt = toDateOrNull(payload.nextActionDueAt);
+    }
 
-    // stage (handles closedAt automatically)
+    if (payload.closedReason !== undefined) {
+      update.closedReason = String(payload.closedReason || "").trim();
+    }
+
+    if (payload.competitor !== undefined) {
+      update.competitor = String(payload.competitor || "").trim();
+    }
+
+    if (payload.reactivationAt !== undefined) {
+      update.reactivationAt = toDateOrNull(payload.reactivationAt);
+    }
+
     if (payload.stage !== undefined) {
       const nextStage = normalizeStage(payload.stage);
       update.stage = nextStage;
@@ -259,54 +453,109 @@ router.put("/:id", requireAuth, async (req, res) => {
       if (isClosedStage(nextStage)) {
         update.closedAt = new Date();
       } else {
-        // if re-opening a deal, clear closedAt
         update.closedAt = null;
       }
     }
 
     if (payload.clientId !== undefined) {
       const newClientId = toObjectId(payload.clientId);
-      if (!newClientId) return res.status(400).json({ ok: false, message: "Invalid clientId" });
-      const client = await Client.findOne({ _id: newClientId, orgId: ctx.orgId }).select("_id").lean();
-      if (!client) return res.status(400).json({ ok: false, message: "Client not found for this org" });
+
+      if (!newClientId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Invalid clientId",
+        });
+      }
+
+      const client = await Client.findOne({
+        _id: newClientId,
+        orgId: ctx.orgId,
+      })
+        .select("_id")
+        .lean();
+
+      if (!client) {
+        return res.status(400).json({
+          ok: false,
+          message: "Client not found for this org",
+        });
+      }
+
       update.clientId = newClientId;
     }
 
     if (update.name !== undefined && !update.name) {
-      return res.status(400).json({ ok: false, message: "Deal name cannot be empty" });
+      return res.status(400).json({
+        ok: false,
+        message: "Deal name cannot be empty",
+      });
     }
 
-    const deal = await Deal.findOneAndUpdate({ _id: id, orgId: ctx.orgId }, { $set: update }, { new: true })
+    const deal = await Deal.findOneAndUpdate(
+      { _id: id, orgId: ctx.orgId },
+      { $set: update },
+      { new: true }
+    )
       .populate({ path: "clientId", select: "name industry website status" })
       .lean();
 
-    if (!deal) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!deal) {
+      return res.status(404).json({
+        ok: false,
+        message: "Deal not found",
+      });
+    }
 
-    return res.status(200).json({ ok: true, deal });
+    return res.status(200).json({
+      ok: true,
+      deal,
+    });
   } catch (err) {
     console.error("Deal update error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to update deal" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to update deal",
+    });
   }
 });
 
-// ✅ LOG ACTIVITY (updates nextAction + due date + lastActivity fields)
+// LOG ACTIVITY
 router.post("/:id/activity", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.canWrite) return res.status(403).json({ ok: false, message: "Insufficient permissions" });
-    if (!ctx.orgId) return res.status(400).json({ ok: false, message: "No org selected" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canWrite) {
+      return res.status(403).json({
+        ok: false,
+        message: "Insufficient permissions",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
 
     const id = toObjectId(req.params.id);
-    if (!id) return res.status(400).json({ ok: false, message: "Invalid deal id" });
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid deal id",
+      });
+    }
 
     const payload = req.body || {};
-    const type = (payload.type || "note").toString().trim().toLowerCase() || "note";
+    const type =
+      (payload.type || "note").toString().trim().toLowerCase() || "note";
     const note = (payload.note || "").toString().trim();
     const nextAction = (payload.nextAction || "").toString().trim();
-    const nextActionDueAt = toDateOrNull(payload.nextActionDueAt); // optional
+    const nextActionDueAt = toDateOrNull(payload.nextActionDueAt);
 
     const now = new Date();
+
     const activity = {
       type,
       note,
@@ -321,39 +570,77 @@ router.post("/:id/activity", requireAuth, async (req, res) => {
       lastActivityNote: note,
     };
 
-    // only overwrite nextAction if provided (so blank doesn't wipe)
-    if (nextAction) $set.nextAction = nextAction;
+    if (nextAction) {
+      $set.nextAction = nextAction;
+    }
 
-    // only overwrite due date if explicitly provided
-    if (nextActionDueAt !== undefined) $set.nextActionDueAt = nextActionDueAt;
+    if (nextActionDueAt !== undefined) {
+      $set.nextActionDueAt = nextActionDueAt;
+    }
 
     const deal = await Deal.findOneAndUpdate(
       { _id: id, orgId: ctx.orgId },
-      { $push: { activities: { $each: [activity], $slice: -50 } }, $set },
+      {
+        $push: {
+          activities: {
+            $each: [activity],
+            $slice: -50,
+          },
+        },
+        $set,
+      },
       { new: true }
     )
       .populate({ path: "clientId", select: "name industry website status" })
       .lean();
 
-    if (!deal) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!deal) {
+      return res.status(404).json({
+        ok: false,
+        message: "Deal not found",
+      });
+    }
 
-    return res.status(200).json({ ok: true, deal });
+    return res.status(200).json({
+      ok: true,
+      deal,
+    });
   } catch (err) {
     console.error("Deal activity error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to log activity" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to log activity",
+    });
   }
 });
 
-// QUICK STAGE MOVE (Kanban) + logs activity + updates lastActivity + closedAt logic
+// QUICK STAGE MOVE
 router.patch("/:id/stage", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.canWrite) return res.status(403).json({ ok: false, message: "Insufficient permissions" });
-    if (!ctx.orgId) return res.status(400).json({ ok: false, message: "No org selected" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canWrite) {
+      return res.status(403).json({
+        ok: false,
+        message: "Insufficient permissions",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
 
     const id = toObjectId(req.params.id);
-    if (!id) return res.status(400).json({ ok: false, message: "Invalid deal id" });
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid deal id",
+      });
+    }
 
     const stage = normalizeStage(req.body?.stage);
     const now = new Date();
@@ -365,9 +652,11 @@ router.patch("/:id/stage", requireAuth, async (req, res) => {
       lastActivityNote: `Stage moved to: ${stage}`,
     };
 
-    // ✅ auto closedAt when moved into closed stage; clear when reopened
-    if (isClosedStage(stage)) $set.closedAt = now;
-    else $set.closedAt = null;
+    if (isClosedStage(stage)) {
+      $set.closedAt = now;
+    } else {
+      $set.closedAt = null;
+    }
 
     const deal = await Deal.findOneAndUpdate(
       { _id: id, orgId: ctx.orgId },
@@ -393,12 +682,23 @@ router.patch("/:id/stage", requireAuth, async (req, res) => {
       .populate({ path: "clientId", select: "name industry website status" })
       .lean();
 
-    if (!deal) return res.status(404).json({ ok: false, message: "Deal not found" });
+    if (!deal) {
+      return res.status(404).json({
+        ok: false,
+        message: "Deal not found",
+      });
+    }
 
-    return res.status(200).json({ ok: true, deal });
+    return res.status(200).json({
+      ok: true,
+      deal,
+    });
   } catch (err) {
     console.error("Deal stage patch error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to update stage" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to update stage",
+    });
   }
 });
 
@@ -406,20 +706,46 @@ router.patch("/:id/stage", requireAuth, async (req, res) => {
 router.delete("/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
-    if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
-    if (!ctx.canWrite) return res.status(403).json({ ok: false, message: "Insufficient permissions" });
-    if (!ctx.orgId) return res.status(400).json({ ok: false, message: "No org selected" });
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canWrite) {
+      return res.status(403).json({
+        ok: false,
+        message: "Insufficient permissions",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
 
     const id = toObjectId(req.params.id);
-    if (!id) return res.status(400).json({ ok: false, message: "Invalid deal id" });
+    if (!id) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid deal id",
+      });
+    }
 
     const result = await Deal.deleteOne({ _id: id, orgId: ctx.orgId });
-    if (!result.deletedCount) return res.status(404).json({ ok: false, message: "Deal not found" });
+
+    if (!result.deletedCount) {
+      return res.status(404).json({
+        ok: false,
+        message: "Deal not found",
+      });
+    }
 
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("Deal delete error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Failed to delete deal" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Failed to delete deal",
+    });
   }
 });
 

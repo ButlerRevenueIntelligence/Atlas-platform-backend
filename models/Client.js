@@ -3,15 +3,66 @@ import mongoose from "mongoose";
 
 const ClientSchema = new mongoose.Schema(
   {
-    orgId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    // Current tenant source of truth
+    orgId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      required: true,
+      index: true,
+    },
 
-    name: { type: String, required: true, trim: true },
-    website: { type: String, trim: true, default: "" },
-    industry: { type: String, trim: true, default: "" },
+    // Future-friendly workspace alias
+    workspaceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true,
+    },
 
-    primaryContactName: { type: String, trim: true, default: "" },
-    primaryContactEmail: { type: String, trim: true, lowercase: true, default: "" },
-    primaryContactPhone: { type: String, trim: true, default: "" },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+
+    website: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    domain: {
+      type: String,
+      trim: true,
+      default: "",
+      index: true,
+    },
+
+    industry: {
+      type: String,
+      trim: true,
+      default: "",
+      index: true,
+    },
+
+    primaryContactName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    primaryContactEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: "",
+    },
+
+    primaryContactPhone: {
+      type: String,
+      trim: true,
+      default: "",
+    },
 
     status: {
       type: String,
@@ -20,25 +71,81 @@ const ClientSchema = new mongoose.Schema(
       index: true,
     },
 
-    notes: { type: String, default: "" },
+    notes: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
-    createdBy: { type: mongoose.Schema.Types.ObjectId, default: null },
-    updatedBy: { type: mongoose.Schema.Types.ObjectId, default: null },
+    archivedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
-// Keep this (helps prevent duplicate client names per org if you want it later)
-// (not unique right now)
-ClientSchema.index({ orgId: 1, name: 1 });
+/**
+ * Keep workspaceId aligned with orgId during transition
+ * Also derive domain from website when possible
+ */
+ClientSchema.pre("save", function (next) {
+  if (!this.workspaceId && this.orgId) {
+    this.workspaceId = this.orgId;
+  }
 
-// ✅ Correct email uniqueness: ONLY enforce when primaryContactEmail is non-empty
+  if (!this.domain && this.website) {
+    try {
+      const normalized = this.website.startsWith("http")
+        ? this.website
+        : `https://${this.website}`;
+      const url = new URL(normalized);
+      this.domain = url.hostname.replace(/^www\./, "");
+    } catch {
+      this.domain = "";
+    }
+  }
+
+  next();
+});
+
+/**
+ * Helpful indexes
+ */
+ClientSchema.index({ orgId: 1, name: 1 });
+ClientSchema.index({ orgId: 1, status: 1, createdAt: -1 });
+ClientSchema.index({ orgId: 1, industry: 1 });
+ClientSchema.index({ orgId: 1, domain: 1 });
+ClientSchema.index({ orgId: 1, archivedAt: 1 });
+
+/**
+ * Only enforce unique primary contact email when non-empty
+ */
 ClientSchema.index(
   { orgId: 1, primaryContactEmail: 1 },
   {
     unique: true,
-    partialFilterExpression: { primaryContactEmail: { $type: "string", $ne: "" } },
+    partialFilterExpression: {
+      primaryContactEmail: { $type: "string", $ne: "" },
+    },
   }
 );
 
-export default mongoose.model("Client", ClientSchema);
+const Client =
+  mongoose.models.Client || mongoose.model("Client", ClientSchema);
+
+export default Client;
