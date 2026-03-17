@@ -180,18 +180,19 @@ router.post("/", requireAuth, async (req, res) => {
       });
     }
 
-    // Allow invites in development; enforce billing only in production
-    if (
-      org?.billing?.status !== "active" &&
-      process.env.NODE_ENV === "production"
-    ) {
-      return res.status(403).json({
-        ok: false,
-        message:
-          "Invites can only be created for active workspaces with approved billing.",
-        code: "WORKSPACE_BILLING_INACTIVE",
-      });
-    }
+    // TEMP: billing restriction disabled so invites can be tested end-to-end.
+    // Re-enable later when Stripe/subscription activation is finalized.
+    // if (
+    //   org?.billing?.status !== "active" &&
+    //   process.env.NODE_ENV === "production"
+    // ) {
+    //   return res.status(403).json({
+    //     ok: false,
+    //     message:
+    //       "Invites can only be created for active workspaces with approved billing.",
+    //     code: "WORKSPACE_BILLING_INACTIVE",
+    //   });
+    // }
 
     const email = String(req.body?.email || "").trim().toLowerCase();
     const role = String(req.body?.role || "analyst").trim().toLowerCase();
