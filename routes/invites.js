@@ -3,6 +3,7 @@ import express from "express";
 import mongoose from "mongoose";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
@@ -491,9 +492,25 @@ router.post("/:token/accept", async (req, res) => {
     invite.acceptedBy = user._id;
     await invite.save();
 
+    const tokenJwt = jwt.sign(
+      {
+        userId: user._id,
+        email: user.email,
+        orgId: invite.orgId,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
     return res.status(200).json({
       ok: true,
-      message: "Invite accepted successfully. You can now log in.",
+      token: tokenJwt,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        orgId: invite.orgId,
+      },
     });
   } catch (err) {
     process.stdout.write(`Invite accept error: ${err?.message || err}\n`);

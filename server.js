@@ -9,6 +9,8 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 
+import { requirePlan } from "./middleware/requirePlan.js";
+
 import billingRoutes from "./routes/billing.js";
 import authRoutes from "./routes/auth.js";
 import dashboardRoutes from "./routes/dashboard.js";
@@ -77,9 +79,11 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
 /** -------------------- STRIPE/BILLING ROUTES FIRST -------------------- */
+/** These must be mounted before express.json() so raw webhook bodies still work */
 app.use("/api/billing", billingRoutes);
+app.use("/api/stripe", stripeRoutes);
 
-/** -------------------- BODY PARSERS AFTER BILLING WEBHOOK -------------------- */
+/** -------------------- BODY PARSERS AFTER WEBHOOK ROUTES -------------------- */
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "2mb" }));
 
@@ -106,37 +110,36 @@ app.get("/api/health", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/workspaces", workspaceRoutes);
 
-app.use("/api/dashboard", dashboardRoutes);
-app.use("/api/integrations", integrationsRoute);
-app.use("/api/pipeline", pipelineRoutes);
+app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
+app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
+app.use("/api/pipeline", requirePlan("CORE"), pipelineRoutes);
 
-app.use("/api/invites", invitesRoutes);
-app.use("/api/members", membersRoutes);
+app.use("/api/invites", requirePlan("CORE"), invitesRoutes);
+app.use("/api/members", requirePlan("CORE"), membersRoutes);
 
-app.use("/api/revenue-stability", revenueStabilityRouter);
-app.use("/api/revenue-intel", revenueIntelRouter);
-app.use("/api/forecast", forecastRoutes);
+app.use("/api/revenue-stability", requirePlan("CORE"), revenueStabilityRouter);
+app.use("/api/revenue-intel", requirePlan("CORE"), revenueIntelRouter);
+app.use("/api/forecast", requirePlan("GROWTH"), forecastRoutes);
 
-app.use("/api/partners", partnersRoutes);
-app.use("/api/clients", clientsRouter);
-app.use("/api/deals", dealsRouter);
-app.use("/api/deal-intel", dealIntelRouter);
+app.use("/api/partners", requirePlan("CORE"), partnersRoutes);
+app.use("/api/clients", requirePlan("CORE"), clientsRouter);
+app.use("/api/deals", requirePlan("CORE"), dealsRouter);
+app.use("/api/deal-intel", requirePlan("GROWTH"), dealIntelRouter);
 
-app.use("/api/atlas", atlasRoutes);
-app.use("/api/atlas", atlasOperator);
+app.use("/api/atlas", requirePlan("CORE"), atlasRoutes);
+app.use("/api/atlas", requirePlan("ENTERPRISE"), atlasOperator);
 
-app.use("/api/org", orgRoutes);
-app.use("/api/organizations", organizationsRoutes);
+app.use("/api/org", requirePlan("CORE"), orgRoutes);
+app.use("/api/organizations", requirePlan("CORE"), organizationsRoutes);
 
-app.use("/api/seed", seedRoutes);
-app.use("/api/accounts", accountsRoutes);
-app.use("/api/metrics", metricsRoutes);
+app.use("/api/seed", requirePlan("ENTERPRISE"), seedRoutes);
+app.use("/api/accounts", requirePlan("CORE"), accountsRoutes);
+app.use("/api/metrics", requirePlan("GROWTH"), metricsRoutes);
 app.use("/api/me", meRoutes);
-app.use("/api/ai", aiRoutes);
-app.use("/api/export", exportRoutes);
-app.use("/api/attribution", attributionRoutes);
-app.use("/api/operator", operatorRoutes);
-app.use("/api/stripe", stripeRoutes);
+app.use("/api/ai", requirePlan("ENTERPRISE"), aiRoutes);
+app.use("/api/export", requirePlan("GROWTH"), exportRoutes);
+app.use("/api/attribution", requirePlan("GROWTH"), attributionRoutes);
+app.use("/api/operator", requirePlan("ENTERPRISE"), operatorRoutes);
 
 /** -------------------- 404 fallback LAST -------------------- */
 app.use((req, res) => {

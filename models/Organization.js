@@ -30,8 +30,8 @@ const OrganizationSchema = new mongoose.Schema(
 
     plan: {
       type: String,
-      enum: ["SCALE", "GROWTH", "ENTERPRISE"],
-      default: "SCALE",
+      enum: ["CORE", "GROWTH", "ENTERPRISE"],
+      default: "CORE",
       index: true,
     },
 
