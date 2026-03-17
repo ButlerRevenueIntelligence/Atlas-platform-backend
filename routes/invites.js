@@ -12,6 +12,7 @@ import User from "../models/User.js";
 import { sendInviteEmail } from "../utils/sendInviteEmail.js";
 
 const router = express.Router();
+consol.log("INVITES ROUTE LOADED")
 
 const toObjectId = (v) => {
   if (!v) return null;
