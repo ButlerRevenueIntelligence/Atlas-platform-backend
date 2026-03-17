@@ -12,7 +12,6 @@ import User from "../models/User.js";
 import { sendInviteEmail } from "../utils/sendInviteEmail.js";
 
 const router = express.Router();
-globalThis.consol.log("INVITES ROUTE LOADED")
 
 const toObjectId = (v) => {
   if (!v) return null;
@@ -141,7 +140,7 @@ router.get("/", requireAuth, async (req, res) => {
       invites,
     });
   } catch (err) {
-    console.error("Invites list error:", err);
+    process.stdout.write(`Invites list error: ${err?.message || err}\n`);
     return res.status(500).json({
       ok: false,
       message: err?.message || "Failed to list invites",
@@ -185,7 +184,7 @@ router.post("/", requireAuth, async (req, res) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const role = String(req.body?.role || "analyst").trim().toLowerCase();
 
-    console.log("🔥 Creating invite for:", email);
+    process.stdout.write(`🔥 Creating invite for: ${email}\n`);
 
     if (!email) {
       return res.status(400).json({
@@ -205,7 +204,7 @@ router.post("/", requireAuth, async (req, res) => {
     }).lean();
 
     if (existingPending) {
-      console.log("⚠️ Existing invite found, resending email...");
+      process.stdout.write("⚠️ Existing invite found, resending email...\n");
 
       try {
         await sendInviteEmail({
@@ -214,9 +213,9 @@ router.post("/", requireAuth, async (req, res) => {
           role: existingPending.role || finalRole,
           inviteToken: existingPending.token,
         });
-        console.log(`✅ Existing invite email resent to ${email}`);
+        process.stdout.write(`✅ Existing invite email resent to ${email}\n`);
       } catch (emailErr) {
-        console.error("❌ Resend email failed:", emailErr);
+        process.stdout.write(`❌ Resend email failed: ${emailErr?.message || emailErr}\n`);
       }
 
       return res.status(200).json({
@@ -239,7 +238,7 @@ router.post("/", requireAuth, async (req, res) => {
       expiresAt,
     });
 
-    console.log("🔥 Invite created, about to send email...");
+    process.stdout.write("🔥 Invite created, about to send email...\n");
 
     try {
       await sendInviteEmail({
@@ -248,9 +247,9 @@ router.post("/", requireAuth, async (req, res) => {
         role: finalRole,
         inviteToken: token,
       });
-      console.log(`✅ Invite email sent to ${email}`);
+      process.stdout.write(`✅ Invite email sent to ${email}\n`);
     } catch (emailErr) {
-      console.error("❌ Invite email send failed:", emailErr);
+      process.stdout.write(`❌ Invite email send failed: ${emailErr?.message || emailErr}\n`);
     }
 
     return res.status(201).json({
@@ -258,7 +257,7 @@ router.post("/", requireAuth, async (req, res) => {
       invite,
     });
   } catch (err) {
-    console.error("Invite create error:", err);
+    process.stdout.write(`❌ Invite create error: ${err?.message || err}\n`);
     return res.status(500).json({
       ok: false,
       message: err?.message || "Failed to create invite",
@@ -340,7 +339,7 @@ router.get("/:token", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("Invite get error:", err);
+    process.stdout.write(`Invite get error: ${err?.message || err}\n`);
     return res.status(500).json({
       ok: false,
       message: err?.message || "Failed to get invite",
@@ -495,7 +494,7 @@ router.post("/:token/accept", async (req, res) => {
       message: "Invite accepted successfully. You can now log in.",
     });
   } catch (err) {
-    console.error("Invite accept error:", err);
+    process.stdout.write(`Invite accept error: ${err?.message || err}\n`);
     return res.status(500).json({
       ok: false,
       message: err?.message || "Failed to accept invite",
