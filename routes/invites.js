@@ -181,22 +181,10 @@ router.post("/", requireAuth, async (req, res) => {
       });
     }
 
-    // TEMP: billing restriction disabled so invites can be tested end-to-end.
-    // Re-enable later when Stripe/subscription activation is finalized.
-    // if (
-    //   org?.billing?.status !== "active" &&
-    //   process.env.NODE_ENV === "production"
-    // ) {
-    //   return res.status(403).json({
-    //     ok: false,
-    //     message:
-    //       "Invites can only be created for active workspaces with approved billing.",
-    //     code: "WORKSPACE_BILLING_INACTIVE",
-    //   });
-    // }
-
     const email = String(req.body?.email || "").trim().toLowerCase();
     const role = String(req.body?.role || "analyst").trim().toLowerCase();
+
+    console.log("🔥 Creating invite for:", email);
 
     if (!email) {
       return res.status(400).json({
@@ -216,6 +204,20 @@ router.post("/", requireAuth, async (req, res) => {
     }).lean();
 
     if (existingPending) {
+      console.log("⚠️ Existing invite found, resending email...");
+
+      try {
+        await sendInviteEmail({
+          to: email,
+          workspaceName: org?.name || "Atlas Workspace",
+          role: existingPending.role || finalRole,
+          inviteToken: existingPending.token,
+        });
+        console.log(`✅ Existing invite email resent to ${email}`);
+      } catch (emailErr) {
+        console.error("❌ Resend email failed:", emailErr);
+      }
+
       return res.status(200).json({
         ok: true,
         invite: existingPending,
@@ -235,6 +237,8 @@ router.post("/", requireAuth, async (req, res) => {
       token,
       expiresAt,
     });
+
+    console.log("🔥 Invite created, about to send email...");
 
     try {
       await sendInviteEmail({
