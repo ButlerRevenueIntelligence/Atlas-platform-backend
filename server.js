@@ -2,6 +2,9 @@
 import dotenv from "dotenv";
 dotenv.config();
 
+console.log("SMTP USER:", process.env.SMTP_USER);
+console.log("SMTP PASS EXISTS:", !!process.env.SMTP_PASS);
+
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
@@ -59,13 +62,13 @@ const corsOptions = {
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
-  "Content-Type",
-  "Authorization",
-  "x-org-id",
-  "x-workspace-id",
-  "X-Requested-With",
-  "stripe-signature",
-],
+    "Content-Type",
+    "Authorization",
+    "x-org-id",
+    "x-workspace-id",
+    "X-Requested-With",
+    "stripe-signature",
+  ],
   exposedHeaders: ["x-org-id"],
   optionsSuccessStatus: 204,
 };
@@ -74,7 +77,6 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
 /** -------------------- STRIPE/BILLING ROUTES FIRST -------------------- */
-/** billingRoutes contains /webhook and must load before express.json() */
 app.use("/api/billing", billingRoutes);
 
 /** -------------------- BODY PARSERS AFTER BILLING WEBHOOK -------------------- */

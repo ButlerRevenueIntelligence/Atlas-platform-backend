@@ -9,6 +9,7 @@ import Membership from "../models/Membership.js";
 import Invite from "../models/Invite.js";
 import Organization from "../models/Organization.js";
 import User from "../models/User.js";
+import { sendInviteEmail } from "../utils/sendInviteEmail.js";
 
 const router = express.Router();
 
@@ -234,6 +235,18 @@ router.post("/", requireAuth, async (req, res) => {
       token,
       expiresAt,
     });
+
+    try {
+      await sendInviteEmail({
+        to: email,
+        workspaceName: org?.name || "Atlas Workspace",
+        role: finalRole,
+        inviteToken: token,
+      });
+      console.log(`✅ Invite email sent to ${email}`);
+    } catch (emailErr) {
+      console.error("❌ Invite email send failed:", emailErr);
+    }
 
     return res.status(201).json({
       ok: true,
