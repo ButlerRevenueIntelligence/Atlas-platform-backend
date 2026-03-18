@@ -30,11 +30,11 @@ const OrganizationSchema = new mongoose.Schema(
 
     plan: {
       type: String,
-      enum: ["CORE", "GROWTH", "ENTERPRISE"],
-      default: "CORE",
+      enum: ["SCALE", "GROWTH", "ENTERPRISE"],
+      default: "SCALE",
       index: true,
     },
-    
+
     trial: {
       startedAt: { type: Date, default: null },
       endsAt: { type: Date, default: null },
@@ -45,6 +45,7 @@ const OrganizationSchema = new mongoose.Schema(
         index: true,
       },
     },
+
     /* -------------------------------- */
     /* Atlas access control             */
     /* -------------------------------- */

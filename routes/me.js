@@ -3,6 +3,7 @@ import express from "express";
 import { requireAuth } from "../middleware/auth.js";
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
+import enforceTrialStatus from "../utils/enforceTrialStatus.js";
 
 const router = express.Router();
 
@@ -28,15 +29,30 @@ router.get("/", requireAuth, async (req, res) => {
     const orgIds = memberships.map((m) => m.orgId).filter(Boolean);
 
     const organizations = orgIds.length
-      ? await Organization.find({ _id: { $in: orgIds } }).lean()
+      ? await Organization.find({ _id: { $in: orgIds } })
       : [];
 
-    const orgMap = new Map(organizations.map((org) => [String(org._id), org]));
+    for (const org of organizations) {
+      await enforceTrialStatus(org);
+    }
 
-    const activeOrganization = activeOrgId
-      ? orgMap.get(String(activeOrgId)) ||
-        (await Organization.findById(activeOrgId).lean())
-      : null;
+    const orgMap = new Map(
+      organizations.map((org) => [String(org._id), org.toObject?.() || org])
+    );
+
+    let activeOrganization = null;
+
+    if (activeOrgId) {
+      activeOrganization =
+        orgMap.get(String(activeOrgId)) ||
+        (await Organization.findById(activeOrgId));
+
+      if (activeOrganization) {
+        await enforceTrialStatus(activeOrganization);
+        activeOrganization =
+          activeOrganization.toObject?.() || activeOrganization;
+      }
+    }
 
     const billing = activeOrganization?.billing || {
       status: activeOrganization?.paymentStatus || "inactive",
@@ -47,6 +63,12 @@ router.get("/", requireAuth, async (req, res) => {
       activeOrganization?.status ||
       activeOrganization?.accessStatus ||
       null;
+
+    const trial = activeOrganization?.trial || {
+      status: "none",
+      startedAt: null,
+      endsAt: null,
+    };
 
     const workspaces = memberships
       .map((membership) => {
@@ -63,6 +85,11 @@ router.get("/", requireAuth, async (req, res) => {
             status: org.status || org.accessStatus || null,
             billing: org.billing || {
               status: org.paymentStatus || "inactive",
+            },
+            trial: org.trial || {
+              status: "none",
+              startedAt: null,
+              endsAt: null,
             },
           },
           role:
@@ -103,6 +130,7 @@ router.get("/", requireAuth, async (req, res) => {
             plan,
             status,
             billing,
+            trial,
           }
         : null,
 
@@ -126,6 +154,12 @@ router.get("/", requireAuth, async (req, res) => {
       billing,
       plan,
       status,
+      trial,
+      accessStatus:
+        activeOrganization?.accessStatus ||
+        activeOrganization?.status ||
+        null,
+      paymentStatus: activeOrganization?.paymentStatus || null,
     });
   } catch (err) {
     console.error("ME route error:", err);
