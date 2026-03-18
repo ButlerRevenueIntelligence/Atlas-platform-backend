@@ -34,7 +34,17 @@ const OrganizationSchema = new mongoose.Schema(
       default: "CORE",
       index: true,
     },
-
+    
+    trial: {
+      startedAt: { type: Date, default: null },
+      endsAt: { type: Date, default: null },
+      status: {
+        type: String,
+        enum: ["none", "trialing", "expired", "converted"],
+        default: "none",
+        index: true,
+      },
+    },
     /* -------------------------------- */
     /* Atlas access control             */
     /* -------------------------------- */
