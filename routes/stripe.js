@@ -92,6 +92,38 @@ router.post("/create-invoice", async (req, res) => {
   }
 });
 
+router.post("/create-portal-session", async (req, res) => {
+  try {
+    const { orgId } = req.body;
+
+    if (!orgId) {
+      return res.status(400).json({ error: "orgId is required" });
+    }
+
+    const org = await Organization.findById(orgId).lean();
+
+    if (!org) {
+      return res.status(404).json({ error: "Organization not found" });
+    }
+
+    const customerId = org?.billing?.stripeCustomerId;
+
+    if (!customerId) {
+      return res.status(400).json({ error: "No Stripe customer found for this workspace" });
+    }
+
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${process.env.FRONTEND_URL}/billing`,
+    });
+
+    return res.json({ url: portalSession.url });
+  } catch (err) {
+    console.error("Stripe portal failed:", err);
+    return res.status(500).json({ error: "Stripe portal failed" });
+  }
+});
+
 router.post(
   "/webhook",
   express.raw({ type: "application/json" }),
