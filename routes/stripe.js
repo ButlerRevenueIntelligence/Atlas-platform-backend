@@ -6,12 +6,14 @@ const router = express.Router();
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-function normalizePlanFromPrice(priceId = "") {
-  const id = String(priceId).toLowerCase();
+const PRICE_TO_PLAN = {
+  "prod_U7xhuJfOxn2BVn": "SCALE",
+  "prod_U7xiW04bYxBUQj": "GROWTH",
+  "prod_U7xjaSLR63qfw6": "ENTERPRISE",
+};
 
-  if (id.includes("enterprise")) return "ENTERPRISE";
-  if (id.includes("growth")) return "GROWTH";
-  return "CORE";
+function normalizePlanFromPrice(priceId = "") {
+  return PRICE_TO_PLAN[String(priceId)] || "SCALE";
 }
 
 router.post("/create-checkout-session", async (req, res) => {
@@ -47,15 +49,17 @@ router.post("/create-checkout-session", async (req, res) => {
       metadata: {
         orgId: String(org._id),
         targetPlan,
+        priceId: String(priceId),
       },
       subscription_data: {
         metadata: {
           orgId: String(org._id),
           targetPlan,
+          priceId: String(priceId),
         },
       },
-      success_url: `${process.env.FRONTEND_URL}/command-center`,
-      cancel_url: `${process.env.FRONTEND_URL}/pricing`,
+      success_url: `${process.env.FRONTEND_URL}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/pricing?checkout=cancelled`,
     });
 
     return res.json({ url: session.url });
@@ -112,9 +116,10 @@ router.post(
           const session = event.data.object;
 
           const orgId = session?.metadata?.orgId;
-          const targetPlan = session?.metadata?.targetPlan || "CORE";
+          const targetPlan = session?.metadata?.targetPlan || "SCALE";
           const stripeCustomerId = session?.customer || null;
           const stripeSubscriptionId = session?.subscription || null;
+          const stripePriceId = session?.metadata?.priceId || null;
 
           if (orgId) {
             await Organization.findByIdAndUpdate(orgId, {
@@ -125,7 +130,7 @@ router.post(
               billing: {
                 stripeCustomerId,
                 stripeSubscriptionId,
-                stripePriceId: null,
+                stripePriceId,
                 status: "active",
                 currentPeriodEnd: null,
               },
@@ -140,23 +145,28 @@ router.post(
           const invoice = event.data.object;
           const stripeCustomerId = invoice?.customer || null;
           const stripeSubscriptionId = invoice?.subscription || null;
+          const stripePriceId = invoice?.lines?.data?.[0]?.price?.id || null;
+          const targetPlan = normalizePlanFromPrice(stripePriceId);
 
           const org = await Organization.findOne({
             "billing.stripeCustomerId": stripeCustomerId,
           });
 
           if (org) {
+            org.plan = targetPlan;
             org.paymentStatus = "paid";
             org.accessStatus = "active";
             org.approvedForAccess = true;
             org.billing.status = "active";
             org.billing.stripeSubscriptionId =
               stripeSubscriptionId || org.billing.stripeSubscriptionId;
-            if (invoice?.lines?.data?.[0]?.price?.id) {
-              org.billing.stripePriceId = invoice.lines.data[0].price.id;
+            if (stripePriceId) {
+              org.billing.stripePriceId = stripePriceId;
             }
-            if (invoice?.period_end) {
-              org.billing.currentPeriodEnd = new Date(invoice.period_end * 1000);
+            if (invoice?.lines?.data?.[0]?.period?.end) {
+              org.billing.currentPeriodEnd = new Date(
+                invoice.lines.data[0].period.end * 1000
+              );
             }
             await org.save();
           }
@@ -193,7 +203,7 @@ router.post(
           });
 
           if (org) {
-            org.plan = "CORE";
+            org.plan = "SCALE";
             org.paymentStatus = "canceled";
             org.accessStatus = "suspended";
             org.billing.status = "canceled";
