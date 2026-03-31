@@ -2,6 +2,10 @@
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
 
+/* -------------------------------- */
+/* HELPERS                          */
+/* -------------------------------- */
+
 function slugify(value = "") {
   return String(value)
     .toLowerCase()
@@ -27,19 +31,18 @@ async function uniqueOrgSlug(baseName = "") {
 /* -------------------------------- */
 /* CREATE WORKSPACE                 */
 /* -------------------------------- */
+
 export async function createWorkspace(req, res) {
   try {
     const userId = req.user?.userId || req.user?._id || req.user?.id;
 
     if (!userId) {
-      return res.status(401).json({
-        ok: false,
-        message: "Unauthorized",
-      });
+      return res.status(401).json({ ok: false, message: "Unauthorized" });
     }
 
     const {
       name,
+      slug: requestedSlug,
       companyWebsite = "",
       industry = "",
       type = "client",
@@ -54,9 +57,48 @@ export async function createWorkspace(req, res) {
     }
 
     const trimmedName = String(name).trim();
-    const slug = await uniqueOrgSlug(trimmedName);
+    const baseSlug = requestedSlug
+      ? slugify(requestedSlug)
+      : slugify(trimmedName);
 
-    const orgPayload = {
+    /* -------------------------------- */
+    /* PREVENT DUPLICATES (SAME OWNER)  */
+    /* -------------------------------- */
+
+    const existingForOwner = await Organization.findOne({
+      slug: baseSlug,
+      ownerId: userId,
+    }).lean();
+
+    if (existingForOwner) {
+      return res.status(409).json({
+        ok: false,
+        message: "Workspace already exists",
+        existingWorkspace: {
+          _id: existingForOwner._id,
+          name: existingForOwner.name,
+          slug: existingForOwner.slug,
+        },
+      });
+    }
+
+    /* -------------------------------- */
+    /* ENSURE GLOBAL UNIQUE SLUG        */
+    /* -------------------------------- */
+
+    const existingGlobal = await Organization.findOne({
+      slug: baseSlug,
+    }).lean();
+
+    const slug = existingGlobal
+      ? await uniqueOrgSlug(trimmedName)
+      : baseSlug;
+
+    /* -------------------------------- */
+    /* CREATE ORG                       */
+    /* -------------------------------- */
+
+    const org = await Organization.create({
       name: trimmedName,
       slug,
       ownerId: userId,
@@ -83,13 +125,13 @@ export async function createWorkspace(req, res) {
         status: "active",
         currentPeriodEnd: null,
       },
-    };
+      ...(companyWebsite && { companyWebsite }),
+      ...(industry && { industry }),
+    });
 
-    // Only include these if your Organization schema supports them
-    if (companyWebsite) orgPayload.companyWebsite = companyWebsite;
-    if (industry) orgPayload.industry = industry;
-
-    const org = await Organization.create(orgPayload);
+    /* -------------------------------- */
+    /* CREATE MEMBERSHIP                */
+    /* -------------------------------- */
 
     await Membership.create({
       userId,
@@ -104,15 +146,13 @@ export async function createWorkspace(req, res) {
 
     return res.status(201).json({
       ok: true,
-      message: "Workspace created successfully",
+      message: "Workspace created",
       workspace: {
         _id: org._id,
         name: org.name,
         slug: org.slug,
         plan: org.plan,
         type: org.type,
-        accessStatus: org.accessStatus,
-        paymentStatus: org.paymentStatus,
       },
     });
   } catch (err) {
@@ -129,16 +169,14 @@ export async function createWorkspace(req, res) {
 /* -------------------------------- */
 /* SWITCH WORKSPACE                 */
 /* -------------------------------- */
+
 export async function switchWorkspace(req, res) {
   try {
     const userId = req.user?.userId || req.user?._id || req.user?.id;
     const { workspaceId } = req.body;
 
     if (!userId) {
-      return res.status(401).json({
-        ok: false,
-        message: "Unauthorized",
-      });
+      return res.status(401).json({ ok: false, message: "Unauthorized" });
     }
 
     if (!workspaceId) {
@@ -157,7 +195,7 @@ export async function switchWorkspace(req, res) {
     if (!membership) {
       return res.status(403).json({
         ok: false,
-        message: "You do not have access to that workspace",
+        message: "No access to workspace",
       });
     }
 
@@ -178,10 +216,7 @@ export async function switchWorkspace(req, res) {
         slug: organization.slug,
         plan: organization.plan,
         type: organization.type,
-        accessStatus: organization.accessStatus,
-        paymentStatus: organization.paymentStatus,
       },
-      membership,
     });
   } catch (err) {
     console.error("Switch workspace error:", err);
@@ -189,7 +224,53 @@ export async function switchWorkspace(req, res) {
     return res.status(500).json({
       ok: false,
       message: "Failed to switch workspace",
-      error: err.message,
+    });
+  }
+}
+
+/* -------------------------------- */
+/* LIST WORKSPACES                  */
+/* -------------------------------- */
+
+export async function listWorkspaces(req, res) {
+  try {
+    const userId = req.user?.userId || req.user?._id || req.user?.id;
+
+    const memberships = await Membership.find({
+      userId,
+      status: { $in: ["active", "invited"] },
+    }).lean();
+
+    const orgIds = memberships.map((m) => m.orgId);
+
+    const orgs = await Organization.find({
+      _id: { $in: orgIds },
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const workspaces = orgs.map((org) => {
+      const membership = memberships.find(
+        (m) => String(m.orgId) === String(org._id)
+      );
+
+      return {
+        _id: org._id,
+        name: org.name,
+        slug: org.slug,
+        plan: org.plan,
+        type: org.type,
+        role: membership?.role,
+      };
+    });
+
+    return res.json({ ok: true, workspaces });
+  } catch (err) {
+    console.error("List workspaces error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load workspaces",
     });
   }
 }
@@ -197,17 +278,11 @@ export async function switchWorkspace(req, res) {
 /* -------------------------------- */
 /* DELETE WORKSPACE                 */
 /* -------------------------------- */
+
 export async function deleteWorkspace(req, res) {
   try {
     const userId = req.user?.userId || req.user?._id || req.user?.id;
     const { workspaceId } = req.params;
-
-    if (!workspaceId) {
-      return res.status(400).json({
-        ok: false,
-        message: "workspaceId is required",
-      });
-    }
 
     const org = await Organization.findById(workspaceId);
 
@@ -218,7 +293,6 @@ export async function deleteWorkspace(req, res) {
       });
     }
 
-    // Only owner can delete
     if (String(org.ownerId) !== String(userId)) {
       return res.status(403).json({
         ok: false,
@@ -226,10 +300,24 @@ export async function deleteWorkspace(req, res) {
       });
     }
 
-    // Delete memberships first
-    await Membership.deleteMany({ orgId: workspaceId });
+    /* -------------------------------- */
+    /* PREVENT DELETING LAST WORKSPACE  */
+    /* -------------------------------- */
 
-    // Delete org
+    const owned = await Membership.find({
+      userId,
+      role: "owner",
+      status: { $in: ["active", "invited"] },
+    });
+
+    if (owned.length <= 1) {
+      return res.status(400).json({
+        ok: false,
+        message: "Cannot delete your only workspace",
+      });
+    }
+
+    await Membership.deleteMany({ orgId: workspaceId });
     await Organization.findByIdAndDelete(workspaceId);
 
     return res.json({
