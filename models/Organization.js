@@ -3,7 +3,11 @@ import mongoose from "mongoose";
 
 const OrganizationSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, trim: true },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
 
     type: {
       type: String,
@@ -46,6 +50,12 @@ const OrganizationSchema = new mongoose.Schema(
       },
     },
 
+    usage: {
+      aiAnalyses: { type: Number, default: 0 },
+      reportsGenerated: { type: Number, default: 0 },
+      forecastsRun: { type: Number, default: 0 },
+    },
+
     /* -------------------------------- */
     /* Atlas access control             */
     /* -------------------------------- */
@@ -81,11 +91,22 @@ const OrganizationSchema = new mongoose.Schema(
     /* -------------------------------- */
 
     billing: {
-      stripeCustomerId: { type: String, default: null, index: true },
+      stripeCustomerId: {
+        type: String,
+        default: null,
+        index: true,
+      },
 
-      stripeSubscriptionId: { type: String, default: null, index: true },
+      stripeSubscriptionId: {
+        type: String,
+        default: null,
+        index: true,
+      },
 
-      stripePriceId: { type: String, default: null },
+      stripePriceId: {
+        type: String,
+        default: null,
+      },
 
       status: {
         type: String,

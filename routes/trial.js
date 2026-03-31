@@ -13,13 +13,19 @@ router.post("/start", requireAuth, async (req, res) => {
       "";
 
     if (!orgId) {
-      return res.status(400).json({ ok: false, message: "Organization ID is required" });
+      return res.status(400).json({
+        ok: false,
+        message: "Organization ID is required",
+      });
     }
 
     const org = await Organization.findById(orgId);
 
     if (!org) {
-      return res.status(404).json({ ok: false, message: "Organization not found" });
+      return res.status(404).json({
+        ok: false,
+        message: "Organization not found",
+      });
     }
 
     if (org.trial?.status === "trialing") {
@@ -27,6 +33,7 @@ router.post("/start", requireAuth, async (req, res) => {
         ok: true,
         message: "Trial already active",
         trial: org.trial,
+        plan: org.plan,
       });
     }
 
@@ -34,6 +41,13 @@ router.post("/start", requireAuth, async (req, res) => {
       return res.status(400).json({
         ok: false,
         message: "This workspace already converted from trial",
+      });
+    }
+
+    if (org.paymentStatus === "paid") {
+      return res.status(400).json({
+        ok: false,
+        message: "This workspace already has an active paid plan",
       });
     }
 
@@ -63,6 +77,8 @@ router.post("/start", requireAuth, async (req, res) => {
       message: "Free trial started",
       trial: org.trial,
       plan: org.plan,
+      billingStatus: org.billing?.status || "trialing",
+      accessStatus: org.accessStatus,
     });
   } catch (err) {
     console.error("Start trial failed:", err);

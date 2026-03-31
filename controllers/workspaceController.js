@@ -1,3 +1,4 @@
+// backend/controllers/workspaceController.js
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
 
@@ -23,12 +24,27 @@ async function uniqueOrgSlug(baseName = "") {
   }
 }
 
-/*
-CREATE WORKSPACE
-*/
+/* -------------------------------- */
+/* CREATE WORKSPACE                 */
+/* -------------------------------- */
 export async function createWorkspace(req, res) {
   try {
-    const { name, companyWebsite, industry } = req.body;
+    const userId = req.user?.userId || req.user?._id || req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const {
+      name,
+      companyWebsite = "",
+      industry = "",
+      type = "client",
+      plan = "ENTERPRISE",
+    } = req.body;
 
     if (!name || !String(name).trim()) {
       return res.status(400).json({
@@ -37,33 +53,58 @@ export async function createWorkspace(req, res) {
       });
     }
 
-    const slug = await uniqueOrgSlug(name);
+    const trimmedName = String(name).trim();
+    const slug = await uniqueOrgSlug(trimmedName);
 
-    const org = await Organization.create({
-      name: String(name).trim(),
-      companyWebsite,
-      industry,
+    const orgPayload = {
+      name: trimmedName,
       slug,
-      ownerId: req.user.userId,
-      type: "client",
-      plan: "SCALE",
+      ownerId: userId,
+      type,
+      plan,
       demoCompleted: false,
-      approvedForAccess: false,
-      accessStatus: "pending",
+      approvedForAccess: true,
+      accessStatus: "active",
       paymentStatus: "pending",
-    });
+      trial: {
+        startedAt: null,
+        endsAt: null,
+        status: "none",
+      },
+      usage: {
+        aiAnalyses: 0,
+        reportsGenerated: 0,
+        forecastsRun: 0,
+      },
+      billing: {
+        stripeCustomerId: null,
+        stripeSubscriptionId: null,
+        stripePriceId: null,
+        status: "active",
+        currentPeriodEnd: null,
+      },
+    };
+
+    // Only include these if your Organization schema supports them
+    if (companyWebsite) orgPayload.companyWebsite = companyWebsite;
+    if (industry) orgPayload.industry = industry;
+
+    const org = await Organization.create(orgPayload);
 
     await Membership.create({
-      userId: req.user.userId,
+      userId,
       orgId: org._id,
       workspaceId: org._id,
       role: "owner",
       status: "active",
       permissions: ["*"],
+      invitedBy: userId,
+      joinedAt: new Date(),
     });
 
-    res.json({
+    return res.status(201).json({
       ok: true,
+      message: "Workspace created successfully",
       workspace: {
         _id: org._id,
         name: org.name,
@@ -77,19 +118,28 @@ export async function createWorkspace(req, res) {
   } catch (err) {
     console.error("Create workspace error:", err);
 
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       message: "Failed to create workspace",
+      error: err.message,
     });
   }
 }
 
-/*
-SWITCH WORKSPACE
-*/
+/* -------------------------------- */
+/* SWITCH WORKSPACE                 */
+/* -------------------------------- */
 export async function switchWorkspace(req, res) {
   try {
+    const userId = req.user?.userId || req.user?._id || req.user?.id;
     const { workspaceId } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Unauthorized",
+      });
+    }
 
     if (!workspaceId) {
       return res.status(400).json({
@@ -99,9 +149,9 @@ export async function switchWorkspace(req, res) {
     }
 
     const membership = await Membership.findOne({
-      userId: req.user.userId,
+      userId,
       orgId: workspaceId,
-      status: { $ne: "disabled" },
+      status: { $in: ["active", "invited"] },
     }).lean();
 
     if (!membership) {
@@ -120,7 +170,7 @@ export async function switchWorkspace(req, res) {
       });
     }
 
-    res.json({
+    return res.json({
       ok: true,
       activeWorkspace: {
         _id: organization._id,
@@ -136,9 +186,10 @@ export async function switchWorkspace(req, res) {
   } catch (err) {
     console.error("Switch workspace error:", err);
 
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
       message: "Failed to switch workspace",
+      error: err.message,
     });
   }
 }
