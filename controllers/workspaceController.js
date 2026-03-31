@@ -193,3 +193,55 @@ export async function switchWorkspace(req, res) {
     });
   }
 }
+
+/* -------------------------------- */
+/* DELETE WORKSPACE                 */
+/* -------------------------------- */
+export async function deleteWorkspace(req, res) {
+  try {
+    const userId = req.user?.userId || req.user?._id || req.user?.id;
+    const { workspaceId } = req.params;
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        ok: false,
+        message: "workspaceId is required",
+      });
+    }
+
+    const org = await Organization.findById(workspaceId);
+
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    // Only owner can delete
+    if (String(org.ownerId) !== String(userId)) {
+      return res.status(403).json({
+        ok: false,
+        message: "Only owner can delete workspace",
+      });
+    }
+
+    // Delete memberships first
+    await Membership.deleteMany({ orgId: workspaceId });
+
+    // Delete org
+    await Organization.findByIdAndDelete(workspaceId);
+
+    return res.json({
+      ok: true,
+      message: "Workspace deleted",
+    });
+  } catch (err) {
+    console.error("Delete workspace error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to delete workspace",
+    });
+  }
+}
