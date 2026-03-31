@@ -1,6 +1,29 @@
 // backend/models/Organization.js
 import mongoose from "mongoose";
 
+const integrationStateSchema = new mongoose.Schema(
+  {
+    connected: {
+      type: Boolean,
+      default: false,
+    },
+    lastSync: {
+      type: Date,
+      default: null,
+    },
+    connectedAt: {
+      type: Date,
+      default: null,
+    },
+    mode: {
+      type: String,
+      enum: ["demo", "live"],
+      default: "demo",
+    },
+  },
+  { _id: false }
+);
+
 const OrganizationSchema = new mongoose.Schema(
   {
     name: {
@@ -84,6 +107,52 @@ const OrganizationSchema = new mongoose.Schema(
       enum: ["pending", "paid", "past_due", "canceled"],
       default: "pending",
       index: true,
+    },
+
+    /* -------------------------------- */
+    /* Integrations                     */
+    /* -------------------------------- */
+
+    integrations: {
+      hubspot: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      salesforce: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      google_ads: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      meta_ads: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      linkedin_ads: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      ga4: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      stripe: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
+
+      shopify: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
     },
 
     /* -------------------------------- */
