@@ -40,6 +40,7 @@ import attributionRoutes from "./routes/attribution.js";
 import stripeRoutes from "./routes/stripe.js";
 import workspaceRoutes from "./routes/workspaces.js";
 import trialRoutes from "./routes/trial.js";
+import hubspotSyncRoutes from "./routes/hubspotSync.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -111,6 +112,7 @@ app.get("/api/health", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/workspaces", workspaceRoutes);
 app.use("/api/trial", trialRoutes);
+app.use("/api/hubspot", hubspotSyncRoutes);
 
 app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
 app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
