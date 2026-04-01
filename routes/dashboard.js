@@ -1,4 +1,3 @@
-// backend/routes/dashboard.js
 import express from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
@@ -46,7 +45,6 @@ function pickOrgId(req) {
   return headerOrgId || defaultOrgId || null;
 }
 
-// Supports older records where orgId may have been stored as string
 const orgIdMatch = (orgId) => ({
   $or: [{ orgId }, { orgId: String(orgId) }],
 });
@@ -112,6 +110,243 @@ async function getOrgContext(req) {
   };
 }
 
+function detectWorkspaceMode(org) {
+  const explicitMode = String(org?.workspaceMode || "").toLowerCase();
+  if (explicitMode === "live") return "live";
+  if (explicitMode === "demo") return "demo";
+
+  const paymentStatus = String(org?.paymentStatus || "").toLowerCase();
+  const accessStatus = String(org?.accessStatus || "").toLowerCase();
+  const isDemo = String(org?.isDemo || "").toLowerCase() === "true" || org?.isDemo === true;
+
+  if (isDemo) return "demo";
+  if (paymentStatus === "paid" && accessStatus === "active") return "live";
+
+  return "demo";
+}
+
+function buildDemoMetrics() {
+  const today = new Date();
+  const metrics = [];
+
+  for (let i = 29; i >= 0; i -= 1) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+
+    const revenue = 1200 + ((29 - i) % 7) * 180 + i * 9;
+    const spend = 260 + ((29 - i) % 5) * 28 + i * 2;
+    const leads = 10 + ((29 - i) % 6) + Math.floor(i / 8);
+
+    metrics.push({
+      date: d.toISOString().slice(0, 10),
+      dateISO: d.toISOString(),
+      revenue,
+      spend,
+      leads,
+    });
+  }
+
+  return metrics;
+}
+
+function buildDemoDeals(org) {
+  const orgId = org?._id;
+
+  return [
+    {
+      _id: new mongoose.Types.ObjectId(),
+      orgId,
+      name: "Enterprise Expansion Program",
+      amount: 85000,
+      value: 85000,
+      stage: "Negotiation",
+      probability: 0.75,
+      source: "demo",
+    },
+    {
+      _id: new mongoose.Types.ObjectId(),
+      orgId,
+      name: "Revenue Operations Transformation",
+      amount: 120000,
+      value: 120000,
+      stage: "Proposal",
+      probability: 0.55,
+      source: "demo",
+    },
+    {
+      _id: new mongoose.Types.ObjectId(),
+      orgId,
+      name: "Demand Generation Rollout",
+      amount: 42000,
+      value: 42000,
+      stage: "Discovery",
+      probability: 0.35,
+      source: "demo",
+    },
+    {
+      _id: new mongoose.Types.ObjectId(),
+      orgId,
+      name: "Global Growth Initiative",
+      amount: 64000,
+      value: 64000,
+      stage: "Closed Won",
+      probability: 1,
+      source: "demo",
+    },
+    {
+      _id: new mongoose.Types.ObjectId(),
+      orgId,
+      name: "Pipeline Recovery Sprint",
+      amount: 18000,
+      value: 18000,
+      stage: "Closed Lost",
+      probability: 0,
+      source: "demo",
+    },
+  ];
+}
+
+function buildDemoIntegrations() {
+  return [
+    {
+      id: "hubspot",
+      name: "HubSpot CRM",
+      category: "CRM",
+      status: "connected",
+      connected: true,
+      mode: "demo",
+      lastSync: new Date().toISOString(),
+    },
+    {
+      id: "google_ads",
+      name: "Google Ads",
+      category: "Advertising",
+      status: "connected",
+      connected: true,
+      mode: "demo",
+      lastSync: new Date().toISOString(),
+    },
+    {
+      id: "ga4",
+      name: "Google Analytics 4",
+      category: "Analytics",
+      status: "connected",
+      connected: true,
+      mode: "demo",
+      lastSync: new Date().toISOString(),
+    },
+  ];
+}
+
+function buildDashboardResponse({
+  org,
+  membership,
+  integrations = [],
+  deals = [],
+  metrics = [],
+  workspaceMode = "demo",
+}) {
+  const dataAsOf =
+    metrics.length && metrics[metrics.length - 1]?.dateISO
+      ? metrics[metrics.length - 1].dateISO
+      : new Date().toISOString();
+
+  const lastUpdated = new Date().toISOString();
+
+  const revenue30d = metrics.reduce(
+    (sum, m) => sum + coerceNumber(m.revenue, 0),
+    0
+  );
+
+  const spend30d = metrics.reduce(
+    (sum, m) => sum + coerceNumber(m.spend, 0),
+    0
+  );
+
+  const leads30d = metrics.reduce(
+    (sum, m) => sum + coerceNumber(m.leads, 0),
+    0
+  );
+
+  const cac = leads30d > 0 ? spend30d / leads30d : 0;
+
+  const pipelineValue = (deals || []).reduce((sum, d) => {
+    const v =
+      coerceNumber(d?.amount, 0) ||
+      coerceNumber(d?.value, 0) ||
+      coerceNumber(d?.pipelineValue, 0);
+    return sum + v;
+  }, 0);
+
+  const openDeals = (deals || []).filter(
+    (d) => !["Closed Won", "Closed Lost"].includes(String(d?.stage || ""))
+  ).length;
+
+  const wonDeals = (deals || []).filter(
+    (d) => String(d?.stage || "") === "Closed Won"
+  ).length;
+
+  const lostDeals = (deals || []).filter(
+    (d) => String(d?.stage || "") === "Closed Lost"
+  ).length;
+
+  const avgDailyRevenue = metrics.length ? revenue30d / metrics.length : 0;
+  const forecast90d = avgDailyRevenue * 90;
+
+  let revenueHealth = 70;
+  if (pipelineValue > 0) revenueHealth += 10;
+  if (cac > 0 && cac < 300) revenueHealth += 10;
+  if (revenue30d > 0) revenueHealth += 10;
+  revenueHealth = Math.min(100, revenueHealth);
+
+  return {
+    ok: true,
+    lastUpdated,
+    dataAsOf,
+    workspaceMode,
+
+    org,
+    activeWorkspace: org
+      ? {
+          _id: org._id,
+          id: org._id,
+          name: org.name || "Workspace",
+          slug: org.slug || null,
+          plan: org.plan || null,
+          status: org.status || org.accessStatus || null,
+          billing: org.billing || null,
+        }
+      : null,
+
+    membership: {
+      role: String(membership?.role || "analyst"),
+      status: String(membership?.status || "active"),
+    },
+
+    summary: {
+      revenue: Math.round(revenue30d),
+      pipelineValue: Math.round(pipelineValue),
+      cac: Math.round(cac),
+      forecast90d: Math.round(forecast90d),
+      revenueHealth,
+      openDeals,
+      wonDeals,
+      lostDeals,
+      integrationsCount: integrations.length,
+    },
+
+    revenue: Math.round(revenue30d),
+    pipelineValue: Math.round(pipelineValue),
+    cac: Math.round(cac),
+    forecast90d: Math.round(forecast90d),
+    revenueHealth,
+
+    integrations,
+    deals,
+    metrics,
+  };
+}
+
 /**
  * GET /api/dashboard
  * Workspace-aware / org-scoped dashboard
@@ -131,10 +366,37 @@ router.get("/", requireAuth, async (req, res) => {
     const db = mongoose.connection;
 
     const org = await Organization.findById(ctx.orgId)
-      .select("_id name slug plan status billing")
+      .select(
+        "_id name slug plan status billing type accessStatus paymentStatus workspaceMode isDemo"
+      )
       .lean();
 
-    // Pull tenant-scoped data
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const workspaceMode = detectWorkspaceMode(org);
+
+    if (workspaceMode === "demo") {
+      const demoMetrics = buildDemoMetrics();
+      const demoDeals = buildDemoDeals(org);
+      const demoIntegrations = buildDemoIntegrations();
+
+      return res.json(
+        buildDashboardResponse({
+          org,
+          membership: ctx.membership,
+          integrations: demoIntegrations,
+          deals: demoDeals,
+          metrics: demoMetrics,
+          workspaceMode: "demo",
+        })
+      );
+    }
+
     const integrations = await db
       .collection("integrations")
       .find(orgIdMatch(ctx.orgId))
@@ -165,106 +427,16 @@ router.get("/", requireAuth, async (req, res) => {
       .filter((m) => !!m.date)
       .sort((a, b) => String(a.date).localeCompare(String(b.date)));
 
-    const dataAsOf =
-      metrics.length && metrics[metrics.length - 1]?.dateISO
-        ? metrics[metrics.length - 1].dateISO
-        : new Date().toISOString();
-
-    const lastUpdated = new Date().toISOString();
-
-    // KPI calculations
-    const revenue30d = metrics.reduce(
-      (sum, m) => sum + coerceNumber(m.revenue, 0),
-      0
+    return res.json(
+      buildDashboardResponse({
+        org,
+        membership: ctx.membership,
+        integrations,
+        deals,
+        metrics,
+        workspaceMode: "live",
+      })
     );
-
-    const spend30d = metrics.reduce(
-      (sum, m) => sum + coerceNumber(m.spend, 0),
-      0
-    );
-
-    const leads30d = metrics.reduce(
-      (sum, m) => sum + coerceNumber(m.leads, 0),
-      0
-    );
-
-    const cac = leads30d > 0 ? spend30d / leads30d : 0;
-
-    const pipelineValue = (deals || []).reduce((sum, d) => {
-      const v =
-        coerceNumber(d?.amount, 0) ||
-        coerceNumber(d?.value, 0) ||
-        coerceNumber(d?.pipelineValue, 0);
-      return sum + v;
-    }, 0);
-
-    const openDeals = (deals || []).filter(
-      (d) => !["Closed Won", "Closed Lost"].includes(String(d?.stage || ""))
-    ).length;
-
-    const wonDeals = (deals || []).filter(
-      (d) => String(d?.stage || "") === "Closed Won"
-    ).length;
-
-    const lostDeals = (deals || []).filter(
-      (d) => String(d?.stage || "") === "Closed Lost"
-    ).length;
-
-    const avgDailyRevenue = metrics.length ? revenue30d / metrics.length : 0;
-    const forecast90d = avgDailyRevenue * 90;
-
-    let revenueHealth = 70;
-    if (pipelineValue > 0) revenueHealth += 10;
-    if (cac > 0 && cac < 300) revenueHealth += 10;
-    if (revenue30d > 0) revenueHealth += 10;
-    revenueHealth = Math.min(100, revenueHealth);
-
-    return res.json({
-      ok: true,
-      lastUpdated,
-      dataAsOf,
-
-      org,
-      activeWorkspace: org
-        ? {
-            _id: org._id,
-            id: org._id,
-            name: org.name || "Workspace",
-            slug: org.slug || null,
-            plan: org.plan || null,
-            status: org.status || null,
-            billing: org.billing || null,
-          }
-        : null,
-
-      membership: {
-        role: String(ctx.membership.role || "analyst"),
-        status: String(ctx.membership.status || "active"),
-      },
-
-      summary: {
-        revenue: Math.round(revenue30d),
-        pipelineValue: Math.round(pipelineValue),
-        cac: Math.round(cac),
-        forecast90d: Math.round(forecast90d),
-        revenueHealth,
-        openDeals,
-        wonDeals,
-        lostDeals,
-        integrationsCount: integrations.length,
-      },
-
-      // Keep legacy top-level fields for compatibility
-      revenue: Math.round(revenue30d),
-      pipelineValue: Math.round(pipelineValue),
-      cac: Math.round(cac),
-      forecast90d: Math.round(forecast90d),
-      revenueHealth,
-
-      integrations,
-      deals,
-      metrics,
-    });
   } catch (err) {
     console.error("Dashboard route error:", err);
     return res.status(500).json({
