@@ -14,16 +14,22 @@ function getPlanRank(plan) {
   return 1; // CORE
 }
 
+function getOrgId(req) {
+  return (
+    req.headers["x-org-id"] ||
+    req.headers["x-workspace-id"] ||
+    req.user?.orgId ||
+    req.user?.organizationId ||
+    req.user?.org ||
+    req.user?.activeWorkspace ||
+    null
+  );
+}
+
 export function requirePlan(minPlan = "CORE") {
   return async function (req, res, next) {
     try {
-      const orgId =
-        req.headers["x-org-id"] ||
-        req.headers["x-workspace-id"] ||
-        req.user?.orgId ||
-        req.user?.organizationId ||
-        req.user?.org ||
-        req.user?.activeWorkspace;
+      const orgId = getOrgId(req);
 
       if (!orgId) {
         return res.status(400).json({
@@ -57,9 +63,13 @@ export function requirePlan(minPlan = "CORE") {
       }
 
       req.org = org;
+      req.orgId = String(org._id);
       req.currentPlan = currentPlan;
-      next();
+
+      return next();
     } catch (err) {
+      console.error("requirePlan error:", err);
+
       return res.status(500).json({
         ok: false,
         message: err?.message || "Plan validation failed",
