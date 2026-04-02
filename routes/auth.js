@@ -133,6 +133,14 @@ router.post("/login", async (req, res) => {
     const user = await User.findOne({ email })
       .select("+password passwordHash")
       .lean();
+
+    console.log("LOGIN DEBUG", {
+      email,
+      foundUser: !!user,
+      hasPassword: !!user?.password,
+      hasPasswordHash: !!user?.passwordHash,
+    });
+
     if (!user) {
       return res.status(401).json({
         ok: false,
@@ -141,6 +149,12 @@ router.post("/login", async (req, res) => {
     }
 
     const passwordHash = user.passwordHash || user.password;
+
+    console.log("LOGIN HASH DEBUG", {
+      email,
+      hasResolvedPasswordHash: !!passwordHash,
+    });
+
     if (!passwordHash) {
       return res.status(401).json({
         ok: false,
@@ -149,6 +163,12 @@ router.post("/login", async (req, res) => {
     }
 
     const match = await bcrypt.compare(password, passwordHash);
+
+    console.log("BCRYPT MATCH:", {
+      email,
+      match,
+    });
+
     if (!match) {
       return res.status(401).json({
         ok: false,
@@ -162,6 +182,11 @@ router.post("/login", async (req, res) => {
     })
       .sort({ createdAt: 1 })
       .lean();
+
+    console.log("LOGIN MEMBERSHIP DEBUG", {
+      email,
+      membershipCount: memberships.length,
+    });
 
     if (!memberships.length) {
       return res.status(403).json({
@@ -211,6 +236,16 @@ router.post("/login", async (req, res) => {
 
     const activeOrg = orgMap.get(String(activeMembership.orgId)) || null;
 
+    console.log("LOGIN ORG DEBUG", {
+      email,
+      requestedOrgId: requestedOrgId ? String(requestedOrgId) : null,
+      activeMembershipOrgId: activeMembership?.orgId
+        ? String(activeMembership.orgId)
+        : null,
+      foundActiveOrg: !!activeOrg,
+      activeOrgName: activeOrg?.name || null,
+    });
+
     if (!activeOrg) {
       return res.status(403).json({
         ok: false,
@@ -226,6 +261,17 @@ router.post("/login", async (req, res) => {
     );
 
     const access = buildWorkspaceAccess(activeOrg, orgRole);
+
+    console.log("LOGIN ACCESS DEBUG", {
+      email,
+      orgRole,
+      workspaceActive: access.workspaceActive,
+      accessStatus: access.accessStatus,
+      paymentStatus: access.paymentStatus,
+      approvedForAccess: access.approvedForAccess,
+      demoCompleted: access.demoCompleted,
+      override: access.override,
+    });
 
     if (!access.workspaceActive && !access.override) {
       return res.status(403).json({
