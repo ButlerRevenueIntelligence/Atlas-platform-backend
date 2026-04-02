@@ -644,20 +644,47 @@ router.get("/force-create-user", async (req, res) => {
 });
 
 router.get("/force-create-membership", async (req, res) => {
-  const user = await User.findOne({ email: "cd@drccompany.com" });
+  try {
+    const user = await User.findOne({ email: "cd@drccompany.com" });
 
-  if (!user) {
-    return res.json({ ok: false, message: "User not found" });
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        message: "User not found",
+      });
+    }
+
+    const existing = await Membership.findOne({
+      userId: user._id,
+      orgId: user.orgId,
+    }).lean();
+
+    if (existing) {
+      return res.json({
+        ok: true,
+        membership: existing,
+        alreadyExisted: true,
+      });
+    }
+
+    const membership = await Membership.create({
+      userId: user._id,
+      orgId: user.orgId,
+      role: "owner",
+      status: "active",
+    });
+
+    return res.json({
+      ok: true,
+      membership,
+      alreadyExisted: false,
+    });
+  } catch (err) {
+    console.error("force-create-membership error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err.message || "Failed to create membership",
+    });
   }
-
-  const membership = await Membership.create({
-    userId: user._id,
-    orgId: user.orgId,
-    role: "owner",
-    status: "active",
-  });
-
-  res.json({ ok: true, membership });
 });
-
 export default router;
