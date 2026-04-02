@@ -642,4 +642,22 @@ router.get("/force-create-user", async (req, res) => {
 
   res.json({ ok: true, user });
 });
+
+router.get("/force-create-membership", async (req, res) => {
+  const user = await User.findOne({ email: "cd@drccompany.com" });
+
+  if (!user) {
+    return res.json({ ok: false, message: "User not found" });
+  }
+
+  const membership = await Membership.create({
+    userId: user._id,
+    orgId: user.orgId,
+    role: "owner",
+    status: "active",
+  });
+
+  res.json({ ok: true, membership });
+});
+
 export default router;
