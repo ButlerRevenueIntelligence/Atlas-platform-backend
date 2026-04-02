@@ -687,4 +687,35 @@ router.get("/force-create-membership", async (req, res) => {
     });
   }
 });
+
+/* ------------------------------------------------ */
+/* WORKSPACES */
+/* ------------------------------------------------ */
+router.get("/workspaces", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.userId || req.user?.id;
+
+    const memberships = await Membership.find({
+      userId,
+      status: { $nin: ["disabled", "suspended"] },
+    }).lean();
+
+    const orgIds = memberships.map((m) => m.orgId);
+
+    const orgs = await Organization.find({ _id: { $in: orgIds } }).lean();
+
+    return res.json({
+      ok: true,
+      workspaces: orgs.map((org) => ({
+        id: String(org._id),
+        name: org.name,
+        plan: org.plan || "SCALE",
+      })),
+    });
+  } catch (err) {
+    console.error("WORKSPACES ERROR:", err);
+    res.status(500).json({ ok: false });
+  }
+});
+
 export default router;
