@@ -130,7 +130,9 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email }).lean();
+    const user = await User.findOne({ email })
+  .select("+password passwordHash")
+  .lean();
     if (!user) {
       return res.status(401).json({
         ok: false,
