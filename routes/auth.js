@@ -1,4 +1,3 @@
-// backend/routes/auth.js
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -123,6 +122,8 @@ router.post("/login", async (req, res) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
 
+    console.log("LOGIN ATTEMPT EMAIL:", email);
+
     if (!email || !password) {
       return res.status(400).json({
         ok: false,
@@ -134,12 +135,19 @@ router.post("/login", async (req, res) => {
       .select("+password passwordHash")
       .lean();
 
-    console.log("LOGIN DEBUG", {
-      email,
-      foundUser: !!user,
-      hasPassword: !!user?.password,
-      hasPasswordHash: !!user?.passwordHash,
-    });
+    console.log("LOGIN USER FOUND:", !!user);
+
+    if (user) {
+      console.log("LOGIN USER ID:", String(user._id));
+      console.log("LOGIN USER EMAIL:", user.email);
+      console.log("LOGIN USER HAS password:", !!user.password);
+      console.log("LOGIN USER HAS passwordHash:", !!user.passwordHash);
+      console.log("LOGIN USER orgId:", user.orgId ? String(user.orgId) : null);
+      console.log(
+        "LOGIN USER activeWorkspace:",
+        user.activeWorkspace ? String(user.activeWorkspace) : null
+      );
+    }
 
     if (!user) {
       return res.status(401).json({
@@ -153,6 +161,7 @@ router.post("/login", async (req, res) => {
     console.log("LOGIN HASH DEBUG", {
       email,
       hasResolvedPasswordHash: !!passwordHash,
+      usingField: user.passwordHash ? "passwordHash" : "password",
     });
 
     if (!passwordHash) {
@@ -186,6 +195,7 @@ router.post("/login", async (req, res) => {
     console.log("LOGIN MEMBERSHIP DEBUG", {
       email,
       membershipCount: memberships.length,
+      membershipOrgIds: memberships.map((m) => String(m.orgId)),
     });
 
     if (!memberships.length) {
@@ -227,9 +237,7 @@ router.post("/login", async (req, res) => {
       activeMembership = memberships[0];
     }
 
-    const orgIds = memberships
-      .map((m) => normalizeId(m.orgId))
-      .filter(Boolean);
+    const orgIds = memberships.map((m) => normalizeId(m.orgId)).filter(Boolean);
 
     const orgs = await Organization.find({ _id: { $in: orgIds } }).lean();
     const orgMap = new Map(orgs.map((o) => [String(o._id), o]));
