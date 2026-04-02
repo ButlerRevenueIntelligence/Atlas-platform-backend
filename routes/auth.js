@@ -14,14 +14,13 @@ const router = express.Router();
 /* Defaults */
 /* ------------------------------------------------ */
 const FULL_PERMS = [
-  "overview.view",
-  "revenue_intel.view",
+  "dashboard.view",
   "command_center.view",
   "deal_room.view",
   "market_signals.view",
-  "accounts.view",
-  "partners.view",
-  "admin.view",
+  "clients.view",
+  "partners.manage",
+  "admin.audit",
 ];
 
 /* ------------------------------------------------ */
