@@ -79,3 +79,4 @@ router.delete("/:membershipId", requireAuth, async (req, res) => {
     });
   }
 });
+export default router;
