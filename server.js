@@ -41,6 +41,7 @@ import stripeRoutes from "./routes/stripe.js";
 import workspaceRoutes from "./routes/workspaces.js";
 import trialRoutes from "./routes/trial.js";
 import hubspotSyncRoutes from "./routes/hubspotSync.js";
+import importsRoutes from "./routes/imports.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -113,6 +114,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/workspaces", workspaceRoutes);
 app.use("/api/trial", trialRoutes);
 app.use("/api/hubspot", hubspotSyncRoutes);
+app.use("/api/imports", importsRoutes);
 
 app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
 app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
