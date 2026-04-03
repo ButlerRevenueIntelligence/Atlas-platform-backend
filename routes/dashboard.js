@@ -111,18 +111,21 @@ async function getOrgContext(req) {
 }
 
 function detectWorkspaceMode(org) {
+  const slug = String(org?.slug || "").toLowerCase();
+  const name = String(org?.name || "").toLowerCase();
   const explicitMode = String(org?.workspaceMode || "").toLowerCase();
+
+  // Only the real Atlas demo workspace should ever run in demo mode
+  const isAtlasDemoWorkspace =
+    slug === "atlas-demo-company" ||
+    name === "atlas demo company";
+
+  if (isAtlasDemoWorkspace) return "demo";
+
+  // For every other workspace, force live mode
   if (explicitMode === "live") return "live";
-  if (explicitMode === "demo") return "demo";
 
-  const paymentStatus = String(org?.paymentStatus || "").toLowerCase();
-  const accessStatus = String(org?.accessStatus || "").toLowerCase();
-  const isDemo = String(org?.isDemo || "").toLowerCase() === "true" || org?.isDemo === true;
-
-  if (isDemo) return "demo";
-  if (paymentStatus === "paid" && accessStatus === "active") return "live";
-
-  return "demo";
+  return "live";
 }
 
 function buildDemoMetrics() {
@@ -244,7 +247,7 @@ function buildDashboardResponse({
   integrations = [],
   deals = [],
   metrics = [],
-  workspaceMode = "demo",
+  workspaceMode = "live",
 }) {
   const dataAsOf =
     metrics.length && metrics[metrics.length - 1]?.dateISO
