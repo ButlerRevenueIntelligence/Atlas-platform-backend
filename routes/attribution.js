@@ -3,6 +3,7 @@ import express from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
+import Organization from "../models/Organization.js";
 
 const router = express.Router();
 
@@ -17,27 +18,61 @@ const toObjectId = (v) => {
   return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
 };
 
+function pickUserId(req) {
+  return (
+    toObjectId(req.user?.userId) ||
+    toObjectId(req.user?.id) ||
+    toObjectId(req.user?._id) ||
+    null
+  );
+}
+
 function pickOrgId(req) {
-  const header = req.headers["x-org-id"] || req.headers["X-Org-Id"];
+  const header =
+    req.headers["x-org-id"] ||
+    req.headers["X-Org-Id"] ||
+    req.headers["x-workspace-id"] ||
+    req.headers["X-Workspace-Id"];
+
   const headerOrgId = toObjectId(header);
-  const defaultOrgId = toObjectId(req.user?.orgId);
+  const defaultOrgId =
+    toObjectId(req.user?.orgId) ||
+    toObjectId(req.user?.organizationId) ||
+    toObjectId(req.user?.org) ||
+    toObjectId(req.user?.activeWorkspace) ||
+    null;
+
   return headerOrgId || defaultOrgId || null;
 }
 
 async function requireMembershipOr403({ userId, orgId }) {
-  const m = await Membership.findOne({
+  const membership = await Membership.findOne({
     userId,
     orgId,
     status: { $ne: "disabled" },
   })
-    .select("_id role status")
+    .select("_id role status userId orgId")
     .lean();
 
-  return m || null;
+  return membership || null;
+}
+
+function detectWorkspaceMode(org) {
+  const slug = String(org?.slug || "").toLowerCase();
+  const name = String(org?.name || "").toLowerCase();
+  const explicitMode = String(org?.workspaceMode || "").toLowerCase();
+
+  const isAtlasDemoWorkspace =
+    slug === "atlas-demo-company" ||
+    name === "atlas demo company";
+
+  if (isAtlasDemoWorkspace) return "demo";
+  if (explicitMode === "demo") return "demo";
+
+  return "live";
 }
 
 function buildFallback() {
-  // You can tweak these numbers anytime
   const rows = [
     { channel: "Google Ads", spend: 6200, leads: 210, revenue: 16200 },
     { channel: "Meta Ads", spend: 4300, leads: 180, revenue: 9800 },
@@ -50,28 +85,68 @@ function buildFallback() {
     const spend = safeNum(r.spend);
     const revenue = safeNum(r.revenue);
     const roi = spend > 0 ? (revenue - spend) / spend : null;
-    return { ...r, spend, revenue, leads: safeNum(r.leads), roi };
+
+    return {
+      ...r,
+      spend,
+      revenue,
+      leads: safeNum(r.leads),
+      roi,
+    };
   });
+}
+
+function buildEmptyChannels() {
+  return [];
 }
 
 /**
  * GET /api/attribution/summary
  * Org-scoped (x-org-id) with membership validation.
- * Currently returns fallback numbers, but is tenant-safe.
+ * Demo data is returned ONLY for the true Atlas demo workspace.
+ * All live workspaces return empty data until real attribution exists.
  */
 router.get("/summary", requireAuth, async (req, res) => {
   try {
-    const userId = toObjectId(req.user?.userId);
-    if (!userId) return res.status(401).json({ ok: false, message: "Unauthorized" });
+    const userId = pickUserId(req);
+    if (!userId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Unauthorized",
+      });
+    }
 
     const orgId = pickOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context (x-org-id)." });
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context (x-org-id).",
+      });
+    }
 
     const membership = await requireMembershipOr403({ userId, orgId });
-    if (!membership) return res.status(403).json({ ok: false, message: "Not a member of this workspace" });
+    if (!membership) {
+      return res.status(403).json({
+        ok: false,
+        message: "Not a member of this workspace",
+      });
+    }
 
-    // Later: replace buildFallback() with DB-driven attribution by orgId
-    const channels = buildFallback();
+    const org = await Organization.findById(orgId)
+      .select("_id name slug workspaceMode isDemo")
+      .lean();
+
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const workspaceMode = detectWorkspaceMode(org);
+
+    const channels =
+      workspaceMode === "demo" ? buildFallback() : buildEmptyChannels();
 
     const totals = channels.reduce(
       (acc, c) => {
@@ -89,15 +164,20 @@ router.get("/summary", requireAuth, async (req, res) => {
     return res.json({
       ok: true,
       dataAsOf: new Date().toISOString(),
-      totals: { ...totals, roi: overallROI },
+      totals: {
+        ...totals,
+        roi: overallROI,
+      },
       channels,
-      source: "fallback",
+      source: workspaceMode === "demo" ? "demo-fallback" : "empty-live",
+      workspaceMode,
     });
   } catch (err) {
     console.error("Attribution summary error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, message: err?.message || "Attribution failed" });
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Attribution failed",
+    });
   }
 });
 
