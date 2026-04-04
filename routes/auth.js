@@ -1,6 +1,7 @@
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 import User from "../models/User.js";
 import Organization from "../models/Organization.js";
@@ -9,7 +10,7 @@ import Membership from "../models/Membership.js";
 import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
-
+console.log(" AUTH ROUTES LOADED "
 /* ------------------------------------------------ */
 /* Defaults */
 /* ------------------------------------------------ */
@@ -81,6 +82,14 @@ function resolvePermissions(membershipRole, membershipPermissions) {
   return permissions;
 }
 
+async function sendPasswordResetEmail({ to, resetUrl }) {
+  // Temporary Phase 1 version
+  // Replace later with Resend / SendGrid / Postmark
+  console.log("PASSWORD RESET EMAIL");
+  console.log("TO:", to);
+  console.log("RESET URL:", resetUrl);
+}
+
 /* ------------------------------------------------ */
 /* JWT helper */
 /* ------------------------------------------------ */
@@ -114,6 +123,118 @@ router.post("/signup", async (req, res) => {
 });
 
 /* ------------------------------------------------ */
+/* FORGOT PASSWORD */
+/* ------------------------------------------------ */
+router.post("/forgot-password", async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        message: "Email is required.",
+      });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.json({
+        ok: true,
+        message: "If that email exists, a reset link has been sent.",
+      });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const resetTokenExpiry = new Date(Date.now() + 1000 * 60 * 60);
+
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          resetToken,
+          resetTokenExpiry,
+        },
+      }
+    );
+
+    const resetUrl = `https://app.atlasrevenueai.com/reset-password?token=${resetToken}`;
+
+    await sendPasswordResetEmail({
+      to: user.email,
+      resetUrl,
+    });
+
+    return res.json({
+      ok: true,
+      message: "If that email exists, a reset link has been sent.",
+    });
+  } catch (err) {
+    console.error("Forgot password error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Server error",
+    });
+  }
+});
+
+/* ------------------------------------------------ */
+/* RESET PASSWORD */
+/* ------------------------------------------------ */
+router.post("/reset-password", async (req, res) => {
+  try {
+    const token = String(req.body?.token || "").trim();
+    const password = String(req.body?.password || "");
+
+    if (!token || !password) {
+      return res.status(400).json({
+        ok: false,
+        message: "Token and password are required.",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        message: "Password must be at least 8 characters.",
+      });
+    }
+
+    const user = await User.findOne({
+      resetToken: token,
+      resetTokenExpiry: { $gt: new Date() },
+    }).select("+password +passwordHash");
+
+    if (!user) {
+      return res.status(400).json({
+        ok: false,
+        message: "Reset link is invalid or expired.",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    user.password = hashedPassword;
+    user.passwordHash = hashedPassword;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+
+    await user.save();
+
+    return res.json({
+      ok: true,
+      message: "Password reset successful.",
+    });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Server error",
+    });
+  }
+});
+
+/* ------------------------------------------------ */
 /* LOGIN */
 /* ------------------------------------------------ */
 router.post("/login", async (req, res) => {
@@ -131,7 +252,7 @@ router.post("/login", async (req, res) => {
     }
 
     const user = await User.findOne({ email })
-      .select("+password passwordHash")
+      .select("+password +passwordHash")
       .lean();
 
     console.log("LOGIN USER FOUND:", !!user);
@@ -348,7 +469,6 @@ router.post("/login", async (req, res) => {
         plan: activeOrg?.plan || "SCALE",
         permissions,
       },
-
       activeWorkspace: {
         _id: String(activeOrg._id),
         id: String(activeOrg._id),
@@ -360,9 +480,7 @@ router.post("/login", async (req, res) => {
           status: activeOrg?.paymentStatus || "inactive",
         },
       },
-
       workspaces: workspacePayload,
-
       membership: {
         role: orgRole,
         status: activeMembership?.status || "active",
@@ -551,7 +669,6 @@ router.get("/me", requireAuth, async (req, res) => {
         perms: permissions,
         permissions,
       },
-
       activeWorkspace: activeOrg
         ? {
             _id: String(activeOrg._id),
@@ -565,7 +682,6 @@ router.get("/me", requireAuth, async (req, res) => {
             },
           }
         : null,
-
       workspaces: memberships
         .map((m) => {
           const org = orgMap.get(String(m.orgId));
@@ -592,7 +708,6 @@ router.get("/me", requireAuth, async (req, res) => {
           };
         })
         .filter(Boolean),
-
       membership: activeMembership
         ? {
             role,
@@ -600,7 +715,6 @@ router.get("/me", requireAuth, async (req, res) => {
             permissions,
           }
         : null,
-
       billing: activeOrg?.billing || {
         status: activeOrg?.paymentStatus || "inactive",
       },
@@ -622,9 +736,7 @@ router.get("/health", (req, res) => {
 });
 
 router.get("/force-create-user", async (req, res) => {
-  const bcrypt = await import("bcryptjs");
-
-  const hash = await bcrypt.default.hash("Atlas123!", 10);
+  const hash = await bcrypt.hash("Atlas123!", 10);
 
   const user = await User.findOneAndUpdate(
     { email: "cd@drccompany.com" },
@@ -713,7 +825,7 @@ router.get("/workspaces", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("WORKSPACES ERROR:", err);
-    res.status(500).json({ ok: false });
+    return res.status(500).json({ ok: false });
   }
 });
 

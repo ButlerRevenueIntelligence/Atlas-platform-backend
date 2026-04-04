@@ -46,7 +46,15 @@ const UserSchema = new Schema(
       type: String,
       default: "",
     },
-
+     
+    resetToken: {
+      type: String,
+      default: null,
+    },
+    resetTokenExpiry: {
+      type: Date,
+      default: null,
+    },
     // Legacy compatibility in case older code still references password
     password: {
       type: String,
