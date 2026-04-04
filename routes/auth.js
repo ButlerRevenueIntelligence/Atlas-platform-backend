@@ -9,8 +9,10 @@ import Membership from "../models/Membership.js";
 
 import { requireAuth } from "../middleware/auth.js";
 
+console.log("AUTH ROUTES LOADED");
+
 const router = express.Router();
-console.log(" AUTH ROUTES LOADED "
+
 /* ------------------------------------------------ */
 /* Defaults */
 /* ------------------------------------------------ */
