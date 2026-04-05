@@ -149,14 +149,15 @@ function buildGoogleAdsAuthUrl(orgId) {
   const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
   const redirectUri = buildGoogleAdsRedirectUri();
 
+  console.log("BUILD GOOGLE ADS AUTH URL DEBUG", {
+    clientIdExists: !!clientId,
+    redirectUri,
+    orgId: orgId ? String(orgId) : "",
+  });
+
   if (!clientId || !redirectUri || !orgId) return null;
 
-  const scopes = [
-    "https://www.googleapis.com/auth/adwords",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-    "openid",
-  ];
+  const scope = ["https://www.googleapis.com/auth/adwords"].join(" ");
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -164,7 +165,7 @@ function buildGoogleAdsAuthUrl(orgId) {
     response_type: "code",
     access_type: "offline",
     prompt: "consent",
-    scope: scopes.join(" "),
+    scope,
     state: JSON.stringify({ orgId: String(orgId), provider: "google_ads" }),
   });
 
@@ -384,18 +385,27 @@ router.post("/connect", requireAuth, async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: id });
     }
 
-    connection.status = "connected";
-    connection.mode = "demo";
-    connection.connectedAt = new Date();
-    connection.disconnectedAt = null;
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
-    connection.lastError = null;
-    connection.externalAccountId = null;
-    connection.externalAccountName = null;
-    connection.syncCursor = null;
-    connection.settings = connection.settings || {};
-    connection.metadata = connection.metadata || {};
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({ mode: "demo" });
+      connection.externalAccountId = null;
+      connection.externalAccountName = null;
+      connection.syncCursor = null;
+      connection.settings = connection.settings || {};
+      connection.metadata = connection.metadata || {};
+    } else {
+      connection.status = "connected";
+      connection.mode = "demo";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.externalAccountId = null;
+      connection.externalAccountName = null;
+      connection.syncCursor = null;
+      connection.settings = connection.settings || {};
+      connection.metadata = connection.metadata || {};
+    }
 
     await connection.save();
 
@@ -467,23 +477,27 @@ router.post("/disconnect", requireAuth, async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: id });
     }
 
-    connection.status = "disconnected";
-    connection.mode = "demo";
-    connection.connectedAt = null;
-    connection.disconnectedAt = new Date();
-    connection.lastSyncAt = null;
-    connection.lastSyncStatus = "never";
-    connection.lastError = null;
-    connection.accessToken = null;
-    connection.refreshToken = null;
-    connection.tokenType = null;
-    connection.tokenExpiresAt = null;
-    connection.externalAccountId = null;
-    connection.externalAccountName = null;
-    connection.scopes = [];
-    connection.syncCursor = null;
-    connection.settings = {};
-    connection.metadata = {};
+    if (typeof connection.markDisconnected === "function") {
+      connection.markDisconnected();
+    } else {
+      connection.status = "disconnected";
+      connection.mode = "demo";
+      connection.connectedAt = null;
+      connection.disconnectedAt = new Date();
+      connection.lastSyncAt = null;
+      connection.lastSyncStatus = "never";
+      connection.lastError = null;
+      connection.accessToken = null;
+      connection.refreshToken = null;
+      connection.tokenType = null;
+      connection.tokenExpiresAt = null;
+      connection.externalAccountId = null;
+      connection.externalAccountName = null;
+      connection.scopes = [];
+      connection.syncCursor = null;
+      connection.settings = {};
+      connection.metadata = {};
+    }
 
     await connection.save();
 
@@ -754,27 +768,46 @@ router.get("/hubspot/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "hubspot" });
     }
 
-    connection.status = "connected";
-    connection.mode = "live";
-    connection.connectedAt = new Date();
-    connection.disconnectedAt = null;
-    connection.accessToken = accessToken;
-    connection.refreshToken = refreshToken;
-    connection.tokenType = tokenData?.token_type || null;
-    connection.tokenExpiresAt = expiresIn
-      ? new Date(Date.now() + expiresIn * 1000)
-      : null;
-    connection.externalAccountId = accountId;
-    connection.externalAccountName = accountName;
-    connection.scopes = scopes;
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
-    connection.lastError = null;
-    connection.metadata = {
-      ...(connection.metadata || {}),
-      hubId: accountId,
-      scopes,
-    };
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({
+        mode: "live",
+        externalAccountId: accountId,
+        externalAccountName: accountName,
+        accessToken,
+        refreshToken,
+        tokenType: tokenData?.token_type || null,
+        tokenExpiresAt: expiresIn
+          ? new Date(Date.now() + expiresIn * 1000)
+          : null,
+        scopes,
+        metadata: {
+          hubId: accountId,
+          scopes,
+        },
+      });
+    } else {
+      connection.status = "connected";
+      connection.mode = "live";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.accessToken = accessToken;
+      connection.refreshToken = refreshToken;
+      connection.tokenType = tokenData?.token_type || null;
+      connection.tokenExpiresAt = expiresIn
+        ? new Date(Date.now() + expiresIn * 1000)
+        : null;
+      connection.externalAccountId = accountId;
+      connection.externalAccountName = accountName;
+      connection.scopes = scopes;
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.metadata = {
+        ...(connection.metadata || {}),
+        hubId: accountId,
+        scopes,
+      };
+    }
 
     await connection.save();
 
@@ -858,22 +891,46 @@ router.get("/google_ads/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "google_ads" });
     }
 
-    connection.markConnected({
-      mode: "live",
-      externalAccountId,
-      externalAccountName,
-      accessToken,
-      refreshToken,
-      tokenType: tokenData?.token_type || null,
-      tokenExpiresAt: expiresIn
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({
+        mode: "live",
+        externalAccountId,
+        externalAccountName,
+        accessToken,
+        refreshToken,
+        tokenType: tokenData?.token_type || null,
+        tokenExpiresAt: expiresIn
+          ? new Date(Date.now() + expiresIn * 1000)
+          : null,
+        scopes,
+        metadata: {
+          googleUserEmail: profile?.email || null,
+          googleUserName: profile?.name || null,
+        },
+      });
+    } else {
+      connection.status = "connected";
+      connection.mode = "live";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.accessToken = accessToken;
+      connection.refreshToken = refreshToken;
+      connection.tokenType = tokenData?.token_type || null;
+      connection.tokenExpiresAt = expiresIn
         ? new Date(Date.now() + expiresIn * 1000)
-        : null,
-      scopes,
-      metadata: {
+        : null;
+      connection.externalAccountId = externalAccountId;
+      connection.externalAccountName = externalAccountName;
+      connection.scopes = scopes;
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.metadata = {
+        ...(connection.metadata || {}),
         googleUserEmail: profile?.email || null,
         googleUserName: profile?.name || null,
-      },
-    });
+      };
+    }
 
     await connection.save();
 
@@ -932,15 +989,23 @@ router.post("/hubspot/sync", requireAuth, async (req, res) => {
       });
     }
 
-    connection.status = "syncing";
-    connection.lastSyncStatus = "running";
-    connection.lastError = null;
+    if (typeof connection.markSyncRunning === "function") {
+      connection.markSyncRunning();
+    } else {
+      connection.status = "syncing";
+      connection.lastSyncStatus = "running";
+      connection.lastError = null;
+    }
     await connection.save();
 
-    connection.status = "connected";
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
-    connection.lastError = null;
+    if (typeof connection.markSyncSuccess === "function") {
+      connection.markSyncSuccess();
+    } else {
+      connection.status = "connected";
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+    }
     await connection.save();
 
     await updateOrgIntegrationSummary(orgId, "hubspot", {
@@ -961,16 +1026,28 @@ router.post("/hubspot/sync", requireAuth, async (req, res) => {
     try {
       const orgId = getOrgId(req);
       if (orgId) {
-        await IntegrationConnection.findOneAndUpdate(
-          { orgId, provider: "hubspot" },
-          {
-            $set: {
-              status: "error",
-              lastSyncStatus: "failed",
-              lastError: err.message || "HubSpot sync failed",
-            },
+        const failedConnection = await IntegrationConnection.findOne({
+          orgId,
+          provider: "hubspot",
+        }).select("+accessToken +refreshToken");
+
+        if (failedConnection) {
+          if (typeof failedConnection.markSyncFailed === "function") {
+            failedConnection.markSyncFailed(err.message || "HubSpot sync failed");
+            await failedConnection.save();
+          } else {
+            await IntegrationConnection.findOneAndUpdate(
+              { orgId, provider: "hubspot" },
+              {
+                $set: {
+                  status: "error",
+                  lastSyncStatus: "failed",
+                  lastError: err.message || "HubSpot sync failed",
+                },
+              }
+            );
           }
-        );
+        }
       }
     } catch (innerErr) {
       console.error("Failed to mark HubSpot sync failure:", innerErr);
