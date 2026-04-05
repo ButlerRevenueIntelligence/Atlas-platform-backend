@@ -142,7 +142,7 @@ app.use("/api/seed", requirePlan("ENTERPRISE"), seedRoutes);
 app.use("/api/accounts", requirePlan("CORE"), accountsRoutes);
 app.use("/api/metrics", requirePlan("GROWTH"), metricsRoutes);
 app.use("/api/me", meRoutes);
-app.use("/api/ai", requirePlan("ENTERPRISE"), aiRoutes);
+app.use("/api/ai", requirePlan("CORE"), aiRoutes);
 app.use("/api/export", requirePlan("GROWTH"), exportRoutes);
 app.use("/api/attribution", requirePlan("GROWTH"), attributionRoutes);
 app.use("/api/operator", requirePlan("ENTERPRISE"), operatorRoutes);

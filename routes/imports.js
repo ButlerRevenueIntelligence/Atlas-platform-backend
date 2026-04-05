@@ -104,7 +104,6 @@ function parseDate(value) {
   }
 
   if (typeof value === "number") {
-    // Excel serial date support
     const excelEpoch = new Date(Date.UTC(1899, 11, 30));
     const parsed = new Date(excelEpoch.getTime() + value * 86400000);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
@@ -128,17 +127,17 @@ function normalizeStage(stage) {
 
 function detectRowType(row) {
   const hasDealSignals =
-    getValue(row, ["deal name", "name", "opportunity", "deal"]) ||
-    getValue(row, ["stage"]) ||
-    getValue(row, ["amount", "value"]);
+    getValue(row, ["deal name", "deal title", "name", "opportunity", "opportunity name", "deal"]) ||
+    getValue(row, ["stage", "pipeline stage"]) ||
+    getValue(row, ["amount", "value", "deal value", "expected revenue"]);
 
   const hasMetricSignals =
-    getValue(row, ["date", "day"]) &&
-    (
-      getValue(row, ["revenue"]) ||
-      getValue(row, ["spend"]) ||
-      getValue(row, ["leads"])
-    );
+    !!getValue(row, ["date", "day"]) &&
+    [
+      getValue(row, ["revenue", "sales"]),
+      getValue(row, ["spend", "ad spend", "cost"]),
+      getValue(row, ["leads"]),
+    ].some((v) => String(v || "").trim() !== "");
 
   if (hasMetricSignals) return "metric";
   if (hasDealSignals) return "deal";
@@ -210,7 +209,7 @@ router.post("/spreadsheet", requireAuth, async (req, res) => {
         }
 
         const dealName = String(
-          getValue(row, ["deal name", "name", "opportunity", "deal"]) || ""
+          getValue(row, ["deal name", "deal title", "name", "opportunity", "opportunity name", "deal"]) || ""
         ).trim();
 
         if (!dealName) {
@@ -218,16 +217,32 @@ router.post("/spreadsheet", requireAuth, async (req, res) => {
           continue;
         }
 
+        const existingDeal = await dealsCollection.findOne({
+          orgId: ctx.orgId,
+          name: dealName,
+          clientId: clientId || null,
+        });
+
+        if (existingDeal) {
+          skipped += 1;
+          continue;
+        }
+
+        const rawProbability = safeNum(
+          getValue(row, ["probability", "close probability", "win probability"]),
+          0.5
+        );
+
+        const normalizedProbability =
+          rawProbability > 1 ? Math.min(rawProbability / 100, 1) : Math.max(rawProbability, 0);
+
         await dealsCollection.insertOne({
           orgId: ctx.orgId,
           clientId,
           name: dealName,
-          amount: safeNum(getValue(row, ["amount", "value", "deal value"]), 0),
-          stage: normalizeStage(getValue(row, ["stage"])),
-          probability: safeNum(
-            getValue(row, ["probability", "close probability", "win probability"]),
-            0.5
-          ),
+          amount: safeNum(getValue(row, ["amount", "value", "deal value", "expected revenue"]), 0),
+          stage: normalizeStage(getValue(row, ["stage", "pipeline stage"])),
+          probability: normalizedProbability,
           closeDate: parseDate(getValue(row, ["close date", "expected close date"])),
           nextAction: String(getValue(row, ["next action"]) || "").trim(),
           nextActionDueAt: parseDate(getValue(row, ["next action due", "next action due date"])),
@@ -251,11 +266,21 @@ router.post("/spreadsheet", requireAuth, async (req, res) => {
           continue;
         }
 
+        const existingMetric = await metricsCollection.findOne({
+          orgId: ctx.orgId,
+          date,
+        });
+
+        if (existingMetric) {
+          skipped += 1;
+          continue;
+        }
+
         await metricsCollection.insertOne({
           orgId: ctx.orgId,
           date,
-          revenue: safeNum(getValue(row, ["revenue"]), 0),
-          spend: safeNum(getValue(row, ["spend"]), 0),
+          revenue: safeNum(getValue(row, ["revenue", "sales"]), 0),
+          spend: safeNum(getValue(row, ["spend", "ad spend", "cost"]), 0),
           leads: safeNum(getValue(row, ["leads"]), 0),
           createdAt: new Date(),
           updatedAt: new Date(),

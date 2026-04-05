@@ -2,6 +2,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import { Resend } from "resend";
 
 import User from "../models/User.js";
 import Organization from "../models/Organization.js";
@@ -9,9 +10,11 @@ import Membership from "../models/Membership.js";
 
 import { requireAuth } from "../middleware/auth.js";
 
-console.log("AUTH ROUTES LOADED");
-
 const router = express.Router();
+
+const resend = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
 
 /* ------------------------------------------------ */
 /* Defaults */
@@ -85,11 +88,50 @@ function resolvePermissions(membershipRole, membershipPermissions) {
 }
 
 async function sendPasswordResetEmail({ to, resetUrl }) {
-  // Temporary Phase 1 version
-  // Replace later with Resend / SendGrid / Postmark
-  console.log("PASSWORD RESET EMAIL");
-  console.log("TO:", to);
-  console.log("RESET URL:", resetUrl);
+  if (!resend) {
+    console.warn("RESEND_API_KEY missing. Falling back to console log.");
+    console.log("PASSWORD RESET EMAIL");
+    console.log("TO:", to);
+    console.log("RESET URL:", resetUrl);
+    return;
+  }
+
+  const fromEmail =
+    process.env.RESEND_FROM_EMAIL || "no-reply@atlasrevenueai.com";
+
+  await resend.emails.send({
+    from: `Atlas Revenue AI <${fromEmail}>`,
+    to,
+    subject: "Reset your Atlas password",
+    html: `
+      <div style="font-family: Arial, sans-serif; padding: 24px; color: #0f172a;">
+        <h2 style="margin-bottom: 12px;">Reset your Atlas password</h2>
+        <p style="margin-bottom: 16px;">
+          We received a request to reset your password for Atlas Revenue AI.
+        </p>
+        <p style="margin-bottom: 24px;">
+          Click the button below to choose a new password:
+        </p>
+        <a
+          href="${resetUrl}"
+          style="display:inline-block;padding:12px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;"
+        >
+          Reset Password
+        </a>
+        <p style="margin-top: 24px; font-size: 14px; color: #475569;">
+          This link will expire in 1 hour.
+        </p>
+        <p style="margin-top: 8px; font-size: 14px; color: #475569;">
+          If you did not request this, you can safely ignore this email.
+        </p>
+        <p style="margin-top: 24px; font-size: 13px; color: #64748b;">
+          If the button does not work, copy and paste this link into your browser:
+          <br />
+          <span>${resetUrl}</span>
+        </p>
+      </div>
+    `,
+  });
 }
 
 /* ------------------------------------------------ */
@@ -160,7 +202,10 @@ router.post("/forgot-password", async (req, res) => {
       }
     );
 
-    const resetUrl = `https://app.atlasrevenueai.com/reset-password?token=${resetToken}`;
+    const appBaseUrl =
+      process.env.APP_BASE_URL || "https://app.atlasrevenueai.com";
+
+    const resetUrl = `${appBaseUrl.replace(/\/+$/, "")}/reset-password?token=${resetToken}`;
 
     await sendPasswordResetEmail({
       to: user.email,

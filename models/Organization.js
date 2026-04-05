@@ -24,6 +24,69 @@ const integrationStateSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const usageSchema = new mongoose.Schema(
+  {
+    aiAnalyses: { type: Number, default: 0 },
+    reportsGenerated: { type: Number, default: 0 },
+    forecastsRun: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+const trialSchema = new mongoose.Schema(
+  {
+    startedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    endsAt: {
+      type: Date,
+      default: () => {
+        const d = new Date();
+        d.setDate(d.getDate() + 7);
+        return d;
+      },
+    },
+    status: {
+      type: String,
+      enum: ["none", "trialing", "expired", "converted"],
+      default: "trialing",
+      index: true,
+    },
+  },
+  { _id: false }
+);
+
+const billingSchema = new mongoose.Schema(
+  {
+    stripeCustomerId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    stripeSubscriptionId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    stripePriceId: {
+      type: String,
+      default: null,
+    },
+    status: {
+      type: String,
+      enum: ["inactive", "active", "past_due", "canceled", "trialing"],
+      default: "trialing",
+      index: true,
+    },
+    currentPeriodEnd: {
+      type: Date,
+      default: null,
+    },
+  },
+  { _id: false }
+);
+
 const OrganizationSchema = new mongoose.Schema(
   {
     name: {
@@ -63,20 +126,13 @@ const OrganizationSchema = new mongoose.Schema(
     },
 
     trial: {
-      startedAt: { type: Date, default: null },
-      endsAt: { type: Date, default: null },
-      status: {
-        type: String,
-        enum: ["none", "trialing", "expired", "converted"],
-        default: "none",
-        index: true,
-      },
+      type: trialSchema,
+      default: () => ({}),
     },
 
     usage: {
-      aiAnalyses: { type: Number, default: 0 },
-      reportsGenerated: { type: Number, default: 0 },
-      forecastsRun: { type: Number, default: 0 },
+      type: usageSchema,
+      default: () => ({}),
     },
 
     /* -------------------------------- */
@@ -85,27 +141,27 @@ const OrganizationSchema = new mongoose.Schema(
 
     demoCompleted: {
       type: Boolean,
-      default: false,
+      default: true,
       index: true,
     },
 
     approvedForAccess: {
       type: Boolean,
-      default: false,
+      default: true,
       index: true,
     },
 
     accessStatus: {
       type: String,
       enum: ["pending", "active", "suspended"],
-      default: "pending",
+      default: "active",
       index: true,
     },
 
     paymentStatus: {
       type: String,
-      enum: ["pending", "paid", "past_due", "canceled"],
-      default: "pending",
+      enum: ["pending", "paid", "past_due", "canceled", "trialing"],
+      default: "trialing",
       index: true,
     },
 
@@ -160,37 +216,51 @@ const OrganizationSchema = new mongoose.Schema(
     /* -------------------------------- */
 
     billing: {
-      stripeCustomerId: {
-        type: String,
-        default: null,
-        index: true,
-      },
-
-      stripeSubscriptionId: {
-        type: String,
-        default: null,
-        index: true,
-      },
-
-      stripePriceId: {
-        type: String,
-        default: null,
-      },
-
-      status: {
-        type: String,
-        enum: ["active", "past_due", "canceled", "trialing"],
-        default: "active",
-      },
-
-      currentPeriodEnd: {
-        type: Date,
-        default: null,
-      },
+      type: billingSchema,
+      default: () => ({}),
     },
   },
   { timestamps: true }
 );
+
+/* -------------------------------- */
+/* Auto-handle trial expiration     */
+/* -------------------------------- */
+OrganizationSchema.pre("save", function (next) {
+  const now = new Date();
+
+  if (
+    this.trial?.status === "trialing" &&
+    this.trial?.endsAt &&
+    now > new Date(this.trial.endsAt)
+  ) {
+    this.trial.status = "expired";
+
+    if (this.billing?.status === "trialing") {
+      this.billing.status = "inactive";
+    }
+
+    if (this.paymentStatus === "trialing") {
+      this.paymentStatus = "pending";
+    }
+
+    if (this.accessStatus === "active") {
+      this.accessStatus = "suspended";
+    }
+  }
+
+  if (
+    this.billing?.status === "active" &&
+    this.trial?.status !== "converted"
+  ) {
+    this.trial.status = "converted";
+    this.paymentStatus = "paid";
+    this.accessStatus = "active";
+    this.approvedForAccess = true;
+  }
+
+  next();
+});
 
 /* -------------------------------- */
 /* Atlas collection name            */

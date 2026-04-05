@@ -1,7 +1,16 @@
 // backend/routes/ai.js
 import express from "express";
+import OpenAI from "openai";
+import { requireAuth } from "../middleware/auth.js";
+import Organization from "../models/Organization.js";
+import Membership from "../models/Membership.js";
 
 const router = express.Router();
+
+const openai =
+  process.env.OPENAI_API_KEY
+    ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    : null;
 
 const safeNum = (v) => {
   const n = Number(v);
@@ -99,6 +108,28 @@ function buildInsights(kpis = {}) {
   return items.slice(0, 3);
 }
 
+function getOrgId(req) {
+  return (
+    req.headers["x-org-id"] ||
+    req.headers["x-workspace-id"] ||
+    req.body?.orgId ||
+    null
+  );
+}
+
+async function requireMembership(userId, orgId) {
+  if (!userId || !orgId) return null;
+
+  return Membership.findOne({
+    userId,
+    orgId,
+    status: { $nin: ["disabled", "suspended"] },
+  }).lean();
+}
+
+/* -------------------------------- */
+/* Local fallback insights          */
+/* -------------------------------- */
 router.post("/insights", (req, res) => {
   const body = req.body || {};
   const kpis = body.kpis || {};
@@ -110,6 +141,130 @@ router.post("/insights", (req, res) => {
     insights: buildInsights(kpis),
     source: "local",
   });
+});
+
+/* -------------------------------- */
+/* OpenAI analysis                  */
+/* -------------------------------- */
+router.post("/analyze", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.userId || req.user?.id;
+    const orgId = getOrgId(req);
+
+    if (!userId) {
+      return res.status(401).json({
+        ok: false,
+        message: "Unauthorized",
+      });
+    }
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context.",
+      });
+    }
+
+    const membership = await requireMembership(userId, orgId);
+    if (!membership) {
+      return res.status(403).json({
+        ok: false,
+        message: "You do not have access to this workspace.",
+      });
+    }
+
+    const org = await Organization.findById(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Organization not found.",
+      });
+    }
+
+    const question = String(req.body?.question || "").trim();
+    const metrics = req.body?.metrics || {};
+    const context = req.body?.context || {};
+
+    if (!openai) {
+      return res.json({
+        ok: true,
+        result:
+          "OpenAI is not connected yet. Add OPENAI_API_KEY in backend environment variables to enable Atlas AI analysis.",
+        source: "fallback",
+      });
+    }
+
+    const prompt = `
+You are Atlas Revenue AI, a revenue intelligence system for agencies, B2B companies, and executive teams.
+
+Your job:
+- analyze the provided business data
+- identify revenue risks
+- identify growth opportunities
+- recommend next best actions
+- write clearly for an executive audience
+
+Return your response in this structure:
+
+Executive Summary:
+- short summary
+
+Top Risks:
+- bullets
+
+Top Opportunities:
+- bullets
+
+Recommended Actions:
+- numbered list
+
+Question:
+${question || "Analyze this business and provide strategic revenue guidance."}
+
+Metrics:
+${JSON.stringify(metrics, null, 2)}
+
+Context:
+${JSON.stringify(context, null, 2)}
+`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.4,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are Atlas Revenue AI. Be strategic, concise, executive-friendly, and focused on revenue, pipeline, forecasting, attribution, CAC, and growth.",
+        },
+        {
+          role: "user",
+          content: prompt,
+        },
+      ],
+    });
+
+    const result =
+      completion?.choices?.[0]?.message?.content ||
+      "No analysis returned.";
+
+    org.usage = org.usage || {};
+    org.usage.aiAnalyses = safeNum(org.usage.aiAnalyses) + 1;
+    await org.save();
+
+    return res.json({
+      ok: true,
+      result,
+      usage: org.usage,
+      source: "openai",
+    });
+  } catch (err) {
+    console.error("AI ANALYZE ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "AI analysis failed.",
+    });
+  }
 });
 
 export default router;

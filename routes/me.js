@@ -7,10 +7,39 @@ import enforceTrialStatus from "../utils/enforceTrialStatus.js";
 
 const router = express.Router();
 
+function normalizeWorkspace(org) {
+  if (!org) return null;
+
+  return {
+    _id: org._id,
+    id: org._id,
+    name: org.name || org.companyName || "Workspace",
+    slug: org.slug || null,
+    plan: org.plan || null,
+    status: org.status || org.accessStatus || null,
+    billing: org.billing || {
+      status: org.paymentStatus || "inactive",
+    },
+    trial: org.trial || {
+      status: "none",
+      startedAt: null,
+      endsAt: null,
+    },
+  };
+}
+
 router.get("/", requireAuth, async (req, res) => {
   try {
     const userId = req.user?.userId || req.user?.id;
-    const activeOrgId =
+
+    if (!userId) {
+      return res.status(401).json({
+        ok: false,
+        error: "Unauthorized",
+      });
+    }
+
+    const requestedOrgId =
       req.headers["x-org-id"] ||
       req.headers["x-workspace-id"] ||
       req.user?.activeWorkspace ||
@@ -19,12 +48,10 @@ router.get("/", requireAuth, async (req, res) => {
       req.user?.org ||
       null;
 
-    const memberships = userId
-      ? await Membership.find({
-          userId,
-          status: { $nin: ["disabled", "suspended"] },
-        }).lean()
-      : [];
+    const memberships = await Membership.find({
+      userId,
+      status: { $nin: ["disabled", "suspended"] },
+    }).lean();
 
     const orgIds = memberships.map((m) => m.orgId).filter(Boolean);
 
@@ -42,10 +69,22 @@ router.get("/", requireAuth, async (req, res) => {
 
     let activeOrganization = null;
 
-    if (activeOrgId) {
+    if (requestedOrgId) {
       activeOrganization =
-        orgMap.get(String(activeOrgId)) ||
-        (await Organization.findById(activeOrgId));
+        orgMap.get(String(requestedOrgId)) ||
+        (await Organization.findById(requestedOrgId));
+
+      if (activeOrganization) {
+        await enforceTrialStatus(activeOrganization);
+        activeOrganization =
+          activeOrganization.toObject?.() || activeOrganization;
+      }
+    }
+
+    if (!activeOrganization && memberships.length) {
+      const firstOrgId = memberships[0]?.orgId;
+      activeOrganization =
+        orgMap.get(String(firstOrgId)) || (await Organization.findById(firstOrgId));
 
       if (activeOrganization) {
         await enforceTrialStatus(activeOrganization);
@@ -58,17 +97,24 @@ router.get("/", requireAuth, async (req, res) => {
       status: activeOrganization?.paymentStatus || "inactive",
     };
 
-    const plan = activeOrganization?.plan || null;
-    const status =
-      activeOrganization?.status ||
-      activeOrganization?.accessStatus ||
-      null;
-
     const trial = activeOrganization?.trial || {
       status: "none",
       startedAt: null,
       endsAt: null,
     };
+
+    const plan = activeOrganization?.plan || null;
+    const accessStatus =
+      activeOrganization?.accessStatus ||
+      activeOrganization?.status ||
+      null;
+    const paymentStatus = activeOrganization?.paymentStatus || null;
+
+    const activeWorkspace = normalizeWorkspace(activeOrganization);
+
+    const activeMembership = activeOrganization
+      ? memberships.find((m) => String(m.orgId) === String(activeOrganization._id))
+      : null;
 
     const workspaces = memberships
       .map((membership) => {
@@ -76,22 +122,7 @@ router.get("/", requireAuth, async (req, res) => {
         if (!org) return null;
 
         return {
-          workspace: {
-            _id: org._id,
-            id: org._id,
-            name: org.name || org.companyName || "Workspace",
-            slug: org.slug || null,
-            plan: org.plan || null,
-            status: org.status || org.accessStatus || null,
-            billing: org.billing || {
-              status: org.paymentStatus || "inactive",
-            },
-            trial: org.trial || {
-              status: "none",
-              startedAt: null,
-              endsAt: null,
-            },
-          },
+          workspace: normalizeWorkspace(org),
           role:
             membership.role ||
             req.user?.workspaceRole ||
@@ -104,9 +135,15 @@ router.get("/", requireAuth, async (req, res) => {
       })
       .filter(Boolean);
 
-    const activeMembership = memberships.find(
-      (m) => String(m.orgId) === String(activeOrgId)
-    );
+    const effectiveAccessAllowed =
+      accessStatus === "active" &&
+      (
+        billing?.status === "active" ||
+        billing?.status === "trialing" ||
+        paymentStatus === "paid" ||
+        paymentStatus === "trialing"
+      ) &&
+      trial.status !== "expired";
 
     return res.json({
       ok: true,
@@ -117,23 +154,7 @@ router.get("/", requireAuth, async (req, res) => {
       },
 
       organization: activeOrganization || null,
-
-      activeWorkspace: activeOrganization
-        ? {
-            _id: activeOrganization._id,
-            id: activeOrganization._id,
-            name:
-              activeOrganization.name ||
-              activeOrganization.companyName ||
-              "Workspace",
-            slug: activeOrganization.slug || null,
-            plan,
-            status,
-            billing,
-            trial,
-          }
-        : null,
-
+      activeWorkspace,
       workspaces,
 
       role:
@@ -153,13 +174,12 @@ router.get("/", requireAuth, async (req, res) => {
 
       billing,
       plan,
-      status,
+      status: accessStatus,
       trial,
-      accessStatus:
-        activeOrganization?.accessStatus ||
-        activeOrganization?.status ||
-        null,
-      paymentStatus: activeOrganization?.paymentStatus || null,
+      accessStatus,
+      paymentStatus,
+      workspaceActive: effectiveAccessAllowed,
+      trialExpired: trial.status === "expired",
     });
   } catch (err) {
     console.error("ME route error:", err);

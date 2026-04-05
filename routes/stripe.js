@@ -7,18 +7,46 @@ const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const PRICE_TO_PLAN = {
-  "prod_U7xhuJfOxn2BVn": "SCALE",
-  "prod_U7xiW04bYxBUQj": "GROWTH",
-  "prod_U7xjaSLR63qfw6": "ENTERPRISE",
+  "price_1TC9EyKmVYjJJZfS0ung29G2": "SCALE",
+  "price_1TC9FwKmVYjJJZfSAgSN5oK8": "GROWTH",
+  "price_1TC9GUKmVYjJJZfS8E3rxQoG": "ENTERPRISE",
 };
 
 function normalizePlanFromPrice(priceId = "") {
   return PRICE_TO_PLAN[String(priceId)] || "SCALE";
 }
 
+function getFrontendUrl() {
+  return (
+    process.env.FRONTEND_URL ||
+    "https://app.atlasrevenueai.com"
+  );
+}
+
+function buildBillingState({
+  stripeCustomerId = null,
+  stripeSubscriptionId = null,
+  stripePriceId = null,
+  status = "inactive",
+  currentPeriodEnd = null,
+  existingBilling = {},
+}) {
+  return {
+    ...(existingBilling || {}),
+    stripeCustomerId:
+      stripeCustomerId ?? existingBilling?.stripeCustomerId ?? null,
+    stripeSubscriptionId:
+      stripeSubscriptionId ?? existingBilling?.stripeSubscriptionId ?? null,
+    stripePriceId: stripePriceId ?? existingBilling?.stripePriceId ?? null,
+    status,
+    currentPeriodEnd:
+      currentPeriodEnd ?? existingBilling?.currentPeriodEnd ?? null,
+  };
+}
+
 router.post("/create-checkout-session", async (req, res) => {
   try {
-    const { priceId, email, orgId } = req.body;
+    const { priceId, email, orgId } = req.body || {};
 
     if (!priceId) {
       return res.status(400).json({ error: "priceId is required" });
@@ -35,11 +63,12 @@ router.post("/create-checkout-session", async (req, res) => {
     }
 
     const targetPlan = normalizePlanFromPrice(priceId);
+    const frontendUrl = getFrontendUrl();
 
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
-      customer_email: email,
+      customer_email: email || undefined,
       line_items: [
         {
           price: priceId,
@@ -58,20 +87,20 @@ router.post("/create-checkout-session", async (req, res) => {
           priceId: String(priceId),
         },
       },
-      success_url: `${process.env.FRONTEND_URL}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/pricing?checkout=cancelled`,
+      success_url: `${frontendUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${frontendUrl}/billing?checkout=cancelled`,
     });
 
     return res.json({ url: session.url });
   } catch (err) {
     console.error("Stripe checkout failed:", err);
-    return res.status(500).json({ error: "Stripe checkout failed" });
+    return res.status(500).json({ error: err?.message || "Stripe checkout failed" });
   }
 });
 
 router.post("/create-invoice", async (req, res) => {
   try {
-    const { customerId, amount } = req.body;
+    const { customerId, amount } = req.body || {};
 
     await stripe.invoiceItems.create({
       customer: customerId,
@@ -94,7 +123,7 @@ router.post("/create-invoice", async (req, res) => {
 
 router.post("/create-portal-session", async (req, res) => {
   try {
-    const { orgId } = req.body;
+    const { orgId } = req.body || {};
 
     if (!orgId) {
       return res.status(400).json({ error: "orgId is required" });
@@ -109,153 +138,253 @@ router.post("/create-portal-session", async (req, res) => {
     const customerId = org?.billing?.stripeCustomerId;
 
     if (!customerId) {
-      return res.status(400).json({ error: "No Stripe customer found for this workspace" });
+      return res.status(400).json({
+        error: "No Stripe customer found for this workspace",
+      });
     }
 
     const portalSession = await stripe.billingPortal.sessions.create({
       customer: customerId,
-      return_url: `${process.env.FRONTEND_URL}/billing`,
+      return_url: `${getFrontendUrl()}/billing`,
     });
 
     return res.json({ url: portalSession.url });
   } catch (err) {
     console.error("Stripe portal failed:", err);
-    return res.status(500).json({ error: "Stripe portal failed" });
+    return res.status(500).json({ error: err?.message || "Stripe portal failed" });
   }
 });
 
-router.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    let event;
+router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
 
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.error("Webhook signature failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error("Webhook signature failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
 
-    try {
-      switch (event.type) {
-        case "checkout.session.completed": {
-          const session = event.data.object;
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
 
-          const orgId = session?.metadata?.orgId;
-          const targetPlan = session?.metadata?.targetPlan || "SCALE";
-          const stripeCustomerId = session?.customer || null;
-          const stripeSubscriptionId = session?.subscription || null;
-          const stripePriceId = session?.metadata?.priceId || null;
+        const orgId = session?.metadata?.orgId;
+        const targetPlan = session?.metadata?.targetPlan || "SCALE";
+        const stripeCustomerId = session?.customer || null;
+        const stripeSubscriptionId = session?.subscription || null;
+        const stripePriceId = session?.metadata?.priceId || null;
 
-          if (orgId) {
-            await Organization.findByIdAndUpdate(orgId, {
-              plan: targetPlan,
-              paymentStatus: "paid",
-              accessStatus: "active",
-              approvedForAccess: true,
-              billing: {
-                stripeCustomerId,
-                stripeSubscriptionId,
-                stripePriceId,
-                status: "active",
-                currentPeriodEnd: null,
-              },
-            });
-          }
-
-          console.log(`Subscription created for org ${orgId} with plan ${targetPlan}`);
-          break;
-        }
-
-        case "invoice.paid": {
-          const invoice = event.data.object;
-          const stripeCustomerId = invoice?.customer || null;
-          const stripeSubscriptionId = invoice?.subscription || null;
-          const stripePriceId = invoice?.lines?.data?.[0]?.price?.id || null;
-          const targetPlan = normalizePlanFromPrice(stripePriceId);
-
-          const org = await Organization.findOne({
-            "billing.stripeCustomerId": stripeCustomerId,
-          });
+        if (orgId) {
+          const org = await Organization.findById(orgId);
 
           if (org) {
             org.plan = targetPlan;
             org.paymentStatus = "paid";
             org.accessStatus = "active";
             org.approvedForAccess = true;
-            org.billing.status = "active";
-            org.billing.stripeSubscriptionId =
-              stripeSubscriptionId || org.billing.stripeSubscriptionId;
-            if (stripePriceId) {
-              org.billing.stripePriceId = stripePriceId;
-            }
-            if (invoice?.lines?.data?.[0]?.period?.end) {
-              org.billing.currentPeriodEnd = new Date(
-                invoice.lines.data[0].period.end * 1000
-              );
-            }
+            org.demoCompleted = true;
+
+            org.trial = {
+              ...(org.trial || {}),
+              status: "converted",
+            };
+
+            org.billing = buildBillingState({
+              stripeCustomerId,
+              stripeSubscriptionId,
+              stripePriceId,
+              status: "active",
+              currentPeriodEnd: org.billing?.currentPeriodEnd || null,
+              existingBilling: org.billing,
+            });
+
             await org.save();
           }
-
-          console.log("Invoice paid");
-          break;
         }
 
-        case "invoice.payment_failed": {
-          const invoice = event.data.object;
-          const stripeCustomerId = invoice?.customer || null;
-
-          const org = await Organization.findOne({
-            "billing.stripeCustomerId": stripeCustomerId,
-          });
-
-          if (org) {
-            org.paymentStatus = "past_due";
-            org.accessStatus = "suspended";
-            org.billing.status = "past_due";
-            await org.save();
-          }
-
-          console.log("Invoice payment failed");
-          break;
-        }
-
-        case "customer.subscription.deleted": {
-          const subscription = event.data.object;
-          const stripeSubscriptionId = subscription?.id || null;
-
-          const org = await Organization.findOne({
-            "billing.stripeSubscriptionId": stripeSubscriptionId,
-          });
-
-          if (org) {
-            org.plan = "SCALE";
-            org.paymentStatus = "canceled";
-            org.accessStatus = "suspended";
-            org.billing.status = "canceled";
-            await org.save();
-          }
-
-          console.log("Subscription canceled");
-          break;
-        }
-
-        default:
-          console.log(`Unhandled event type ${event.type}`);
+        console.log(`Checkout completed for org ${orgId} with plan ${targetPlan}`);
+        break;
       }
 
-      return res.json({ received: true });
-    } catch (err) {
-      console.error("Webhook handling failed:", err);
-      return res.status(500).json({ error: "Webhook handling failed" });
+      case "customer.subscription.created":
+      case "customer.subscription.updated": {
+        const subscription = event.data.object;
+        const stripeSubscriptionId = subscription?.id || null;
+        const stripeCustomerId = subscription?.customer || null;
+        const stripePriceId =
+          subscription?.items?.data?.[0]?.price?.id || null;
+        const targetPlan = normalizePlanFromPrice(stripePriceId);
+        const currentPeriodEnd = subscription?.current_period_end
+          ? new Date(subscription.current_period_end * 1000)
+          : null;
+
+        const org =
+          (subscription?.metadata?.orgId
+            ? await Organization.findById(subscription.metadata.orgId)
+            : null) ||
+          (stripeCustomerId
+            ? await Organization.findOne({
+                "billing.stripeCustomerId": stripeCustomerId,
+              })
+            : null);
+
+        if (org) {
+          const subStatus = String(subscription?.status || "").toLowerCase();
+          const paidLike =
+            subStatus === "active" || subStatus === "trialing";
+
+          org.plan = targetPlan || org.plan;
+          org.paymentStatus = paidLike ? "paid" : "past_due";
+          org.accessStatus = paidLike ? "active" : "suspended";
+          org.approvedForAccess = paidLike;
+          org.demoCompleted = true;
+
+          if (paidLike) {
+            org.trial = {
+              ...(org.trial || {}),
+              status: "converted",
+            };
+          }
+
+          org.billing = buildBillingState({
+            stripeCustomerId,
+            stripeSubscriptionId,
+            stripePriceId,
+            status: paidLike ? "active" : "past_due",
+            currentPeriodEnd,
+            existingBilling: org.billing,
+          });
+
+          await org.save();
+        }
+
+        console.log(`Subscription synced: ${stripeSubscriptionId}`);
+        break;
+      }
+
+      case "invoice.paid": {
+        const invoice = event.data.object;
+        const stripeCustomerId = invoice?.customer || null;
+        const stripeSubscriptionId = invoice?.subscription || null;
+        const stripePriceId = invoice?.lines?.data?.[0]?.price?.id || null;
+        const targetPlan = normalizePlanFromPrice(stripePriceId);
+
+        const org = await Organization.findOne({
+          "billing.stripeCustomerId": stripeCustomerId,
+        });
+
+        if (org) {
+          org.plan = targetPlan || org.plan;
+          org.paymentStatus = "paid";
+          org.accessStatus = "active";
+          org.approvedForAccess = true;
+          org.demoCompleted = true;
+          org.trial = {
+            ...(org.trial || {}),
+            status: "converted",
+          };
+
+          org.billing = buildBillingState({
+            stripeCustomerId,
+            stripeSubscriptionId,
+            stripePriceId,
+            status: "active",
+            currentPeriodEnd: invoice?.lines?.data?.[0]?.period?.end
+              ? new Date(invoice.lines.data[0].period.end * 1000)
+              : org.billing?.currentPeriodEnd || null,
+            existingBilling: org.billing,
+          });
+
+          await org.save();
+        }
+
+        console.log("Invoice paid");
+        break;
+      }
+
+      case "invoice.payment_failed": {
+        const invoice = event.data.object;
+        const stripeCustomerId = invoice?.customer || null;
+
+        const org = await Organization.findOne({
+          "billing.stripeCustomerId": stripeCustomerId,
+        });
+
+        if (org) {
+          org.paymentStatus = "past_due";
+          org.accessStatus = "suspended";
+          org.approvedForAccess = false;
+
+          org.billing = buildBillingState({
+            stripeCustomerId,
+            stripeSubscriptionId: org.billing?.stripeSubscriptionId || null,
+            stripePriceId: org.billing?.stripePriceId || null,
+            status: "past_due",
+            currentPeriodEnd: org.billing?.currentPeriodEnd || null,
+            existingBilling: org.billing,
+          });
+
+          await org.save();
+        }
+
+        console.log("Invoice payment failed");
+        break;
+      }
+
+      case "customer.subscription.deleted": {
+        const subscription = event.data.object;
+        const stripeSubscriptionId = subscription?.id || null;
+        const stripeCustomerId = subscription?.customer || null;
+
+        const org =
+          (stripeSubscriptionId
+            ? await Organization.findOne({
+                "billing.stripeSubscriptionId": stripeSubscriptionId,
+              })
+            : null) ||
+          (stripeCustomerId
+            ? await Organization.findOne({
+                "billing.stripeCustomerId": stripeCustomerId,
+              })
+            : null);
+
+        if (org) {
+          org.paymentStatus = "canceled";
+          org.accessStatus = "suspended";
+          org.approvedForAccess = false;
+
+          org.billing = buildBillingState({
+            stripeCustomerId,
+            stripeSubscriptionId,
+            stripePriceId: org.billing?.stripePriceId || null,
+            status: "canceled",
+            currentPeriodEnd: org.billing?.currentPeriodEnd || null,
+            existingBilling: org.billing,
+          });
+
+          await org.save();
+        }
+
+        console.log("Subscription canceled");
+        break;
+      }
+
+      default:
+        console.log(`Unhandled event type ${event.type}`);
     }
+
+    return res.json({ received: true });
+  } catch (err) {
+    console.error("Webhook handling failed:", err);
+    return res.status(500).json({ error: "Webhook handling failed" });
   }
-);
+});
 
 export default router;
