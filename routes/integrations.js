@@ -165,6 +165,7 @@ function buildGoogleAdsAuthUrl(orgId) {
     response_type: "code",
     access_type: "offline",
     prompt: "consent select_account",
+    include_granted_scopes: "false",
     scope,
     state: JSON.stringify({ orgId: String(orgId), provider: "google_ads" }),
   });
