@@ -879,8 +879,8 @@ router.get("/google_ads/callback", async (req, res) => {
     }
 
     const profile = await getGoogleUserProfile(accessToken);
-    const externalAccountId = "6700301842"
-    const externalAccountName = "Atlas Revenue AI
+    const externalAccountId = "6700301842";
+    const externalAccountName = "Atlas Revenue AI";
       profile?.email || profile?.name || "Google Ads Account";
 
     let connection = await IntegrationConnection.findOne({
