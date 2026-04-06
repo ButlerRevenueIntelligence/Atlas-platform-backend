@@ -87,7 +87,7 @@ router.post("/create-checkout-session", async (req, res) => {
           priceId: String(priceId),
         },
       },
-      success_url: `${frontendUrl}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${frontendUrl}/billing-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${frontendUrl}/billing?checkout=cancelled`,
     });
 
