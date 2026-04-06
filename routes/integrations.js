@@ -227,6 +227,50 @@ async function getGoogleUserProfile(accessToken) {
   return data;
 }
 
+async function getGoogleAdsAccessibleCustomers(accessToken) {
+  const developerToken = String(
+    process.env.GOOGLE_ADS_DEVELOPER_TOKEN || ""
+  ).trim();
+
+  if (!developerToken) {
+    throw new Error("GOOGLE_ADS_DEVELOPER_TOKEN is missing");
+  }
+
+  const loginCustomerId = String(
+    process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || ""
+  )
+    .trim()
+    .replace(/-/g, "");
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "developer-token": developerToken,
+  };
+
+  if (loginCustomerId) {
+    headers["login-customer-id"] = loginCustomerId;
+  }
+
+  const res = await fetch(
+    "https://googleads.googleapis.com/v14/customers:listAccessibleCustomers",
+    {
+      method: "GET",
+      headers,
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    console.error("Google Ads accessible customers error:", data);
+    throw new Error(
+      data?.error?.message || "Failed to fetch accessible Google Ads customers"
+    );
+  }
+
+  return Array.isArray(data?.resourceNames) ? data.resourceNames : [];
+}
+
 /* -------------------------------- */
 /* Shared helpers                   */
 /* -------------------------------- */
@@ -280,6 +324,11 @@ async function formatIntegrations(orgId) {
         externalAccountName: live.externalAccountName || null,
         lastSyncStatus: live.lastSyncStatus || "never",
         lastError: live.lastError || null,
+        accessibleCustomers: Array.isArray(live?.metadata?.accessibleCustomers)
+          ? live.metadata.accessibleCustomers
+          : [],
+        needsSelection: !!live?.metadata?.needsSelection,
+        selectedCustomer: live?.metadata?.selectedCustomer || null,
         supportsLive: item.supportsLive,
       };
     }
@@ -297,6 +346,9 @@ async function formatIntegrations(orgId) {
       externalAccountName: null,
       lastSyncStatus: "never",
       lastError: null,
+      accessibleCustomers: [],
+      needsSelection: false,
+      selectedCustomer: null,
       supportsLive: item.supportsLive,
     };
   });
@@ -541,6 +593,8 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
       HUBSPOT_CLIENT_SECRET_EXISTS: !!process.env.HUBSPOT_CLIENT_SECRET,
       GOOGLE_CLIENT_ID_EXISTS: !!process.env.GOOGLE_CLIENT_ID,
       GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
+      GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
       APP_BASE_URL: process.env.APP_BASE_URL,
       FRONTEND_URL: process.env.FRONTEND_URL,
     });
@@ -703,12 +757,117 @@ router.get("/google_ads/status", requireAuth, async (req, res) => {
       lastSyncAt: connection?.lastSyncAt || null,
       lastSyncStatus: connection?.lastSyncStatus || "never",
       lastError: connection?.lastError || null,
+      accessibleCustomers: Array.isArray(connection?.metadata?.accessibleCustomers)
+        ? connection.metadata.accessibleCustomers
+        : [],
+      needsSelection: !!connection?.metadata?.needsSelection,
+      selectedCustomer: connection?.metadata?.selectedCustomer || null,
     });
   } catch (err) {
     console.error("GOOGLE ADS status error:", err);
     return res.status(500).json({
       ok: false,
       message: "Failed to load Google Ads status",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* GOOGLE ADS SELECT ACCOUNT        */
+/* -------------------------------- */
+
+router.post("/google_ads/select-account", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    const { customerId } = req.body || {};
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    if (!customerId) {
+      return res.status(400).json({
+        ok: false,
+        message: "customerId is required",
+      });
+    }
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "google_ads",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Google Ads connection not found",
+      });
+    }
+
+    const accessibleCustomers = Array.isArray(connection?.metadata?.accessibleCustomers)
+      ? connection.metadata.accessibleCustomers
+      : [];
+
+    const normalizedTarget = String(customerId).replace(/\D/g, "");
+
+    const matched = accessibleCustomers.find((item) => {
+      const normalizedItem = String(item)
+        .replace("customers/", "")
+        .replace(/\D/g, "");
+      return normalizedItem === normalizedTarget;
+    });
+
+    if (!matched) {
+      return res.status(400).json({
+        ok: false,
+        message: "Selected account is not in accessible customers list",
+      });
+    }
+
+    const externalAccountId = String(matched).replace("customers/", "");
+    const externalAccountName = `Google Ads ${externalAccountId}`;
+
+    connection.externalAccountId = externalAccountId;
+    connection.externalAccountName = externalAccountName;
+    connection.mode = "live";
+    connection.status = "connected";
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      selectedCustomer: matched,
+      needsSelection: false,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "google_ads", {
+      connected: true,
+      connectedAt: connection.connectedAt || new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Google Ads account selected",
+      integration: {
+        provider: "google_ads",
+        externalAccountId,
+        externalAccountName,
+      },
+      integrations: await formatIntegrations(orgId),
+    });
+  } catch (err) {
+    console.error("GOOGLE ADS select account error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to select Google Ads account",
       error: err.message,
     });
   }
@@ -841,12 +1000,17 @@ router.get("/google_ads/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
 
+    console.log("GOOGLE ADS CALLBACK HIT", {
+      hasCode: !!code,
+      hasState: !!state,
+      query: req.query,
+    });
+
     if (!code || !state) {
       return res.status(400).send("Missing code or state");
     }
 
-    let parsedState = null;
-
+    let parsedState;
     try {
       parsedState = JSON.parse(state);
     } catch {
@@ -875,13 +1039,37 @@ router.get("/google_ads/callback", async (req, res) => {
       .filter(Boolean);
 
     if (!accessToken) {
-      throw new Error("Google did not return an access token");
+      throw new Error("No access token returned");
     }
 
     const profile = await getGoogleUserProfile(accessToken);
-    const externalAccountId = "6700301842";
-    const externalAccountName = "Atlas Revenue AI";
-      profile?.email || profile?.name || "Google Ads Account";
+    const customers = await getGoogleAdsAccessibleCustomers(accessToken);
+
+    if (!customers.length) {
+      throw new Error(
+        "No accessible Google Ads accounts were found for this Google login"
+      );
+    }
+
+    const needsSelection = customers.length > 1;
+    const selectedCustomer = customers.length === 1 ? customers[0] : null;
+
+    const externalAccountId = selectedCustomer
+      ? selectedCustomer.replace("customers/", "")
+      : null;
+
+    const externalAccountName = externalAccountId
+      ? `Google Ads ${externalAccountId}`
+      : null;
+
+    console.log("GOOGLE ADS CONNECTED", {
+      orgId: String(orgId),
+      googleUserEmail: profile?.email || null,
+      customers,
+      selectedCustomer,
+      externalAccountId,
+      needsSelection,
+    });
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -907,6 +1095,9 @@ router.get("/google_ads/callback", async (req, res) => {
         metadata: {
           googleUserEmail: profile?.email || null,
           googleUserName: profile?.name || null,
+          accessibleCustomers: customers,
+          selectedCustomer,
+          needsSelection,
         },
       });
     } else {
@@ -930,6 +1121,9 @@ router.get("/google_ads/callback", async (req, res) => {
         ...(connection.metadata || {}),
         googleUserEmail: profile?.email || null,
         googleUserName: profile?.name || null,
+        accessibleCustomers: customers,
+        selectedCustomer,
+        needsSelection,
       };
     }
 
@@ -944,13 +1138,21 @@ router.get("/google_ads/callback", async (req, res) => {
 
     const frontendUrl =
       process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-    return res.redirect(`${frontendUrl}/integrations?connected=google_ads&mode=live`);
+
+    return res.redirect(
+      `${frontendUrl}/integrations?connected=google_ads&mode=live&needsSelection=${
+        needsSelection ? "1" : "0"
+      }`
+    );
   } catch (err) {
     console.error("Google Ads callback error:", err);
 
     const frontendUrl =
       process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-    return res.redirect(`${frontendUrl}/integrations?error=google_ads_callback_failed`);
+
+    return res.redirect(
+      `${frontendUrl}/integrations?error=google_ads_callback_failed`
+    );
   }
 });
 
