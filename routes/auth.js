@@ -133,7 +133,175 @@ async function sendPasswordResetEmail({ to, resetUrl }) {
     `,
   });
 }
+/* ------------------------------------------------ */
+/* PUBLIC SIGNUP ENABLED */
+/* ------------------------------------------------ */
+router.post("/signup", async (req, res) => {
+  try {
+    const name = String(req.body?.name || "").trim();
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
 
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        ok: false,
+        message: "All fields are required",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        message: "Password must be at least 8 characters",
+      });
+    }
+
+    const existing = await User.findOne({ email }).lean();
+    if (existing) {
+      return res.status(400).json({
+        ok: false,
+        message: "User already exists",
+      });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+
+    const user = await User.create({
+      name,
+      email,
+      passwordHash: hash,
+      password: hash,
+      role: "owner",
+      status: "active",
+    });
+
+    const slugBase = name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+
+    let slug = `${slugBase || "workspace"}-${Date.now()}`;
+
+    const org = await Organization.create({
+      name: `${name}'s Workspace`,
+      slug,
+      ownerId: user._id,
+      plan: "SCALE",
+      trial: {
+        startedAt: new Date(),
+        endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        status: "trialing",
+      },
+      billing: {
+        status: "trialing",
+      },
+      paymentStatus: "trialing",
+      accessStatus: "active",
+      approvedForAccess: true,
+      demoCompleted: true,
+    });
+
+    await Membership.create({
+      userId: user._id,
+      orgId: org._id,
+      workspaceId: org._id,
+      role: "owner",
+      status: "active",
+      permissions: FULL_PERMS,
+      joinedAt: new Date(),
+    });
+
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          orgId: org._id,
+          activeWorkspace: org._id,
+          role: "owner",
+          workspaces: [
+            {
+              workspace: org._id,
+              role: "owner",
+              status: "active",
+            },
+          ],
+        },
+      }
+    );
+
+    const token = signToken({
+      userId: user._id,
+      email: user.email,
+      role: "owner",
+      orgId: org._id,
+      activeWorkspace: org._id,
+    });
+
+    return res.json({
+      ok: true,
+      token,
+      user: {
+        id: String(user._id),
+        name: user.name,
+        email: user.email,
+        role: "owner",
+        orgId: String(org._id),
+        orgName: org.name,
+        plan: org.plan || "SCALE",
+        permissions: FULL_PERMS,
+      },
+      activeWorkspace: {
+        _id: String(org._id),
+        id: String(org._id),
+        name: org.name,
+        slug: org.slug,
+        plan: org.plan || "SCALE",
+        status: org.accessStatus || "active",
+        billing: org.billing || { status: "trialing" },
+        trial: org.trial || null,
+      },
+      workspace: {
+        _id: String(org._id),
+        id: String(org._id),
+        name: org.name,
+        slug: org.slug,
+        plan: org.plan || "SCALE",
+        status: org.accessStatus || "active",
+        billing: org.billing || { status: "trialing" },
+        trial: org.trial || null,
+      },
+      workspaces: [
+        {
+          workspace: {
+            _id: String(org._id),
+            id: String(org._id),
+            name: org.name,
+            slug: org.slug,
+            plan: org.plan || "SCALE",
+            status: org.accessStatus || "active",
+            billing: org.billing || { status: "trialing" },
+          },
+          role: "owner",
+          status: "active",
+          permissions: FULL_PERMS,
+        },
+      ],
+      membership: {
+        role: "owner",
+        status: "active",
+        permissions: FULL_PERMS,
+      },
+      trial: org.trial || null,
+    });
+  } catch (err) {
+    console.error("Signup error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Server error",
+    });
+  }
+});
 /* ------------------------------------------------ */
 /* JWT helper */
 /* ------------------------------------------------ */
@@ -154,82 +322,7 @@ function signToken({ userId, email, role, orgId, activeWorkspace }) {
     { expiresIn: "7d" }
   );
 }
-/* ------------------------------------------------ */
-/* PUBLIC SIGNUP ENABLED */
-/* ------------------------------------------------ */
-router.post("/signup", async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        ok: false,
-        message: "All fields are required",
-      });
-    }
-
-    if (password.length < 8) {
-      return res.status(400).json({
-        ok: false,
-        message: "Password must be at least 8 characters",
-      });
-    }
-
-    const existing = await User.findOne({ email });
-    if (existing) {
-      return res.status(400).json({
-        ok: false,
-        message: "User already exists",
-      });
-    }
-
-    const hash = await bcrypt.hash(password, 10);
-
-    const user = await User.create({
-      name,
-      email,
-      passwordHash: hash,
-      password: hash,
-      role: "owner",
-      status: "active",
-    });
-
-    const org = await Organization.create({
-      name: `${name}'s Workspace`,
-      slug: `${name.toLowerCase().replace(/\s+/g, "-")}-${Date.now()}`,
-      ownerId: user._id,
-      plan: "SCALE",
-    });
-
-    await Membership.create({
-      userId: user._id,
-      orgId: org._id,
-      role: "owner",
-      status: "active",
-    });
-
-    const token = signToken({
-      userId: user._id,
-      email: user.email,
-      role: "owner",
-      orgId: org._id,
-      activeWorkspace: org._id,
-    });
-
-    return res.json({
-      ok: true,
-      token,
-      user,
-      workspace: org,
-    });
-  } catch (err) {
-    console.error("Signup error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Server error",
-    });
-  }
-});
 /* ------------------------------------------------ */
 /* FORGOT PASSWORD */
 /* ------------------------------------------------ */
