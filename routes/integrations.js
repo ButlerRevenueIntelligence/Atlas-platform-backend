@@ -9,7 +9,7 @@ const INTEGRATIONS = [
   { id: "hubspot", name: "HubSpot CRM", category: "CRM", supportsLive: true },
   { id: "salesforce", name: "Salesforce", category: "CRM", supportsLive: false },
   { id: "google_ads", name: "Google Ads", category: "Advertising", supportsLive: true },
-  { id: "meta_ads", name: "Meta Ads", category: "Advertising", supportsLive: false },
+  { id: "meta_ads", name: "Meta Ads", category: "Advertising", supportsLive: true },
   { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: false },
   { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: true },
   { id: "stripe", name: "Stripe", category: "Payments", supportsLive: false },
@@ -359,6 +359,97 @@ async function getGA4AccountSummaries(accessToken) {
 }
 
 /* -------------------------------- */
+/* Meta Ads OAuth helpers           */
+/* -------------------------------- */
+
+function buildMetaAdsRedirectUri() {
+  const base = String(
+    process.env.BACKEND_PUBLIC_URL ||
+      process.env.APP_BASE_URL ||
+      ""
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!base) return null;
+
+  return `${base}/api/integrations/meta_ads/callback`;
+}
+
+function buildMetaAdsAuthUrl(orgId) {
+  const clientId = String(process.env.META_APP_ID || "").trim();
+  const redirectUri = buildMetaAdsRedirectUri();
+
+  console.log("BUILD META ADS AUTH URL DEBUG", {
+    clientIdExists: !!clientId,
+    redirectUri,
+    orgId: orgId ? String(orgId) : "",
+  });
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const scope = [
+    "ads_read",
+    "ads_management",
+    "business_management",
+  ].join(",");
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    state: JSON.stringify({ orgId: String(orgId), provider: "meta_ads" }),
+    scope,
+    response_type: "code",
+  });
+
+  return `https://www.facebook.com/v18.0/dialog/oauth?${params.toString()}`;
+}
+
+async function exchangeMetaCodeForTokens(code) {
+  const clientId = String(process.env.META_APP_ID || "").trim();
+  const clientSecret = String(process.env.META_APP_SECRET || "").trim();
+  const redirectUri = buildMetaAdsRedirectUri();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    throw new Error("Meta Ads OAuth is not fully configured");
+  }
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    code,
+  });
+
+  const res = await fetch(
+    `https://graph.facebook.com/v18.0/oauth/access_token?${params.toString()}`
+  );
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(data?.error?.message || "Meta token exchange failed");
+  }
+
+  return data;
+}
+
+async function getMetaAdAccounts(accessToken) {
+  const res = await fetch(
+    `https://graph.facebook.com/v18.0/me/adaccounts?fields=id,name,account_status&access_token=${encodeURIComponent(accessToken)}`
+  );
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    console.error("Meta ad accounts error:", data);
+    throw new Error(data?.error?.message || "Failed to fetch Meta ad accounts");
+  }
+
+  return Array.isArray(data?.data) ? data.data : [];
+}
+
+/* -------------------------------- */
 /* Shared helpers                   */
 /* -------------------------------- */
 
@@ -417,9 +508,13 @@ async function formatIntegrations(orgId) {
         properties: Array.isArray(live?.metadata?.properties)
           ? live.metadata.properties
           : [],
+        metaAccounts: Array.isArray(live?.metadata?.accounts)
+          ? live.metadata.accounts
+          : [],
         needsSelection: !!live?.metadata?.needsSelection,
         selectedCustomer: live?.metadata?.selectedCustomer || null,
         selectedProperty: live?.metadata?.selectedProperty || null,
+        selectedMetaAccount: live?.metadata?.selectedAccount || null,
         supportsLive: item.supportsLive,
       };
     }
@@ -439,9 +534,11 @@ async function formatIntegrations(orgId) {
       lastError: null,
       accessibleCustomers: [],
       properties: [],
+      metaAccounts: [],
       needsSelection: false,
       selectedCustomer: null,
       selectedProperty: null,
+      selectedMetaAccount: null,
       supportsLive: item.supportsLive,
     };
   });
@@ -688,6 +785,8 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
       GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
       GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
       GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
+      META_APP_ID_EXISTS: !!process.env.META_APP_ID,
+      META_APP_SECRET_EXISTS: !!process.env.META_APP_SECRET,
       BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL,
       APP_BASE_URL: process.env.APP_BASE_URL,
       FRONTEND_URL: process.env.FRONTEND_URL,
@@ -758,6 +857,23 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
         return res.status(500).json({
           ok: false,
           message: "GA4 OAuth is not configured",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        provider,
+        authUrl: url,
+      });
+    }
+
+    if (provider === "meta_ads") {
+      const url = buildMetaAdsAuthUrl(orgId);
+
+      if (!url) {
+        return res.status(500).json({
+          ok: false,
+          message: "Meta Ads OAuth is not configured",
         });
       }
 
@@ -932,6 +1048,59 @@ router.get("/ga4/status", requireAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to load GA4 status",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* META ADS STATUS                  */
+/* -------------------------------- */
+
+router.get("/meta_ads/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "meta_ads",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+      accounts: Array.isArray(connection?.metadata?.accounts)
+        ? connection.metadata.accounts
+        : [],
+      needsSelection: !!connection?.metadata?.needsSelection,
+      selectedAccount: connection?.metadata?.selectedAccount || null,
+    });
+  } catch (err) {
+    console.error("META ADS status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Meta Ads status",
       error: err.message,
     });
   }
@@ -1124,6 +1293,101 @@ router.post("/ga4/select-property", requireAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to select GA4 property",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* META ADS SELECT ACCOUNT          */
+/* -------------------------------- */
+
+router.post("/meta_ads/select-account", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    const { accountId } = req.body || {};
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    if (!accountId) {
+      return res.status(400).json({
+        ok: false,
+        message: "accountId is required",
+      });
+    }
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "meta_ads",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Meta Ads connection not found",
+      });
+    }
+
+    const accounts = Array.isArray(connection?.metadata?.accounts)
+      ? connection.metadata.accounts
+      : [];
+
+    const normalizedTarget = String(accountId).replace(/^act_/, "");
+
+    const matched = accounts.find((item) => {
+      const normalizedItem = String(item?.id || "").replace(/^act_/, "");
+      return normalizedItem === normalizedTarget;
+    });
+
+    if (!matched) {
+      return res.status(400).json({
+        ok: false,
+        message: "Selected account is not in Meta ad accounts list",
+      });
+    }
+
+    connection.externalAccountId = matched.id || null;
+    connection.externalAccountName = matched.name || matched.id || "Meta Ads Account";
+    connection.mode = "live";
+    connection.status = "connected";
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      selectedAccount: matched,
+      needsSelection: false,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "meta_ads", {
+      connected: true,
+      connectedAt: connection.connectedAt || new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Meta Ads account selected",
+      integration: {
+        provider: "meta_ads",
+        externalAccountId: matched.id || null,
+        externalAccountName: matched.name || matched.id || "Meta Ads Account",
+      },
+      integrations: await formatIntegrations(orgId),
+    });
+  } catch (err) {
+    console.error("META ADS select account error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to select Meta Ads account",
       error: err.message,
     });
   }
@@ -1584,6 +1848,150 @@ router.get("/ga4/callback", async (req, res) => {
       process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
 
     return res.redirect(`${frontendUrl}/integrations?error=ga4_callback_failed`);
+  }
+});
+
+/* -------------------------------- */
+/* META ADS CALLBACK (LIVE)         */
+/* -------------------------------- */
+
+router.get("/meta_ads/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    console.log("META ADS CALLBACK HIT", {
+      hasCode: !!code,
+      hasState: !!state,
+      query: req.query,
+    });
+
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+
+    if (!orgId) {
+      return res.status(400).send("Missing orgId in state");
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
+
+    const tokenData = await exchangeMetaCodeForTokens(code);
+    const accessToken = tokenData?.access_token || null;
+
+    if (!accessToken) {
+      throw new Error("No Meta access token returned");
+    }
+
+    const accounts = await getMetaAdAccounts(accessToken);
+
+    if (!accounts.length) {
+      throw new Error("No Meta ad accounts found for this login");
+    }
+
+    const needsSelection = accounts.length > 1;
+    const selectedAccount = accounts.length === 1 ? accounts[0] : null;
+
+    const externalAccountId = selectedAccount?.id || null;
+    const externalAccountName = selectedAccount?.name || null;
+
+    console.log("META ADS CONNECTED", {
+      orgId: String(orgId),
+      accountCount: accounts.length,
+      selectedAccount,
+      externalAccountId,
+      needsSelection,
+    });
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "meta_ads",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "meta_ads" });
+    }
+
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({
+        mode: "live",
+        externalAccountId,
+        externalAccountName,
+        accessToken,
+        refreshToken: null,
+        tokenType: tokenData?.token_type || null,
+        tokenExpiresAt: tokenData?.expires_in
+          ? new Date(Date.now() + Number(tokenData.expires_in) * 1000)
+          : null,
+        scopes: ["ads_read", "ads_management", "business_management"],
+        metadata: {
+          accounts,
+          selectedAccount,
+          needsSelection,
+        },
+      });
+    } else {
+      connection.status = "connected";
+      connection.mode = "live";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.accessToken = accessToken;
+      connection.refreshToken = null;
+      connection.tokenType = tokenData?.token_type || null;
+      connection.tokenExpiresAt = tokenData?.expires_in
+        ? new Date(Date.now() + Number(tokenData.expires_in) * 1000)
+        : null;
+      connection.externalAccountId = externalAccountId;
+      connection.externalAccountName = externalAccountName;
+      connection.scopes = ["ads_read", "ads_management", "business_management"];
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.metadata = {
+        ...(connection.metadata || {}),
+        accounts,
+        selectedAccount,
+        needsSelection,
+      };
+    }
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "meta_ads", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+
+    return res.redirect(
+      `${frontendUrl}/integrations?connected=meta_ads&mode=live&needsSelection=${
+        needsSelection ? "1" : "0"
+      }`
+    );
+  } catch (err) {
+    console.error("Meta Ads callback error:", err);
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+
+    return res.redirect(
+      `${frontendUrl}/integrations?error=meta_ads_callback_failed`
+    );
   }
 });
 
