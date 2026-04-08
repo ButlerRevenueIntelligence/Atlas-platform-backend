@@ -136,7 +136,7 @@ async function exchangeHubSpotCodeForTokens(code) {
 }
 
 /* -------------------------------- */
-/* Google Ads OAuth helpers         */
+/* Google OAuth helpers             */
 /* -------------------------------- */
 
 function buildGoogleAdsRedirectUri() {
@@ -184,8 +184,7 @@ function buildGoogleAdsAuthUrl(orgId) {
 async function exchangeGoogleCodeForTokens(code, redirectUriOverride = null) {
   const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
   const clientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
-  const redirectUri =
-    redirectUriOverride || buildGoogleAdsRedirectUri();
+  const redirectUri = redirectUriOverride || buildGoogleAdsRedirectUri();
 
   if (!clientId || !clientSecret || !redirectUri) {
     throw new Error("Google OAuth is not fully configured");
@@ -436,7 +435,12 @@ async function exchangeMetaCodeForTokens(code) {
 
 async function getMetaAdAccounts(accessToken) {
   const res = await fetch(
-    `https://graph.facebook.com/v18.0/me/adaccounts?fields=id,name,account_status&access_token=${encodeURIComponent(accessToken)}`
+    "https://graph.facebook.com/v18.0/me/adaccounts?fields=id,name,account_status",
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
   );
 
   const data = await res.json().catch(() => ({}));
