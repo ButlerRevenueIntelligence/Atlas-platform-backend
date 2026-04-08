@@ -1,9 +1,13 @@
 import express from "express";
+import Stripe from "stripe";
 import Organization from "../models/Organization.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
 
 const INTEGRATIONS = [
   { id: "hubspot", name: "HubSpot CRM", category: "CRM", supportsLive: true },
@@ -12,7 +16,7 @@ const INTEGRATIONS = [
   { id: "meta_ads", name: "Meta Ads", category: "Advertising", supportsLive: true },
   { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: false },
   { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: true },
-  { id: "stripe", name: "Stripe", category: "Payments", supportsLive: false },
+  { id: "stripe", name: "Stripe", category: "Payments", supportsLive: true },
   { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: false },
 ];
 
@@ -454,6 +458,94 @@ async function getMetaAdAccounts(accessToken) {
 }
 
 /* -------------------------------- */
+/* Stripe Connect OAuth helpers     */
+/* -------------------------------- */
+
+function buildStripeRedirectUri() {
+  const base = String(
+    process.env.BACKEND_PUBLIC_URL ||
+      process.env.APP_BASE_URL ||
+      ""
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!base) return null;
+
+  return `${base}/api/integrations/stripe/callback`;
+}
+
+function buildStripeAuthUrl(orgId) {
+  const clientId = String(process.env.STRIPE_CONNECT_CLIENT_ID || "").trim();
+  const redirectUri = buildStripeRedirectUri();
+
+  console.log("BUILD STRIPE AUTH URL DEBUG", {
+    clientIdExists: !!clientId,
+    redirectUri,
+    orgId: orgId ? String(orgId) : "",
+  });
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    scope: "read_write",
+    redirect_uri: redirectUri,
+    state: JSON.stringify({ orgId: String(orgId), provider: "stripe" }),
+  });
+
+  return `https://connect.stripe.com/oauth/authorize?${params.toString()}`;
+}
+
+async function exchangeStripeCodeForTokens(code) {
+  const clientSecret = String(process.env.STRIPE_SECRET_KEY || "").trim();
+
+  if (!clientSecret) {
+    throw new Error("Stripe OAuth is not fully configured");
+  }
+
+  const redirectUri = buildStripeRedirectUri();
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    client_secret: clientSecret,
+  });
+
+  if (redirectUri) {
+    body.set("redirect_uri", redirectUri);
+  }
+
+  const res = await fetch("https://connect.stripe.com/oauth/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(data?.error_description || data?.error || "Stripe token exchange failed");
+  }
+
+  return data;
+}
+
+async function getStripeAccountInfo(accountId) {
+  if (!stripe) {
+    throw new Error("Stripe is not configured");
+  }
+
+  if (!accountId) {
+    throw new Error("Missing Stripe account id");
+  }
+
+  return stripe.accounts.retrieve(accountId);
+}
+/* -------------------------------- */
 /* Shared helpers                   */
 /* -------------------------------- */
 
@@ -800,6 +892,8 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
       BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL,
       APP_BASE_URL: process.env.APP_BASE_URL,
       FRONTEND_URL: process.env.FRONTEND_URL,
+      STRIPE_SECRET_KEY_EXISTS: !!process.env.STRIPE_SECRET_KEY,
+      STRIPE_CONNECT_CLIENT_ID_EXISTS: !!process.env.STRIPE_CONNECT_CLIENT_ID,
     });
 
     if (!orgId) {
@@ -884,6 +978,23 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
         return res.status(500).json({
           ok: false,
           message: "Meta Ads OAuth is not configured",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        provider,
+        authUrl: url,
+      });
+    }
+     
+     if (provider === "stripe") {
+      const url = buildStripeAuthUrl(orgId);
+
+      if (!url) {
+        return res.status(500).json({
+          ok: false,
+          message: "Stripe OAuth is not configured",
         });
       }
 
@@ -1033,36 +1144,20 @@ router.get("/stripe/status", requireAuth, async (req, res) => {
       });
     }
 
-    const billing = org?.billing || {};
-    const stripeCustomerId = billing?.stripeCustomerId || null;
-    const stripeSubscriptionId = billing?.stripeSubscriptionId || null;
-    const stripePriceId = billing?.stripePriceId || null;
-    const billingStatus = String(billing?.status || "").toLowerCase();
-
-    const connected =
-      !!stripeCustomerId ||
-      !!stripeSubscriptionId ||
-      billingStatus === "active" ||
-      billingStatus === "trialing";
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "stripe",
+    }).lean();
 
     return res.json({
       ok: true,
-      connected,
-      mode: connected ? "live" : "demo",
-      externalAccountId: stripeCustomerId || stripeSubscriptionId || null,
-      externalAccountName: stripeCustomerId
-        ? `Stripe Customer ${stripeCustomerId}`
-        : stripeSubscriptionId
-        ? `Stripe Subscription ${stripeSubscriptionId}`
-        : null,
-      stripeCustomerId,
-      stripeSubscriptionId,
-      stripePriceId,
-      billingStatus: billing?.status || "inactive",
-      currentPeriodEnd: billing?.currentPeriodEnd || null,
-      lastSyncAt: org?.updatedAt || null,
-      lastSyncStatus: connected ? "success" : "never",
-      lastError: null,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
     });
   } catch (err) {
     console.error("STRIPE status error:", err);
@@ -1097,36 +1192,49 @@ router.post("/stripe/sync", requireAuth, async (req, res) => {
       });
     }
 
-    const billing = org?.billing || {};
-    const stripeCustomerId = billing?.stripeCustomerId || null;
-    const stripeSubscriptionId = billing?.stripeSubscriptionId || null;
-    const billingStatus = String(billing?.status || "").toLowerCase();
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "stripe",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
 
-    const connected =
-      !!stripeCustomerId ||
-      !!stripeSubscriptionId ||
-      billingStatus === "active" ||
-      billingStatus === "trialing";
-
-    if (!connected) {
+    if (!connection) {
       return res.status(404).json({
         ok: false,
         message: "Stripe is not connected for this workspace",
       });
     }
 
+    if (typeof connection.markSyncRunning === "function") {
+      connection.markSyncRunning();
+    } else {
+      connection.status = "syncing";
+      connection.lastSyncStatus = "running";
+      connection.lastError = null;
+    }
+    await connection.save();
+
+    if (typeof connection.markSyncSuccess === "function") {
+      connection.markSyncSuccess();
+    } else {
+      connection.status = "connected";
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+    }
+    await connection.save();
+
     await updateOrgIntegrationSummary(orgId, "stripe", {
       connected: true,
-      connectedAt: org?.billing?.currentPeriodEnd || org?.createdAt || new Date(),
       lastSync: new Date(),
-      mode: "live",
+      mode: connection.mode || "live",
     });
 
     return res.json({
       ok: true,
       message: "Stripe sync completed",
       provider: "stripe",
-      mode: "live",
+      mode: connection.mode || "live",
     });
   } catch (err) {
     console.error("Stripe sync error:", err);
@@ -1813,6 +1921,144 @@ router.get("/google_ads/callback", async (req, res) => {
   }
 });
 
+/* -------------------------------- */
+/* STRIPE CALLBACK (LIVE)           */
+/* -------------------------------- */
+
+router.get("/stripe/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    console.log("STRIPE CALLBACK HIT", {
+      hasCode: !!code,
+      hasState: !!state,
+      query: req.query,
+    });
+
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+
+    if (!orgId) {
+      return res.status(400).send("Missing orgId in state");
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
+
+    const tokenData = await exchangeStripeCodeForTokens(code);
+
+    const accessToken = tokenData?.access_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
+    const stripeUserId = tokenData?.stripe_user_id || null;
+    const scope = tokenData?.scope || null;
+    const livemode = !!tokenData?.livemode;
+    const tokenType = tokenData?.token_type || null;
+
+    if (!stripeUserId) {
+      throw new Error("Stripe did not return a connected account id");
+    }
+
+    const account = await getStripeAccountInfo(stripeUserId);
+
+    const externalAccountId = stripeUserId;
+    const externalAccountName =
+      account?.business_profile?.name ||
+      account?.settings?.dashboard?.display_name ||
+      account?.email ||
+      `Stripe Account ${stripeUserId}`;
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "stripe",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "stripe" });
+    }
+
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({
+        mode: "live",
+        externalAccountId,
+        externalAccountName,
+        accessToken,
+        refreshToken,
+        tokenType,
+        tokenExpiresAt: null,
+        scopes: scope ? [scope] : [],
+        metadata: {
+          stripeUserId,
+          scope,
+          livemode,
+          email: account?.email || null,
+          country: account?.country || null,
+          businessType: account?.business_type || null,
+          chargesEnabled: !!account?.charges_enabled,
+          payoutsEnabled: !!account?.payouts_enabled,
+        },
+      });
+    } else {
+      connection.status = "connected";
+      connection.mode = "live";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.accessToken = accessToken;
+      connection.refreshToken = refreshToken;
+      connection.tokenType = tokenType;
+      connection.tokenExpiresAt = null;
+      connection.externalAccountId = externalAccountId;
+      connection.externalAccountName = externalAccountName;
+      connection.scopes = scope ? [scope] : [];
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.metadata = {
+        ...(connection.metadata || {}),
+        stripeUserId,
+        scope,
+        livemode,
+        email: account?.email || null,
+        country: account?.country || null,
+        businessType: account?.business_type || null,
+        chargesEnabled: !!account?.charges_enabled,
+        payoutsEnabled: !!account?.payouts_enabled,
+      };
+    }
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "stripe", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+
+    return res.redirect(`${frontendUrl}/integrations?connected=stripe&mode=live`);
+  } catch (err) {
+    console.error("Stripe callback error:", err);
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+
+    return res.redirect(`${frontendUrl}/integrations?error=stripe_callback_failed`);
+  }
+});
 /* -------------------------------- */
 /* GA4 CALLBACK (LIVE)              */
 /* -------------------------------- */
