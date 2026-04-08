@@ -11,7 +11,7 @@ const INTEGRATIONS = [
   { id: "google_ads", name: "Google Ads", category: "Advertising", supportsLive: true },
   { id: "meta_ads", name: "Meta Ads", category: "Advertising", supportsLive: false },
   { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: false },
-  { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: false },
+  { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: true },
   { id: "stripe", name: "Stripe", category: "Payments", supportsLive: false },
   { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: false },
 ];
@@ -181,13 +181,14 @@ function buildGoogleAdsAuthUrl(orgId) {
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
 
-async function exchangeGoogleCodeForTokens(code) {
+async function exchangeGoogleCodeForTokens(code, redirectUriOverride = null) {
   const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
   const clientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
-  const redirectUri = buildGoogleAdsRedirectUri();
+  const redirectUri =
+    redirectUriOverride || buildGoogleAdsRedirectUri();
 
   if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error("Google Ads OAuth is not fully configured");
+    throw new Error("Google OAuth is not fully configured");
   }
 
   const body = new URLSearchParams({
@@ -280,6 +281,84 @@ async function getGoogleAdsAccessibleCustomers(accessToken) {
 }
 
 /* -------------------------------- */
+/* GA4 OAuth helpers                */
+/* -------------------------------- */
+
+function buildGA4RedirectUri() {
+  const base = String(
+    process.env.BACKEND_PUBLIC_URL ||
+      process.env.APP_BASE_URL ||
+      ""
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!base) return null;
+
+  return `${base}/api/integrations/ga4/callback`;
+}
+
+function buildGA4AuthUrl(orgId) {
+  const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  const redirectUri = buildGA4RedirectUri();
+
+  console.log("BUILD GA4 AUTH URL DEBUG", {
+    clientIdExists: !!clientId,
+    redirectUri,
+    orgId: orgId ? String(orgId) : "",
+  });
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const scope = [
+    "https://www.googleapis.com/auth/analytics.readonly",
+    "openid",
+    "email",
+    "profile",
+  ].join(" ");
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    access_type: "offline",
+    prompt: "consent select_account",
+    include_granted_scopes: "false",
+    scope,
+    state: JSON.stringify({ orgId: String(orgId), provider: "ga4" }),
+  });
+
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+async function exchangeGA4CodeForTokens(code) {
+  return exchangeGoogleCodeForTokens(code, buildGA4RedirectUri());
+}
+
+async function getGA4AccountSummaries(accessToken) {
+  const res = await fetch(
+    "https://analyticsadmin.googleapis.com/v1beta/accountSummaries",
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    console.error("GA4 account summaries error:", data);
+    throw new Error(
+      data?.error?.message || "Failed to fetch accessible GA4 properties"
+    );
+  }
+
+  return Array.isArray(data?.accountSummaries) ? data.accountSummaries : [];
+}
+
+/* -------------------------------- */
 /* Shared helpers                   */
 /* -------------------------------- */
 
@@ -335,8 +414,12 @@ async function formatIntegrations(orgId) {
         accessibleCustomers: Array.isArray(live?.metadata?.accessibleCustomers)
           ? live.metadata.accessibleCustomers
           : [],
+        properties: Array.isArray(live?.metadata?.properties)
+          ? live.metadata.properties
+          : [],
         needsSelection: !!live?.metadata?.needsSelection,
         selectedCustomer: live?.metadata?.selectedCustomer || null,
+        selectedProperty: live?.metadata?.selectedProperty || null,
         supportsLive: item.supportsLive,
       };
     }
@@ -355,8 +438,10 @@ async function formatIntegrations(orgId) {
       lastSyncStatus: "never",
       lastError: null,
       accessibleCustomers: [],
+      properties: [],
       needsSelection: false,
       selectedCustomer: null,
+      selectedProperty: null,
       supportsLive: item.supportsLive,
     };
   });
@@ -594,19 +679,19 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
     const orgId = getOrgId(req);
     const { provider } = req.params;
 
-   console.log("CONNECTOR ENV DEBUG", {
-     orgId,
-     provider,
-     HUBSPOT_CLIENT_ID_EXISTS: !!process.env.HUBSPOT_CLIENT_ID,
-     HUBSPOT_CLIENT_SECRET_EXISTS: !!process.env.HUBSPOT_CLIENT_SECRET,
-     GOOGLE_CLIENT_ID_EXISTS: !!process.env.GOOGLE_CLIENT_ID,
-     GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
-     GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
-     GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
-     BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL,
-     APP_BASE_URL: process.env.APP_BASE_URL,
-     FRONTEND_URL: process.env.FRONTEND_URL,
-   });
+    console.log("CONNECTOR ENV DEBUG", {
+      orgId,
+      provider,
+      HUBSPOT_CLIENT_ID_EXISTS: !!process.env.HUBSPOT_CLIENT_ID,
+      HUBSPOT_CLIENT_SECRET_EXISTS: !!process.env.HUBSPOT_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID_EXISTS: !!process.env.GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
+      GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
+      BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL,
+      APP_BASE_URL: process.env.APP_BASE_URL,
+      FRONTEND_URL: process.env.FRONTEND_URL,
+    });
 
     if (!orgId) {
       return res.status(400).json({
@@ -656,6 +741,23 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
         return res.status(500).json({
           ok: false,
           message: "Google Ads OAuth is not configured",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        provider,
+        authUrl: url,
+      });
+    }
+
+    if (provider === "ga4") {
+      const url = buildGA4AuthUrl(orgId);
+
+      if (!url) {
+        return res.status(500).json({
+          ok: false,
+          message: "GA4 OAuth is not configured",
         });
       }
 
@@ -783,6 +885,59 @@ router.get("/google_ads/status", requireAuth, async (req, res) => {
 });
 
 /* -------------------------------- */
+/* GA4 STATUS                       */
+/* -------------------------------- */
+
+router.get("/ga4/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "ga4",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+      properties: Array.isArray(connection?.metadata?.properties)
+        ? connection.metadata.properties
+        : [],
+      needsSelection: !!connection?.metadata?.needsSelection,
+      selectedProperty: connection?.metadata?.selectedProperty || null,
+    });
+  } catch (err) {
+    console.error("GA4 status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load GA4 status",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
 /* GOOGLE ADS SELECT ACCOUNT        */
 /* -------------------------------- */
 
@@ -877,6 +1032,98 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to select Google Ads account",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* GA4 SELECT PROPERTY              */
+/* -------------------------------- */
+
+router.post("/ga4/select-property", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    const { propertyId } = req.body || {};
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    if (!propertyId) {
+      return res.status(400).json({
+        ok: false,
+        message: "propertyId is required",
+      });
+    }
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "ga4",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "GA4 connection not found",
+      });
+    }
+
+    const properties = Array.isArray(connection?.metadata?.properties)
+      ? connection.metadata.properties
+      : [];
+
+    const matched = properties.find(
+      (item) => String(item?.propertyId) === String(propertyId)
+    );
+
+    if (!matched) {
+      return res.status(400).json({
+        ok: false,
+        message: "Selected property is not in available GA4 properties list",
+      });
+    }
+
+    connection.externalAccountId = matched.propertyId;
+    connection.externalAccountName = matched.property;
+    connection.mode = "live";
+    connection.status = "connected";
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      selectedProperty: matched,
+      needsSelection: false,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "ga4", {
+      connected: true,
+      connectedAt: connection.connectedAt || new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "GA4 property selected",
+      integration: {
+        provider: "ga4",
+        externalAccountId: matched.propertyId,
+        externalAccountName: matched.property,
+      },
+      integrations: await formatIntegrations(orgId),
+    });
+  } catch (err) {
+    console.error("GA4 select property error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to select GA4 property",
       error: err.message,
     });
   }
@@ -1162,6 +1409,181 @@ router.get("/google_ads/callback", async (req, res) => {
     return res.redirect(
       `${frontendUrl}/integrations?error=google_ads_callback_failed`
     );
+  }
+});
+
+/* -------------------------------- */
+/* GA4 CALLBACK (LIVE)              */
+/* -------------------------------- */
+
+router.get("/ga4/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    console.log("GA4 CALLBACK HIT", {
+      hasCode: !!code,
+      hasState: !!state,
+      query: req.query,
+    });
+
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+
+    if (!orgId) {
+      return res.status(400).send("Missing orgId in state");
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
+
+    const tokenData = await exchangeGA4CodeForTokens(code);
+
+    const accessToken = tokenData?.access_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
+    const expiresIn = Number(tokenData?.expires_in || 0) || 0;
+    const scopes = String(tokenData?.scope || "")
+      .split(" ")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (!accessToken) {
+      throw new Error("No access token returned");
+    }
+
+    const profile = await getGoogleUserProfile(accessToken);
+    const accountSummaries = await getGA4AccountSummaries(accessToken);
+
+    const properties = accountSummaries.flatMap((account) => {
+      const accountName =
+        account?.displayName ||
+        String(account?.name || "").replace("accountSummaries/", "") ||
+        "GA4 Account";
+
+      const propertySummaries = Array.isArray(account?.propertySummaries)
+        ? account.propertySummaries
+        : [];
+
+      return propertySummaries.map((prop) => ({
+        account: accountName,
+        property: prop?.displayName || prop?.property || "GA4 Property",
+        propertyId: String(prop?.property || "").replace("properties/", ""),
+        resourceName: prop?.property || "",
+      }));
+    });
+
+    if (!properties.length) {
+      throw new Error(
+        "No accessible GA4 properties were found for this Google login"
+      );
+    }
+
+    const needsSelection = properties.length > 1;
+    const selectedProperty = properties.length === 1 ? properties[0] : null;
+
+    const externalAccountId = selectedProperty?.propertyId || null;
+    const externalAccountName = selectedProperty?.property || null;
+
+    console.log("GA4 CONNECTED", {
+      orgId: String(orgId),
+      googleUserEmail: profile?.email || null,
+      propertyCount: properties.length,
+      selectedProperty,
+      externalAccountId,
+      needsSelection,
+    });
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "ga4",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "ga4" });
+    }
+
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({
+        mode: "live",
+        externalAccountId,
+        externalAccountName,
+        accessToken,
+        refreshToken,
+        tokenType: tokenData?.token_type || null,
+        tokenExpiresAt: expiresIn
+          ? new Date(Date.now() + expiresIn * 1000)
+          : null,
+        scopes,
+        metadata: {
+          googleUserEmail: profile?.email || null,
+          googleUserName: profile?.name || null,
+          properties,
+          selectedProperty,
+          needsSelection,
+        },
+      });
+    } else {
+      connection.status = "connected";
+      connection.mode = "live";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.accessToken = accessToken;
+      connection.refreshToken = refreshToken;
+      connection.tokenType = tokenData?.token_type || null;
+      connection.tokenExpiresAt = expiresIn
+        ? new Date(Date.now() + expiresIn * 1000)
+        : null;
+      connection.externalAccountId = externalAccountId;
+      connection.externalAccountName = externalAccountName;
+      connection.scopes = scopes;
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.metadata = {
+        ...(connection.metadata || {}),
+        googleUserEmail: profile?.email || null,
+        googleUserName: profile?.name || null,
+        properties,
+        selectedProperty,
+        needsSelection,
+      };
+    }
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "ga4", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+
+    return res.redirect(
+      `${frontendUrl}/integrations?connected=ga4&mode=live&needsSelection=${
+        needsSelection ? "1" : "0"
+      }`
+    );
+  } catch (err) {
+    console.error("GA4 callback error:", err);
+
+    const frontendUrl =
+      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+
+    return res.redirect(`${frontendUrl}/integrations?error=ga4_callback_failed`);
   }
 });
 
