@@ -548,6 +548,42 @@ async function formatIntegrations(orgId) {
   });
 }
 
+if (item.id === "stripe") {
+  const billing = org?.billing || {};
+  const stripeCustomerId = billing?.stripeCustomerId || null;
+  const stripeSubscriptionId = billing?.stripeSubscriptionId || null;
+  const stripePriceId = billing?.stripePriceId || null;
+  const billingStatus = String(billing?.status || "").toLowerCase();
+
+  const stripeConnected =
+    !!stripeCustomerId ||
+    !!stripeSubscriptionId ||
+    billingStatus === "active" ||
+    billingStatus === "trialing";
+
+  return {
+    id: item.id,
+    name: item.name,
+    category: item.category,
+    status: stripeConnected ? "connected" : "disconnected",
+    connected: stripeConnected,
+    lastSync: summary.lastSync || org?.updatedAt || null,
+    connectedAt: summary.connectedAt || org?.createdAt || null,
+    mode: stripeConnected ? "live" : summary.mode || "demo",
+    externalAccountId: stripeCustomerId || stripeSubscriptionId || null,
+    externalAccountName: stripeCustomerId
+      ? `Stripe Customer ${stripeCustomerId}`
+      : stripeSubscriptionId
+      ? `Stripe Subscription ${stripeSubscriptionId}`
+      : null,
+    lastSyncStatus: stripeConnected ? "success" : "never",
+    lastError: null,
+    accessibleCustomers: [],
+    needsSelection: false,
+    selectedCustomer: null,
+    supportsLive: item.supportsLive,
+  };
+}
 /* -------------------------------- */
 /* GET INTEGRATIONS                 */
 /* -------------------------------- */
@@ -1004,6 +1040,133 @@ router.get("/google_ads/status", requireAuth, async (req, res) => {
   }
 });
 
+/* -------------------------------- */
+/* STRIPE STATUS                    */
+/* -------------------------------- */
+
+router.get("/stripe/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const billing = org?.billing || {};
+    const stripeCustomerId = billing?.stripeCustomerId || null;
+    const stripeSubscriptionId = billing?.stripeSubscriptionId || null;
+    const stripePriceId = billing?.stripePriceId || null;
+    const billingStatus = String(billing?.status || "").toLowerCase();
+
+    const connected =
+      !!stripeCustomerId ||
+      !!stripeSubscriptionId ||
+      billingStatus === "active" ||
+      billingStatus === "trialing";
+
+    return res.json({
+      ok: true,
+      connected,
+      mode: connected ? "live" : "demo",
+      externalAccountId: stripeCustomerId || stripeSubscriptionId || null,
+      externalAccountName: stripeCustomerId
+        ? `Stripe Customer ${stripeCustomerId}`
+        : stripeSubscriptionId
+        ? `Stripe Subscription ${stripeSubscriptionId}`
+        : null,
+      stripeCustomerId,
+      stripeSubscriptionId,
+      stripePriceId,
+      billingStatus: billing?.status || "inactive",
+      currentPeriodEnd: billing?.currentPeriodEnd || null,
+      lastSyncAt: org?.updatedAt || null,
+      lastSyncStatus: connected ? "success" : "never",
+      lastError: null,
+    });
+  } catch (err) {
+    console.error("STRIPE status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Stripe status",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* STRIPE MANUAL SYNC (SCAFFOLD)    */
+/* -------------------------------- */
+
+router.post("/stripe/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const billing = org?.billing || {};
+    const stripeCustomerId = billing?.stripeCustomerId || null;
+    const stripeSubscriptionId = billing?.stripeSubscriptionId || null;
+    const billingStatus = String(billing?.status || "").toLowerCase();
+
+    const connected =
+      !!stripeCustomerId ||
+      !!stripeSubscriptionId ||
+      billingStatus === "active" ||
+      billingStatus === "trialing";
+
+    if (!connected) {
+      return res.status(404).json({
+        ok: false,
+        message: "Stripe is not connected for this workspace",
+      });
+    }
+
+    await updateOrgIntegrationSummary(orgId, "stripe", {
+      connected: true,
+      connectedAt: org?.billing?.currentPeriodEnd || org?.createdAt || new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Stripe sync completed",
+      provider: "stripe",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("Stripe sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Stripe",
+      error: err.message,
+    });
+  }
+});
 /* -------------------------------- */
 /* GA4 STATUS                       */
 /* -------------------------------- */
