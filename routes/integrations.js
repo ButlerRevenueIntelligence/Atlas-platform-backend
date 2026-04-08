@@ -492,50 +492,7 @@ async function formatIntegrations(orgId) {
     const live = liveMap.get(item.id);
     const summary = savedSummary[item.id] || {};
 
-    /* ========================= */
-    /* STRIPE (FIXED LOCATION)   */
-    /* ========================= */
-    if (item.id === "stripe") {
-      const billing = org?.billing || {};
-      const stripeCustomerId = billing?.stripeCustomerId || null;
-      const stripeSubscriptionId = billing?.stripeSubscriptionId || null;
-      const stripePriceId = billing?.stripePriceId || null;
-      const billingStatus = String(billing?.status || "").toLowerCase();
-
-      const stripeConnected =
-        !!stripeCustomerId ||
-        !!stripeSubscriptionId ||
-        billingStatus === "active" ||
-        billingStatus === "trialing";
-
-      return {
-        id: item.id,
-        name: item.name,
-        category: item.category,
-        status: stripeConnected ? "connected" : "disconnected",
-        connected: stripeConnected,
-        lastSync: summary.lastSync || org?.updatedAt || null,
-        connectedAt: summary.connectedAt || org?.createdAt || null,
-        mode: stripeConnected ? "live" : summary.mode || "demo",
-        externalAccountId: stripeCustomerId || stripeSubscriptionId || null,
-        externalAccountName: stripeCustomerId
-          ? `Stripe Customer ${stripeCustomerId}`
-          : stripeSubscriptionId
-          ? `Stripe Subscription ${stripeSubscriptionId}`
-          : null,
-        lastSyncStatus: stripeConnected ? "success" : "never",
-        lastError: null,
-        accessibleCustomers: [],
-        properties: [],
-        metaAccounts: [],
-        needsSelection: false,
-        selectedCustomer: null,
-        selectedProperty: null,
-        selectedMetaAccount: null,
-        supportsLive: item.supportsLive,
-      };
-    }
-
+   
     /* ========================= */
     /* NORMAL LIVE CONNECTION    */
     /* ========================= */
