@@ -45,7 +45,11 @@ async function ensureOrg(orgId) {
 /* -------------------------------- */
 
 function buildHubSpotRedirectUri() {
-  const base = String(process.env.APP_BASE_URL || "")
+  const base = String(
+    process.env.BACKEND_PUBLIC_URL ||
+      process.env.APP_BASE_URL ||
+      ""
+  )
     .trim()
     .replace(/\/+$/, "");
 
@@ -136,7 +140,11 @@ async function exchangeHubSpotCodeForTokens(code) {
 /* -------------------------------- */
 
 function buildGoogleAdsRedirectUri() {
-  const base = String(process.env.APP_BASE_URL || "")
+  const base = String(
+    process.env.BACKEND_PUBLIC_URL ||
+      process.env.APP_BASE_URL ||
+      ""
+  )
     .trim()
     .replace(/\/+$/, "");
 
@@ -586,18 +594,19 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
     const orgId = getOrgId(req);
     const { provider } = req.params;
 
-    console.log("CONNECTOR ENV DEBUG", {
-      orgId,
-      provider,
-      HUBSPOT_CLIENT_ID_EXISTS: !!process.env.HUBSPOT_CLIENT_ID,
-      HUBSPOT_CLIENT_SECRET_EXISTS: !!process.env.HUBSPOT_CLIENT_SECRET,
-      GOOGLE_CLIENT_ID_EXISTS: !!process.env.GOOGLE_CLIENT_ID,
-      GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
-      GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
-      GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
-      APP_BASE_URL: process.env.APP_BASE_URL,
-      FRONTEND_URL: process.env.FRONTEND_URL,
-    });
+   console.log("CONNECTOR ENV DEBUG", {
+     orgId,
+     provider,
+     HUBSPOT_CLIENT_ID_EXISTS: !!process.env.HUBSPOT_CLIENT_ID,
+     HUBSPOT_CLIENT_SECRET_EXISTS: !!process.env.HUBSPOT_CLIENT_SECRET,
+     GOOGLE_CLIENT_ID_EXISTS: !!process.env.GOOGLE_CLIENT_ID,
+     GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
+     GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
+     GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
+     BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL,
+     APP_BASE_URL: process.env.APP_BASE_URL,
+     FRONTEND_URL: process.env.FRONTEND_URL,
+   });
 
     if (!orgId) {
       return res.status(400).json({
