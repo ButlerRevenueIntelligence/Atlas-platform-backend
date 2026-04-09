@@ -877,7 +877,31 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
     const { provider } = req.params;
+    
+    // ✅ STRIPE CONNECT
+if (provider === "stripe") {
+  const clientId = process.env.STRIPE_CONNECT_CLIENT_ID;
+  const backendUrl = process.env.BACKEND_PUBLIC_URL;
 
+  if (!clientId || !backendUrl) {
+    return res.status(500).json({
+      ok: false,
+      message: "Stripe OAuth is not configured",
+    });
+  }
+
+  const redirectUri = `${backendUrl}/api/integrations/stripe/callback`;
+
+  const authUrl = `https://connect.stripe.com/oauth/authorize?response_type=code&client_id=${clientId}&scope=read_write&redirect_uri=${encodeURIComponent(
+    redirectUri
+  )}&state=${orgId}`;
+
+  return res.json({
+    ok: true,
+    provider,
+    authUrl,
+  });
+}
     console.log("CONNECTOR ENV DEBUG", {
       orgId,
       provider,
