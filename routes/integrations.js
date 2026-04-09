@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import Organization from "../models/Organization.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import { requireAuth } from "../middleware/auth.js";
+import { syncStripeForOrg } from "../services/stripeSync.js";
 
 const router = express.Router();
 const stripe = process.env.STRIPE_SECRET_KEY
@@ -1208,63 +1209,70 @@ router.post("/stripe/sync", requireAuth, async (req, res) => {
       });
     }
 
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
-
-    const connection = await IntegrationConnection.findOne({
-      orgId,
-      provider: "stripe",
-      status: "connected",
-    }).select("+accessToken +refreshToken");
-
-    if (!connection) {
-      return res.status(404).json({
-        ok: false,
-        message: "Stripe is not connected for this workspace",
-      });
-    }
-
-    if (typeof connection.markSyncRunning === "function") {
-      connection.markSyncRunning();
-    } else {
-      connection.status = "syncing";
-      connection.lastSyncStatus = "running";
-      connection.lastError = null;
-    }
-    await connection.save();
-
-    if (typeof connection.markSyncSuccess === "function") {
-      connection.markSyncSuccess();
-    } else {
-      connection.status = "connected";
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-    }
-    await connection.save();
+    const result = await syncStripeForOrg(orgId);
 
     await updateOrgIntegrationSummary(orgId, "stripe", {
       connected: true,
+      connectedAt: new Date(),
       lastSync: new Date(),
-      mode: connection.mode || "live",
+      mode: "live",
     });
 
     return res.json({
       ok: true,
       message: "Stripe sync completed",
       provider: "stripe",
-      mode: connection.mode || "live",
+      mode: "live",
+      summary: result,
     });
   } catch (err) {
     console.error("Stripe sync error:", err);
     return res.status(500).json({
       ok: false,
       message: "Failed to sync Stripe",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/stripe/revenue-daily", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const rows = await StripeRevenueDaily.find({ orgId, provider: "stripe" })
+      .sort({ date: 1 })
+      .lean();
+
+    const totalRevenue = rows.reduce((sum, r) => sum + Number(r.netRevenue || 0), 0);
+    const totalGross = rows.reduce((sum, r) => sum + Number(r.grossRevenue || 0), 0);
+    const totalRefunds = rows.reduce((sum, r) => sum + Number(r.refunds || 0), 0);
+    const totalTransactions = rows.reduce(
+      (sum, r) => sum + Number(r.transactionCount || 0),
+      0
+    );
+
+    return res.json({
+      ok: true,
+      summary: {
+        totalRevenue: Number(totalRevenue.toFixed(2)),
+        totalGross: Number(totalGross.toFixed(2)),
+        totalRefunds: Number(totalRefunds.toFixed(2)),
+        totalTransactions,
+      },
+      rows,
+    });
+  } catch (err) {
+    console.error("Stripe revenue daily error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Stripe revenue data",
       error: err.message,
     });
   }
