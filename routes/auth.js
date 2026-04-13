@@ -36,6 +36,10 @@ function normalizeId(v) {
   return v ? String(v) : null;
 }
 
+function normalizeEmail(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
 function buildWorkspaceAccess(org, orgRole) {
   const accessStatus = String(
     org?.accessStatus ?? org?.status ?? "pending"
@@ -57,7 +61,9 @@ function buildWorkspaceAccess(org, orgRole) {
 
   const workspaceActive =
     accessStatus === "active" &&
-    (paymentStatus === "paid" || paymentStatus === "active") &&
+    (paymentStatus === "paid" ||
+      paymentStatus === "active" ||
+      paymentStatus === "trialing") &&
     approvedForAccess &&
     demoCompleted;
 
@@ -85,6 +91,24 @@ function resolvePermissions(membershipRole, membershipPermissions) {
   }
 
   return permissions;
+}
+
+function signToken({ userId, email, role, orgId, activeWorkspace }) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error("Missing JWT_SECRET");
+
+  return jwt.sign(
+    {
+      userId: String(userId),
+      id: String(userId),
+      email,
+      role: role || "user",
+      orgId: orgId ? String(orgId) : null,
+      activeWorkspace: activeWorkspace ? String(activeWorkspace) : null,
+    },
+    secret,
+    { expiresIn: "7d" }
+  );
 }
 
 async function sendPasswordResetEmail({ to, resetUrl }) {
@@ -133,13 +157,14 @@ async function sendPasswordResetEmail({ to, resetUrl }) {
     `,
   });
 }
+
 /* ------------------------------------------------ */
 /* PUBLIC SIGNUP ENABLED */
 /* ------------------------------------------------ */
 router.post("/signup", async (req, res) => {
   try {
     const name = String(req.body?.name || "").trim();
-    const email = String(req.body?.email || "").trim().toLowerCase();
+    const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || "");
 
     if (!name || !email || !password) {
@@ -170,7 +195,6 @@ router.post("/signup", async (req, res) => {
       name,
       email,
       passwordHash: hash,
-      password: hash,
       role: "owner",
       status: "active",
     });
@@ -181,7 +205,7 @@ router.post("/signup", async (req, res) => {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "");
 
-    let slug = `${slugBase || "workspace"}-${Date.now()}`;
+    const slug = `${slugBase || "workspace"}-${Date.now()}`;
 
     const org = await Organization.create({
       name: `${name}'s Workspace`,
@@ -226,6 +250,9 @@ router.post("/signup", async (req, res) => {
               status: "active",
             },
           ],
+        },
+        $unset: {
+          password: "",
         },
       }
     );
@@ -302,33 +329,13 @@ router.post("/signup", async (req, res) => {
     });
   }
 });
-/* ------------------------------------------------ */
-/* JWT helper */
-/* ------------------------------------------------ */
-function signToken({ userId, email, role, orgId, activeWorkspace }) {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) throw new Error("Missing JWT_SECRET");
-
-  return jwt.sign(
-    {
-      userId: String(userId),
-      id: String(userId),
-      email,
-      role: role || "user",
-      orgId: orgId ? String(orgId) : null,
-      activeWorkspace: activeWorkspace ? String(activeWorkspace) : null,
-    },
-    secret,
-    { expiresIn: "7d" }
-  );
-}
 
 /* ------------------------------------------------ */
 /* FORGOT PASSWORD */
 /* ------------------------------------------------ */
 router.post("/forgot-password", async (req, res) => {
   try {
-    const email = String(req.body?.email || "").trim().toLowerCase();
+    const email = normalizeEmail(req.body?.email);
 
     if (!email) {
       return res.status(400).json({
@@ -340,6 +347,13 @@ router.post("/forgot-password", async (req, res) => {
     const user = await User.findOne({ email });
 
     if (!user) {
+      return res.json({
+        ok: true,
+        message: "If that email exists, a reset link has been sent.",
+      });
+    }
+
+    if (user.status === "disabled" || user.status === "suspended") {
       return res.json({
         ok: true,
         message: "If that email exists, a reset link has been sent.",
@@ -407,7 +421,7 @@ router.post("/reset-password", async (req, res) => {
     const user = await User.findOne({
       resetToken: token,
       resetTokenExpiry: { $gt: new Date() },
-    }).select("+password +passwordHash");
+    }).select("+passwordHash +resetToken +resetTokenExpiry");
 
     if (!user) {
       return res.status(400).json({
@@ -416,14 +430,33 @@ router.post("/reset-password", async (req, res) => {
       });
     }
 
+    if (user.status === "disabled" || user.status === "suspended") {
+      return res.status(403).json({
+        ok: false,
+        message: "This account is not active.",
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    user.password = hashedPassword;
     user.passwordHash = hashedPassword;
     user.resetToken = null;
     user.resetTokenExpiry = null;
 
+    if (user.password !== undefined) {
+      user.password = undefined;
+    }
+
     await user.save();
+
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $unset: {
+          password: "",
+        },
+      }
+    );
 
     return res.json({
       ok: true,
@@ -443,7 +476,7 @@ router.post("/reset-password", async (req, res) => {
 /* ------------------------------------------------ */
 router.post("/login", async (req, res) => {
   try {
-    const email = String(req.body?.email || "").trim().toLowerCase();
+    const email = normalizeEmail(req.body?.email);
     const password = String(req.body?.password || "");
 
     console.log("LOGIN ATTEMPT EMAIL:", email);
@@ -455,16 +488,14 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email })
-      .select("+password +passwordHash")
-      .lean();
+    const user = await User.findOne({ email }).select("+passwordHash").lean();
 
     console.log("LOGIN USER FOUND:", !!user);
 
     if (user) {
       console.log("LOGIN USER ID:", String(user._id));
       console.log("LOGIN USER EMAIL:", user.email);
-      console.log("LOGIN USER HAS password:", !!user.password);
+      console.log("LOGIN USER STATUS:", user.status);
       console.log("LOGIN USER HAS passwordHash:", !!user.passwordHash);
       console.log("LOGIN USER orgId:", user.orgId ? String(user.orgId) : null);
       console.log(
@@ -480,22 +511,21 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const passwordHash = user.passwordHash || user.password;
+    if (user.status === "disabled" || user.status === "suspended") {
+      return res.status(403).json({
+        ok: false,
+        message: "This account is not active.",
+      });
+    }
 
-    console.log("LOGIN HASH DEBUG", {
-      email,
-      hasResolvedPasswordHash: !!passwordHash,
-      usingField: user.passwordHash ? "passwordHash" : "password",
-    });
-
-    if (!passwordHash) {
+    if (!user.passwordHash) {
       return res.status(401).json({
         ok: false,
         message: "Invalid credentials",
       });
     }
 
-    const match = await bcrypt.compare(password, passwordHash);
+    const match = await bcrypt.compare(password, user.passwordHash);
 
     console.log("BCRYPT MATCH:", {
       email,
@@ -621,6 +651,10 @@ router.post("/login", async (req, res) => {
           orgId: activeMembership.orgId,
           activeWorkspace: activeMembership.orgId,
           role: orgRole,
+          lastLoginAt: new Date(),
+        },
+        $unset: {
+          password: "",
         },
       }
     );
@@ -766,6 +800,9 @@ router.post("/switch-workspace", requireAuth, async (req, res) => {
           activeWorkspace: org._id,
           role,
         },
+        $unset: {
+          password: "",
+        },
       }
     );
 
@@ -826,6 +863,13 @@ router.get("/me", requireAuth, async (req, res) => {
       return res.status(404).json({
         ok: false,
         message: "User not found",
+      });
+    }
+
+    if (user.status === "disabled" || user.status === "suspended") {
+      return res.status(403).json({
+        ok: false,
+        message: "This account is not active.",
       });
     }
 
@@ -935,27 +979,45 @@ router.get("/me", requireAuth, async (req, res) => {
 });
 
 /* ------------------------------------------------ */
+/* HEALTH */
+/* ------------------------------------------------ */
 router.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
+/* ------------------------------------------------ */
+/* DEV HELPERS */
+/* ------------------------------------------------ */
 router.get("/force-create-user", async (req, res) => {
-  const hash = await bcrypt.hash("Atlas123!", 10);
+  try {
+    const hash = await bcrypt.hash("Atlas123!", 10);
 
-  const user = await User.findOneAndUpdate(
-    { email: "cd@drccompany.com" },
-    {
-      name: "GEMM",
-      email: "cd@drccompany.com",
-      passwordHash: hash,
-      password: hash,
-      role: "owner",
-      status: "active",
-    },
-    { upsert: true, new: true }
-  );
+    const user = await User.findOneAndUpdate(
+      { email: "cd@drccompany.com" },
+      {
+        $set: {
+          name: "GEMM",
+          email: "cd@drccompany.com",
+          passwordHash: hash,
+          role: "owner",
+          status: "active",
+        },
+        $unset: {
+          password: "",
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      }
+    ).lean();
 
-  res.json({ ok: true, user });
+    res.json({ ok: true, user });
+  } catch (err) {
+    console.error("force-create-user error:", err);
+    res.status(500).json({ ok: false, message: err.message });
+  }
 });
 
 router.get("/force-create-membership", async (req, res) => {
@@ -966,6 +1028,13 @@ router.get("/force-create-membership", async (req, res) => {
       return res.status(404).json({
         ok: false,
         message: "User not found",
+      });
+    }
+
+    if (!user.orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "User does not have an orgId yet.",
       });
     }
 
@@ -985,8 +1054,11 @@ router.get("/force-create-membership", async (req, res) => {
     const membership = await Membership.create({
       userId: user._id,
       orgId: user.orgId,
+      workspaceId: user.orgId,
       role: "owner",
       status: "active",
+      permissions: FULL_PERMS,
+      joinedAt: new Date(),
     });
 
     return res.json({
@@ -1015,7 +1087,7 @@ router.get("/workspaces", requireAuth, async (req, res) => {
       status: { $nin: ["disabled", "suspended"] },
     }).lean();
 
-    const orgIds = memberships.map((m) => m.orgId);
+    const orgIds = memberships.map((m) => m.orgId).filter(Boolean);
 
     const orgs = await Organization.find({ _id: { $in: orgIds } }).lean();
 

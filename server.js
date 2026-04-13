@@ -42,6 +42,7 @@ import workspaceRoutes from "./routes/workspaces.js";
 import trialRoutes from "./routes/trial.js";
 import hubspotSyncRoutes from "./routes/hubspotSync.js";
 import importsRoutes from "./routes/imports.js";
+import ghlRoutes from "./routes/ghl.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -119,6 +120,7 @@ app.use("/api/imports", importsRoutes);
 app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
 app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
 app.use("/api/pipeline", requirePlan("CORE"), pipelineRoutes);
+app.use("/api/integrations/ghl", requirePlan("CORE"), ghlRoutes);
 
 app.use("/api/invites", requirePlan("CORE"), invitesRoutes);
 app.use("/api/members", requirePlan("CORE"), membersRoutes);

@@ -1,7 +1,9 @@
-// backend/models/User.js
 import mongoose from "mongoose";
 
 const { Schema } = mongoose;
+
+const ROLE_ENUM = ["owner", "admin", "manager", "analyst", "member", "viewer"];
+const STATUS_ENUM = ["active", "invited", "disabled", "suspended"];
 
 const WorkspaceMembershipSchema = new Schema(
   {
@@ -12,12 +14,12 @@ const WorkspaceMembershipSchema = new Schema(
     },
     role: {
       type: String,
-      enum: ["owner", "admin", "manager", "analyst", "member", "viewer"],
+      enum: ROLE_ENUM,
       default: "member",
     },
     status: {
       type: String,
-      enum: ["active", "invited", "suspended", "disabled"],
+      enum: STATUS_ENUM,
       default: "active",
     },
   },
@@ -41,28 +43,33 @@ const UserSchema = new Schema(
       index: true,
     },
 
-    // Current auth source of truth
+    // Single source of truth for authentication
     passwordHash: {
       type: String,
-      default: "",
-    },
-     
-    resetToken: {
-      type: String,
-      default: null,
-    },
-    resetTokenExpiry: {
-      type: Date,
-      default: null,
-    },
-    // Legacy compatibility in case older code still references password
-    password: {
-      type: String,
-      default: "",
+      required: true,
       select: false,
     },
 
-    // Current tenant source of truth
+    resetToken: {
+      type: String,
+      default: null,
+      select: false,
+    },
+
+    resetTokenExpiry: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+
+    // Legacy field kept only so old docs do not break reads.
+    // Do not write to this field anywhere.
+    password: {
+      type: String,
+      default: undefined,
+      select: false,
+    },
+
     orgId: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
@@ -70,7 +77,6 @@ const UserSchema = new Schema(
       index: true,
     },
 
-    // Future-friendly workspace alias
     activeWorkspace: {
       type: Schema.Types.ObjectId,
       ref: "Organization",
@@ -80,12 +86,11 @@ const UserSchema = new Schema(
 
     role: {
       type: String,
-      enum: ["owner", "admin", "manager", "analyst", "member", "viewer"],
+      enum: ROLE_ENUM,
       default: "member",
       index: true,
     },
 
-    // Optional embedded compatibility layer for future workspace-first UX
     workspaces: {
       type: [WorkspaceMembershipSchema],
       default: [],
@@ -99,7 +104,7 @@ const UserSchema = new Schema(
 
     status: {
       type: String,
-      enum: ["active", "invited", "disabled", "suspended"],
+      enum: STATUS_ENUM,
       default: "active",
       index: true,
     },
@@ -107,9 +112,6 @@ const UserSchema = new Schema(
   { timestamps: true }
 );
 
-/**
- * Keep orgId and activeWorkspace aligned during transition
- */
 UserSchema.pre("save", function (next) {
   if (!this.activeWorkspace && this.orgId) {
     this.activeWorkspace = this.orgId;
@@ -119,18 +121,14 @@ UserSchema.pre("save", function (next) {
     this.orgId = this.activeWorkspace;
   }
 
-  // Keep password compatibility aligned
-  if (this.passwordHash && !this.password) {
-    this.password = this.passwordHash;
+  if (this.email) {
+    this.email = String(this.email).trim().toLowerCase();
   }
 
   next();
 });
 
-/**
- * Helpful indexes
- */
-UserSchema.index({ orgId: 1, email: 1 });
+UserSchema.index({ orgId: 1, email: 1 }, { unique: false });
 UserSchema.index({ activeWorkspace: 1, status: 1 });
 
 const User = mongoose.models.User || mongoose.model("User", UserSchema);
