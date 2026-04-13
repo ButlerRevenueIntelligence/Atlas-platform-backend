@@ -1,10 +1,15 @@
 import express from "express";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+
 import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
 import User from "../models/User.js";
 
 const router = express.Router();
+
+const ALLOWED_ROLES = ["owner", "admin", "manager", "analyst", "member", "viewer"];
+const ALLOWED_STATUSES = ["active", "invited", "disabled", "suspended"];
 
 const toId = (v) => {
   if (!v) return null;
@@ -13,6 +18,8 @@ const toId = (v) => {
     ? new mongoose.Types.ObjectId(s)
     : null;
 };
+
+const normalizeEmail = (v) => String(v || "").trim().toLowerCase();
 
 function pickUserId(req) {
   return (
@@ -91,9 +98,6 @@ async function getOrgContext(req) {
   };
 }
 
-const ALLOWED_ROLES = ["owner", "admin", "manager", "analyst", "member", "viewer"];
-const ALLOWED_STATUSES = ["active", "invited", "disabled", "suspended"];
-
 /**
  * GET /api/members
  * Owner/Admin in current workspace: list members
@@ -129,7 +133,7 @@ router.get("/", requireAuth, async (req, res) => {
     const userIds = memberships.map((m) => m.userId).filter(Boolean);
 
     const users = await User.find({ _id: { $in: userIds } })
-      .select("_id name email")
+      .select("_id name email lastLoginAt status")
       .lean();
 
     const userMap = new Map(users.map((u) => [String(u._id), u]));
@@ -143,17 +147,19 @@ router.get("/", requireAuth, async (req, res) => {
         name: u?.name || "User",
         email: u?.email || "",
         role: m.role || "analyst",
-        status: m.status || "active",
+        membershipStatus: m.status || "active",
+        userStatus: u?.status || "active",
         createdAt: m.createdAt || null,
         joinedAt: m.joinedAt || null,
         lastActiveAt: m.lastActiveAt || null,
+        lastLoginAt: u?.lastLoginAt || null,
         invitedBy: m.invitedBy || null,
       };
     });
 
     return res.json({
       ok: true,
-      orgId: ctx.orgId,
+      orgId: String(ctx.orgId),
       membership: {
         role: ctx.membership.role,
         status: ctx.membership.status,
@@ -170,10 +176,199 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 /**
- * PUT /api/members/:membershipId
+ * POST /api/members
+ * Owner/Admin can create a member in current workspace
+ */
+router.post("/", requireAuth, async (req, res) => {
+  try {
+    const ctx = await getOrgContext(req);
+
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canManageMembers) {
+      return res.status(403).json({
+        ok: false,
+        message: "Only owners and admins can create workspace members.",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
+
+    const name = String(req.body?.name || "").trim();
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || "");
+    const role = String(req.body?.role || "member").trim().toLowerCase();
+    const membershipStatus = String(req.body?.status || "active").trim().toLowerCase();
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        ok: false,
+        message: "Name, email, and password are required.",
+        code: "REQUIRED_FIELDS_MISSING",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        message: "Password must be at least 8 characters.",
+        code: "PASSWORD_TOO_SHORT",
+      });
+    }
+
+    if (!ALLOWED_ROLES.includes(role)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid role value.",
+        code: "INVALID_ROLE",
+      });
+    }
+
+    if (!ALLOWED_STATUSES.includes(membershipStatus)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid status value.",
+        code: "INVALID_STATUS",
+      });
+    }
+
+    const requesterRole = String(ctx.membership.role || "").toLowerCase();
+
+    if (role === "owner" && requesterRole !== "owner") {
+      return res.status(403).json({
+        ok: false,
+        message: "Only the workspace owner can assign the owner role.",
+        code: "OWNER_ONLY_ACTION",
+      });
+    }
+
+    let user = await User.findOne({ email }).select("_id name email orgId activeWorkspace role status");
+
+    if (user) {
+      const existingMembership = await Membership.findOne({
+        userId: user._id,
+        orgId: ctx.orgId,
+      }).lean();
+
+      if (existingMembership) {
+        return res.status(409).json({
+          ok: false,
+          message: "This user is already a member of the workspace.",
+          code: "MEMBER_ALREADY_EXISTS",
+        });
+      }
+    } else {
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      user = await User.create({
+        name,
+        email,
+        passwordHash,
+        orgId: ctx.orgId,
+        activeWorkspace: ctx.orgId,
+        role,
+        status: membershipStatus === "invited" ? "invited" : "active",
+        workspaces: [
+          {
+            workspace: ctx.orgId,
+            role,
+            status: membershipStatus,
+          },
+        ],
+      });
+    }
+
+    const createdMembership = await Membership.create({
+      userId: user._id,
+      orgId: ctx.orgId,
+      workspaceId: ctx.orgId,
+      role,
+      status: membershipStatus,
+      invitedBy: ctx.userId,
+      joinedAt: membershipStatus === "active" ? new Date() : null,
+    });
+
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          name,
+          email,
+          orgId: user.orgId || ctx.orgId,
+          activeWorkspace: user.activeWorkspace || ctx.orgId,
+          role,
+          status: membershipStatus === "invited" ? "invited" : "active",
+        },
+        $pull: {
+          workspaces: { workspace: ctx.orgId },
+        },
+      }
+    );
+
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $push: {
+          workspaces: {
+            workspace: ctx.orgId,
+            role,
+            status: membershipStatus,
+          },
+        },
+        $unset: {
+          password: "",
+        },
+      }
+    );
+
+    const freshUser = await User.findById(user._id)
+      .select("_id name email lastLoginAt status")
+      .lean();
+
+    return res.status(201).json({
+      ok: true,
+      member: {
+        membershipId: String(createdMembership._id),
+        userId: String(freshUser._id),
+        name: freshUser.name || "User",
+        email: freshUser.email || "",
+        role: createdMembership.role || role,
+        membershipStatus: createdMembership.status || membershipStatus,
+        userStatus: freshUser.status || "active",
+        createdAt: createdMembership.createdAt || null,
+        joinedAt: createdMembership.joinedAt || null,
+        lastActiveAt: createdMembership.lastActiveAt || null,
+        lastLoginAt: freshUser.lastLoginAt || null,
+      },
+    });
+  } catch (err) {
+    console.error("members create error:", err);
+
+    if (err?.code === 11000) {
+      return res.status(409).json({
+        ok: false,
+        message: "A duplicate member record was detected.",
+        code: "DUPLICATE_KEY",
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Server error",
+    });
+  }
+});
+
+/**
+ * PATCH /api/members/:membershipId
  * Owner/Admin can change role/status
  */
-router.put("/:membershipId", requireAuth, async (req, res) => {
+router.patch("/:membershipId", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
 
@@ -225,10 +420,15 @@ router.put("/:membershipId", requireAuth, async (req, res) => {
       });
     }
 
+    const requestedStatus =
+      req.body?.membershipStatus !== undefined
+        ? req.body.membershipStatus
+        : req.body?.status;
+
     if (
       String(targetMembership.userId) === String(ctx.userId) &&
-      req.body?.status &&
-      String(req.body.status).toLowerCase() === "disabled"
+      requestedStatus &&
+      String(requestedStatus).toLowerCase() === "disabled"
     ) {
       return res.status(400).json({
         ok: false,
@@ -261,8 +461,8 @@ router.put("/:membershipId", requireAuth, async (req, res) => {
       updates.role = nextRole;
     }
 
-    if (req.body?.status !== undefined) {
-      const nextStatus = String(req.body.status || "").trim().toLowerCase();
+    if (requestedStatus !== undefined) {
+      const nextStatus = String(requestedStatus || "").trim().toLowerCase();
 
       if (!ALLOWED_STATUSES.includes(nextStatus)) {
         return res.status(400).json({
@@ -289,12 +489,140 @@ router.put("/:membershipId", requireAuth, async (req, res) => {
       { new: true }
     ).lean();
 
+    if (updated?.role || updated?.status) {
+      const setPayload = {};
+      if (updated.role) setPayload.role = updated.role;
+
+      if (updated.status === "disabled" || updated.status === "suspended") {
+        setPayload.status = updated.status;
+      } else if (updated.status === "active" || updated.status === "invited") {
+        setPayload.status = updated.status === "invited" ? "invited" : "active";
+      }
+
+      await User.updateOne(
+        { _id: updated.userId },
+        {
+          $set: setPayload,
+          $pull: {
+            workspaces: { workspace: ctx.orgId },
+          },
+        }
+      );
+
+      await User.updateOne(
+        { _id: updated.userId },
+        {
+          $push: {
+            workspaces: {
+              workspace: ctx.orgId,
+              role: updated.role || "member",
+              status: updated.status || "active",
+            },
+          },
+        }
+      );
+    }
+
     return res.json({
       ok: true,
       membership: updated,
     });
   } catch (err) {
     console.error("members update error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Server error",
+    });
+  }
+});
+
+/**
+ * POST /api/members/:membershipId/reset-password
+ * Owner/Admin can reset a member password
+ */
+router.post("/:membershipId/reset-password", requireAuth, async (req, res) => {
+  try {
+    const ctx = await getOrgContext(req);
+
+    if (!ctx.ok) {
+      return res.status(ctx.status).json({
+        ok: false,
+        message: ctx.message,
+        code: ctx.code,
+      });
+    }
+
+    if (!ctx.canManageMembers) {
+      return res.status(403).json({
+        ok: false,
+        message: "Only owners and admins can reset member passwords.",
+        code: "INSUFFICIENT_PERMISSIONS",
+      });
+    }
+
+    const membershipId = toId(req.params.membershipId);
+    const newPassword = String(req.body?.newPassword || "");
+
+    if (!membershipId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid membershipId",
+      });
+    }
+
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({
+        ok: false,
+        message: "New password must be at least 8 characters.",
+        code: "PASSWORD_TOO_SHORT",
+      });
+    }
+
+    const targetMembership = await Membership.findOne({
+      _id: membershipId,
+      orgId: ctx.orgId,
+    }).lean();
+
+    if (!targetMembership) {
+      return res.status(404).json({
+        ok: false,
+        message: "Membership not found",
+      });
+    }
+
+    const requesterRole = String(ctx.membership.role || "").toLowerCase();
+    const targetRole = String(targetMembership.role || "").toLowerCase();
+
+    if (requesterRole !== "owner" && targetRole === "owner") {
+      return res.status(403).json({
+        ok: false,
+        message: "Only the workspace owner can reset another owner password.",
+        code: "OWNER_ONLY_ACTION",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    await User.updateOne(
+      { _id: targetMembership.userId },
+      {
+        $set: {
+          passwordHash,
+          resetToken: null,
+          resetTokenExpiry: null,
+        },
+        $unset: {
+          password: "",
+        },
+      }
+    );
+
+    return res.json({
+      ok: true,
+      message: "Password reset successfully.",
+    });
+  } catch (err) {
+    console.error("members reset password error:", err);
     return res.status(500).json({
       ok: false,
       message: err?.message || "Server error",
@@ -370,6 +698,15 @@ router.delete("/:membershipId", requireAuth, async (req, res) => {
       _id: membershipId,
       orgId: ctx.orgId,
     });
+
+    await User.updateOne(
+      { _id: targetMembership.userId },
+      {
+        $pull: {
+          workspaces: { workspace: ctx.orgId },
+        },
+      }
+    );
 
     return res.json({
       ok: true,
