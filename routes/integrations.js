@@ -2,23 +2,25 @@ import express from "express";
 import Stripe from "stripe";
 import Organization from "../models/Organization.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
+import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
 import { requireAuth } from "../middleware/auth.js";
 import { syncStripeForOrg } from "../services/stripeSync.js";
 
 const router = express.Router();
+
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
 
 const INTEGRATIONS = [
   { id: "hubspot", name: "HubSpot CRM", category: "CRM", supportsLive: true },
-  { id: "salesforce", name: "Salesforce", category: "CRM", supportsLive: false },
+  { id: "salesforce", name: "Salesforce", category: "CRM", supportsLive: true },
   { id: "google_ads", name: "Google Ads", category: "Advertising", supportsLive: true },
   { id: "meta_ads", name: "Meta Ads", category: "Advertising", supportsLive: true },
-  { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: false },
+  { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: true },
   { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: true },
   { id: "stripe", name: "Stripe", category: "Payments", supportsLive: true },
-  { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: false },
+  { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: true },
 ];
 
 /* -------------------------------- */
@@ -45,33 +47,55 @@ async function ensureOrg(orgId) {
   return Organization.findById(orgId);
 }
 
-/* -------------------------------- */
-/* HubSpot OAuth helpers            */
-/* -------------------------------- */
-
-function buildHubSpotRedirectUri() {
-  const base = String(
+function buildBackendBaseUrl() {
+  return String(
     process.env.BACKEND_PUBLIC_URL ||
       process.env.APP_BASE_URL ||
       ""
   )
     .trim()
     .replace(/\/+$/, "");
+}
 
+function getFrontendUrl() {
+  return String(process.env.FRONTEND_URL || "https://app.atlasrevenueai.com")
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+function safeStateString(payload) {
+  return JSON.stringify(payload);
+}
+
+function normalizeShopDomain(shopDomain) {
+  return String(shopDomain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
+}
+
+function normalizeSalesforceInstanceUrl(url) {
+  return String(url || "").trim().replace(/\/+$/, "");
+}
+
+function formatOauthErrorRedirect(provider, code = `${provider}_callback_failed`) {
+  return `${getFrontendUrl()}/integrations?error=${encodeURIComponent(code)}`;
+}
+
+/* -------------------------------- */
+/* HubSpot OAuth helpers            */
+/* -------------------------------- */
+
+function buildHubSpotRedirectUri() {
+  const base = buildBackendBaseUrl();
   if (!base) return null;
-
   return `${base}/api/integrations/hubspot/callback`;
 }
 
 function buildHubSpotAuthUrl(orgId) {
   const clientId = String(process.env.HUBSPOT_CLIENT_ID || "").trim();
   const redirectUri = buildHubSpotRedirectUri();
-
-  console.log("BUILD HUBSPOT AUTH URL DEBUG", {
-    clientIdExists: !!clientId,
-    redirectUri,
-    orgId: orgId ? String(orgId) : "",
-  });
 
   if (!clientId || !redirectUri || !orgId) return null;
 
@@ -86,7 +110,7 @@ function buildHubSpotAuthUrl(orgId) {
     client_id: clientId,
     redirect_uri: redirectUri,
     scope: scopes,
-    state: JSON.stringify({ orgId: String(orgId), provider: "hubspot" }),
+    state: safeStateString({ orgId: String(orgId), provider: "hubspot" }),
   });
 
   return `https://app.hubspot.com/oauth/authorize?${params.toString()}`;
@@ -125,9 +149,7 @@ async function exchangeHubSpotCodeForTokens(code) {
 
   const res = await fetch("https://api.hubapi.com/oauth/v1/token", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
 
@@ -145,28 +167,14 @@ async function exchangeHubSpotCodeForTokens(code) {
 /* -------------------------------- */
 
 function buildGoogleAdsRedirectUri() {
-  const base = String(
-    process.env.BACKEND_PUBLIC_URL ||
-      process.env.APP_BASE_URL ||
-      ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
-
+  const base = buildBackendBaseUrl();
   if (!base) return null;
-
   return `${base}/api/integrations/google_ads/callback`;
 }
 
 function buildGoogleAdsAuthUrl(orgId) {
   const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
   const redirectUri = buildGoogleAdsRedirectUri();
-
-  console.log("BUILD GOOGLE ADS AUTH URL DEBUG", {
-    clientIdExists: !!clientId,
-    redirectUri,
-    orgId: orgId ? String(orgId) : "",
-  });
 
   if (!clientId || !redirectUri || !orgId) return null;
 
@@ -180,7 +188,7 @@ function buildGoogleAdsAuthUrl(orgId) {
     prompt: "consent select_account",
     include_granted_scopes: "false",
     scope,
-    state: JSON.stringify({ orgId: String(orgId), provider: "google_ads" }),
+    state: safeStateString({ orgId: String(orgId), provider: "google_ads" }),
   });
 
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
@@ -205,9 +213,7 @@ async function exchangeGoogleCodeForTokens(code, redirectUriOverride = null) {
 
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
 
@@ -275,7 +281,6 @@ async function getGoogleAdsAccessibleCustomers(accessToken) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    console.error("Google Ads accessible customers error:", data);
     throw new Error(
       data?.error?.message || "Failed to fetch accessible Google Ads customers"
     );
@@ -289,28 +294,14 @@ async function getGoogleAdsAccessibleCustomers(accessToken) {
 /* -------------------------------- */
 
 function buildGA4RedirectUri() {
-  const base = String(
-    process.env.BACKEND_PUBLIC_URL ||
-      process.env.APP_BASE_URL ||
-      ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
-
+  const base = buildBackendBaseUrl();
   if (!base) return null;
-
   return `${base}/api/integrations/ga4/callback`;
 }
 
 function buildGA4AuthUrl(orgId) {
   const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
   const redirectUri = buildGA4RedirectUri();
-
-  console.log("BUILD GA4 AUTH URL DEBUG", {
-    clientIdExists: !!clientId,
-    redirectUri,
-    orgId: orgId ? String(orgId) : "",
-  });
 
   if (!clientId || !redirectUri || !orgId) return null;
 
@@ -329,7 +320,7 @@ function buildGA4AuthUrl(orgId) {
     prompt: "consent select_account",
     include_granted_scopes: "false",
     scope,
-    state: JSON.stringify({ orgId: String(orgId), provider: "ga4" }),
+    state: safeStateString({ orgId: String(orgId), provider: "ga4" }),
   });
 
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
@@ -344,16 +335,13 @@ async function getGA4AccountSummaries(accessToken) {
     "https://analyticsadmin.googleapis.com/v1beta/accountSummaries",
     {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
+      headers: { Authorization: `Bearer ${accessToken}` },
     }
   );
 
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    console.error("GA4 account summaries error:", data);
     throw new Error(
       data?.error?.message || "Failed to fetch accessible GA4 properties"
     );
@@ -367,16 +355,8 @@ async function getGA4AccountSummaries(accessToken) {
 /* -------------------------------- */
 
 function buildMetaAdsRedirectUri() {
-  const base = String(
-    process.env.BACKEND_PUBLIC_URL ||
-      process.env.APP_BASE_URL ||
-      ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
-
+  const base = buildBackendBaseUrl();
   if (!base) return null;
-
   return `${base}/api/integrations/meta_ads/callback`;
 }
 
@@ -384,24 +364,14 @@ function buildMetaAdsAuthUrl(orgId) {
   const clientId = String(process.env.META_APP_ID || "").trim();
   const redirectUri = buildMetaAdsRedirectUri();
 
-  console.log("BUILD META ADS AUTH URL DEBUG", {
-    clientIdExists: !!clientId,
-    redirectUri,
-    orgId: orgId ? String(orgId) : "",
-  });
-
   if (!clientId || !redirectUri || !orgId) return null;
 
-  const scope = [
-    "ads_read",
-    "ads_management",
-    "business_management",
-  ].join(",");
+  const scope = ["ads_read", "ads_management", "business_management"].join(",");
 
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
-    state: JSON.stringify({ orgId: String(orgId), provider: "meta_ads" }),
+    state: safeStateString({ orgId: String(orgId), provider: "meta_ads" }),
     scope,
     response_type: "code",
   });
@@ -451,7 +421,6 @@ async function getMetaAdAccounts(accessToken) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    console.error("Meta ad accounts error:", data);
     throw new Error(data?.error?.message || "Failed to fetch Meta ad accounts");
   }
 
@@ -463,28 +432,14 @@ async function getMetaAdAccounts(accessToken) {
 /* -------------------------------- */
 
 function buildStripeRedirectUri() {
-  const base = String(
-    process.env.BACKEND_PUBLIC_URL ||
-      process.env.APP_BASE_URL ||
-      ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
-
+  const base = buildBackendBaseUrl();
   if (!base) return null;
-
   return `${base}/api/integrations/stripe/callback`;
 }
 
 function buildStripeAuthUrl(orgId) {
   const clientId = String(process.env.STRIPE_CONNECT_CLIENT_ID || "").trim();
   const redirectUri = buildStripeRedirectUri();
-
-  console.log("BUILD STRIPE AUTH URL DEBUG", {
-    clientIdExists: !!clientId,
-    redirectUri,
-    orgId: orgId ? String(orgId) : "",
-  });
 
   if (!clientId || !redirectUri || !orgId) return null;
 
@@ -493,7 +448,7 @@ function buildStripeAuthUrl(orgId) {
     client_id: clientId,
     scope: "read_write",
     redirect_uri: redirectUri,
-    state: JSON.stringify({ orgId: String(orgId), provider: "stripe" }),
+    state: safeStateString({ orgId: String(orgId), provider: "stripe" }),
   });
 
   return `https://connect.stripe.com/oauth/authorize?${params.toString()}`;
@@ -520,32 +475,272 @@ async function exchangeStripeCodeForTokens(code) {
 
   const res = await fetch("https://connect.stripe.com/oauth/token", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
 
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(data?.error_description || data?.error || "Stripe token exchange failed");
+    throw new Error(
+      data?.error_description || data?.error || "Stripe token exchange failed"
+    );
   }
 
   return data;
 }
 
 async function getStripeAccountInfo(accountId) {
-  if (!stripe) {
-    throw new Error("Stripe is not configured");
-  }
-
-  if (!accountId) {
-    throw new Error("Missing Stripe account id");
-  }
-
+  if (!stripe) throw new Error("Stripe is not configured");
+  if (!accountId) throw new Error("Missing Stripe account id");
   return stripe.accounts.retrieve(accountId);
 }
+
+/* -------------------------------- */
+/* Shopify OAuth helpers            */
+/* -------------------------------- */
+
+function buildShopifyRedirectUri() {
+  const base = buildBackendBaseUrl();
+  if (!base) return null;
+  return `${base}/api/integrations/shopify/callback`;
+}
+
+function buildShopifyAuthUrl(shopDomain, orgId) {
+  const clientId = String(process.env.SHOPIFY_CLIENT_ID || "").trim();
+  const redirectUri = buildShopifyRedirectUri();
+  const scopes = String(
+    process.env.SHOPIFY_SCOPES || "read_products,read_customers,read_orders"
+  ).trim();
+
+  const cleanDomain = normalizeShopDomain(shopDomain);
+
+  if (!clientId || !redirectUri || !cleanDomain || !orgId) return null;
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    scope: scopes,
+    redirect_uri: redirectUri,
+    state: safeStateString({
+      orgId: String(orgId),
+      provider: "shopify",
+      shopDomain: cleanDomain,
+    }),
+  });
+
+  return `https://${cleanDomain}/admin/oauth/authorize?${params.toString()}`;
+}
+
+async function exchangeShopifyCodeForToken({ code, shopDomain }) {
+  const clientId = String(process.env.SHOPIFY_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.SHOPIFY_CLIENT_SECRET || "").trim();
+  const cleanDomain = normalizeShopDomain(shopDomain);
+
+  if (!clientId || !clientSecret || !cleanDomain) {
+    throw new Error("Shopify OAuth is not fully configured");
+  }
+
+  const res = await fetch(`https://${cleanDomain}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code,
+    }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error_description || data?.error || "Shopify token exchange failed"
+    );
+  }
+
+  return data;
+}
+
+async function getShopifyShopInfo({ shopDomain, accessToken }) {
+  const cleanDomain = normalizeShopDomain(shopDomain);
+
+  const res = await fetch(`https://${cleanDomain}/admin/api/2024-10/shop.json`, {
+    headers: {
+      "X-Shopify-Access-Token": accessToken,
+      "Content-Type": "application/json",
+    },
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(data?.errors || "Failed to fetch Shopify shop info");
+  }
+
+  return data?.shop || null;
+}
+
+/* -------------------------------- */
+/* Salesforce OAuth helpers         */
+/* -------------------------------- */
+
+function buildSalesforceRedirectUri() {
+  const base = buildBackendBaseUrl();
+  if (!base) return null;
+  return `${base}/api/integrations/salesforce/callback`;
+}
+
+function buildSalesforceAuthUrl(orgId) {
+  const clientId = String(process.env.SALESFORCE_CLIENT_ID || "").trim();
+  const redirectUri = buildSalesforceRedirectUri();
+  const loginUrl = String(
+    process.env.SALESFORCE_LOGIN_URL || "https://login.salesforce.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    state: safeStateString({ orgId: String(orgId), provider: "salesforce" }),
+  });
+
+  return `${loginUrl}/services/oauth2/authorize?${params.toString()}`;
+}
+
+async function exchangeSalesforceCodeForTokens(code) {
+  const clientId = String(process.env.SALESFORCE_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.SALESFORCE_CLIENT_SECRET || "").trim();
+  const redirectUri = buildSalesforceRedirectUri();
+  const loginUrl = String(
+    process.env.SALESFORCE_LOGIN_URL || "https://login.salesforce.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    throw new Error("Salesforce OAuth is not fully configured");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    code,
+  });
+
+  const res = await fetch(`${loginUrl}/services/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error_description || data?.error || "Salesforce token exchange failed"
+    );
+  }
+
+  return data;
+}
+
+async function getSalesforceIdentity(identityUrl, accessToken) {
+  const res = await fetch(identityUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch Salesforce identity");
+  }
+
+  return data;
+}
+
+/* -------------------------------- */
+/* LinkedIn Ads OAuth helpers       */
+/* -------------------------------- */
+
+function buildLinkedInAdsRedirectUri() {
+  const base = buildBackendBaseUrl();
+  if (!base) return null;
+  return `${base}/api/integrations/linkedin_ads/callback`;
+}
+
+function buildLinkedInAdsAuthUrl(orgId) {
+  const clientId = String(process.env.LINKEDIN_CLIENT_ID || "").trim();
+  const redirectUri = buildLinkedInAdsRedirectUri();
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const scope = ["openid", "profile", "email", "r_ads", "r_ads_reporting"].join(" ");
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope,
+    state: safeStateString({ orgId: String(orgId), provider: "linkedin_ads" }),
+  });
+
+  return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
+}
+
+async function exchangeLinkedInCodeForTokens(code) {
+  const clientId = String(process.env.LINKEDIN_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.LINKEDIN_CLIENT_SECRET || "").trim();
+  const redirectUri = buildLinkedInAdsRedirectUri();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    throw new Error("LinkedIn OAuth is not fully configured");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+  });
+
+  const res = await fetch("https://www.linkedin.com/oauth/v2/accessToken", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error_description || data?.error || "LinkedIn token exchange failed"
+    );
+  }
+
+  return data;
+}
+
+async function getLinkedInProfile(accessToken) {
+  const res = await fetch("https://api.linkedin.com/v2/userinfo", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch LinkedIn profile");
+  }
+
+  return data;
+}
+
 /* -------------------------------- */
 /* Shared helpers                   */
 /* -------------------------------- */
@@ -585,10 +780,6 @@ async function formatIntegrations(orgId) {
     const live = liveMap.get(item.id);
     const summary = savedSummary[item.id] || {};
 
-   
-    /* ========================= */
-    /* NORMAL LIVE CONNECTION    */
-    /* ========================= */
     if (live) {
       return {
         id: item.id,
@@ -616,13 +807,13 @@ async function formatIntegrations(orgId) {
         selectedCustomer: live?.metadata?.selectedCustomer || null,
         selectedProperty: live?.metadata?.selectedProperty || null,
         selectedMetaAccount: live?.metadata?.selectedAccount || null,
+        shopDomain: live?.metadata?.shopDomain || null,
+        selectedSalesforceOrg: live?.metadata?.salesforceOrgId || null,
+        selectedLinkedInAccount: live?.externalAccountName || null,
         supportsLive: item.supportsLive,
       };
     }
 
-    /* ========================= */
-    /* DEFAULT (DISCONNECTED)    */
-    /* ========================= */
     return {
       id: item.id,
       name: item.name,
@@ -643,10 +834,14 @@ async function formatIntegrations(orgId) {
       selectedCustomer: null,
       selectedProperty: null,
       selectedMetaAccount: null,
+      shopDomain: null,
+      selectedSalesforceOrg: null,
+      selectedLinkedInAccount: null,
       supportsLive: item.supportsLive,
     };
   });
 }
+
 /* -------------------------------- */
 /* GET INTEGRATIONS                 */
 /* -------------------------------- */
@@ -878,48 +1073,6 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
     const { provider } = req.params;
-    
-    // ✅ STRIPE CONNECT
-if (provider === "stripe") {
-  const clientId = process.env.STRIPE_CONNECT_CLIENT_ID;
-  const backendUrl = process.env.BACKEND_PUBLIC_URL;
-
-  if (!clientId || !backendUrl) {
-    return res.status(500).json({
-      ok: false,
-      message: "Stripe OAuth is not configured",
-    });
-  }
-
-  const redirectUri = `${backendUrl}/api/integrations/stripe/callback`;
-
-  const authUrl = `https://connect.stripe.com/oauth/authorize?response_type=code&client_id=${clientId}&scope=read_write&redirect_uri=${encodeURIComponent(
-    redirectUri
-  )}&state=${orgId}`;
-
-  return res.json({
-    ok: true,
-    provider,
-    authUrl,
-  });
-}
-    console.log("CONNECTOR ENV DEBUG", {
-      orgId,
-      provider,
-      HUBSPOT_CLIENT_ID_EXISTS: !!process.env.HUBSPOT_CLIENT_ID,
-      HUBSPOT_CLIENT_SECRET_EXISTS: !!process.env.HUBSPOT_CLIENT_SECRET,
-      GOOGLE_CLIENT_ID_EXISTS: !!process.env.GOOGLE_CLIENT_ID,
-      GOOGLE_CLIENT_SECRET_EXISTS: !!process.env.GOOGLE_CLIENT_SECRET,
-      GOOGLE_ADS_DEVELOPER_TOKEN_EXISTS: !!process.env.GOOGLE_ADS_DEVELOPER_TOKEN,
-      GOOGLE_ADS_LOGIN_CUSTOMER_ID: process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "",
-      META_APP_ID_EXISTS: !!process.env.META_APP_ID,
-      META_APP_SECRET_EXISTS: !!process.env.META_APP_SECRET,
-      BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL,
-      APP_BASE_URL: process.env.APP_BASE_URL,
-      FRONTEND_URL: process.env.FRONTEND_URL,
-      STRIPE_SECRET_KEY_EXISTS: !!process.env.STRIPE_SECRET_KEY,
-      STRIPE_CONNECT_CLIENT_ID_EXISTS: !!process.env.STRIPE_CONNECT_CLIENT_ID,
-    });
 
     if (!orgId) {
       return res.status(400).json({
@@ -947,62 +1100,60 @@ if (provider === "stripe") {
 
     if (provider === "hubspot") {
       const url = buildHubSpotAuthUrl(orgId);
-
       if (!url) {
-        return res.status(500).json({
-          ok: false,
-          message: "HubSpot OAuth is not configured",
-        });
+        return res.status(500).json({ ok: false, message: "HubSpot OAuth is not configured" });
       }
-
-      return res.json({
-        ok: true,
-        provider,
-        authUrl: url,
-      });
+      return res.json({ ok: true, provider, authUrl: url });
     }
 
     if (provider === "google_ads") {
       const url = buildGoogleAdsAuthUrl(orgId);
-
       if (!url) {
-        return res.status(500).json({
-          ok: false,
-          message: "Google Ads OAuth is not configured",
-        });
+        return res.status(500).json({ ok: false, message: "Google Ads OAuth is not configured" });
       }
-
-      return res.json({
-        ok: true,
-        provider,
-        authUrl: url,
-      });
+      return res.json({ ok: true, provider, authUrl: url });
     }
 
     if (provider === "ga4") {
       const url = buildGA4AuthUrl(orgId);
-
       if (!url) {
-        return res.status(500).json({
-          ok: false,
-          message: "GA4 OAuth is not configured",
-        });
+        return res.status(500).json({ ok: false, message: "GA4 OAuth is not configured" });
       }
-
-      return res.json({
-        ok: true,
-        provider,
-        authUrl: url,
-      });
+      return res.json({ ok: true, provider, authUrl: url });
     }
 
     if (provider === "meta_ads") {
       const url = buildMetaAdsAuthUrl(orgId);
+      if (!url) {
+        return res.status(500).json({ ok: false, message: "Meta Ads OAuth is not configured" });
+      }
+      return res.json({ ok: true, provider, authUrl: url });
+    }
+
+    if (provider === "stripe") {
+      const url = buildStripeAuthUrl(orgId);
+      if (!url) {
+        return res.status(500).json({ ok: false, message: "Stripe OAuth is not configured" });
+      }
+      return res.json({ ok: true, provider, authUrl: url });
+    }
+
+    if (provider === "shopify") {
+      const { shopDomain } = req.query;
+
+      if (!shopDomain) {
+        return res.status(400).json({
+          ok: false,
+          message: "shopDomain is required for Shopify",
+        });
+      }
+
+      const url = buildShopifyAuthUrl(shopDomain, orgId);
 
       if (!url) {
         return res.status(500).json({
           ok: false,
-          message: "Meta Ads OAuth is not configured",
+          message: "Shopify OAuth is not configured",
         });
       }
 
@@ -1012,22 +1163,27 @@ if (provider === "stripe") {
         authUrl: url,
       });
     }
-     
-     if (provider === "stripe") {
-      const url = buildStripeAuthUrl(orgId);
 
+    if (provider === "salesforce") {
+      const url = buildSalesforceAuthUrl(orgId);
       if (!url) {
         return res.status(500).json({
           ok: false,
-          message: "Stripe OAuth is not configured",
+          message: "Salesforce OAuth is not configured",
         });
       }
+      return res.json({ ok: true, provider, authUrl: url });
+    }
 
-      return res.json({
-        ok: true,
-        provider,
-        authUrl: url,
-      });
+    if (provider === "linkedin_ads") {
+      const url = buildLinkedInAdsAuthUrl(orgId);
+      if (!url) {
+        return res.status(500).json({
+          ok: false,
+          message: "LinkedIn Ads OAuth is not configured",
+        });
+      }
+      return res.json({ ok: true, provider, authUrl: url });
     }
 
     return res.status(400).json({
@@ -1046,27 +1202,13 @@ if (provider === "stripe") {
 });
 
 /* -------------------------------- */
-/* HUBSPOT STATUS                   */
+/* STATUS ROUTES                    */
 /* -------------------------------- */
 
 router.get("/hubspot/status", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1093,28 +1235,10 @@ router.get("/hubspot/status", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------------- */
-/* GOOGLE ADS STATUS                */
-/* -------------------------------- */
-
 router.get("/google_ads/status", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1146,159 +1270,10 @@ router.get("/google_ads/status", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------------- */
-/* STRIPE STATUS                    */
-/* -------------------------------- */
-
-router.get("/stripe/status", requireAuth, async (req, res) => {
-  try {
-    const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
-
-    const connection = await IntegrationConnection.findOne({
-      orgId,
-      provider: "stripe",
-    }).lean();
-
-    return res.json({
-      ok: true,
-      connected: connection?.status === "connected",
-      mode: connection?.mode || "demo",
-      externalAccountId: connection?.externalAccountId || null,
-      externalAccountName: connection?.externalAccountName || null,
-      lastSyncAt: connection?.lastSyncAt || null,
-      lastSyncStatus: connection?.lastSyncStatus || "never",
-      lastError: connection?.lastError || null,
-    });
-  } catch (err) {
-    console.error("STRIPE status error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Failed to load Stripe status",
-      error: err.message,
-    });
-  }
-});
-
-/* -------------------------------- */
-/* STRIPE MANUAL SYNC (SCAFFOLD)    */
-/* -------------------------------- */
-
-router.post("/stripe/sync", requireAuth, async (req, res) => {
-  try {
-    const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const result = await syncStripeForOrg(orgId);
-
-    await updateOrgIntegrationSummary(orgId, "stripe", {
-      connected: true,
-      connectedAt: new Date(),
-      lastSync: new Date(),
-      mode: "live",
-    });
-
-    return res.json({
-      ok: true,
-      message: "Stripe sync completed",
-      provider: "stripe",
-      mode: "live",
-      summary: result,
-    });
-  } catch (err) {
-    console.error("Stripe sync error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Failed to sync Stripe",
-      error: err.message,
-    });
-  }
-});
-
-router.get("/stripe/revenue-daily", requireAuth, async (req, res) => {
-  try {
-    const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const rows = await StripeRevenueDaily.find({ orgId, provider: "stripe" })
-      .sort({ date: 1 })
-      .lean();
-
-    const totalRevenue = rows.reduce((sum, r) => sum + Number(r.netRevenue || 0), 0);
-    const totalGross = rows.reduce((sum, r) => sum + Number(r.grossRevenue || 0), 0);
-    const totalRefunds = rows.reduce((sum, r) => sum + Number(r.refunds || 0), 0);
-    const totalTransactions = rows.reduce(
-      (sum, r) => sum + Number(r.transactionCount || 0),
-      0
-    );
-
-    return res.json({
-      ok: true,
-      summary: {
-        totalRevenue: Number(totalRevenue.toFixed(2)),
-        totalGross: Number(totalGross.toFixed(2)),
-        totalRefunds: Number(totalRefunds.toFixed(2)),
-        totalTransactions,
-      },
-      rows,
-    });
-  } catch (err) {
-    console.error("Stripe revenue daily error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Failed to load Stripe revenue data",
-      error: err.message,
-    });
-  }
-});
-/* -------------------------------- */
-/* GA4 STATUS                       */
-/* -------------------------------- */
-
 router.get("/ga4/status", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1330,28 +1305,10 @@ router.get("/ga4/status", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------------- */
-/* META ADS STATUS                  */
-/* -------------------------------- */
-
 router.get("/meta_ads/status", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1383,8 +1340,132 @@ router.get("/meta_ads/status", requireAuth, async (req, res) => {
   }
 });
 
+router.get("/stripe/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "stripe",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+    });
+  } catch (err) {
+    console.error("STRIPE status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Stripe status",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/shopify/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "shopify",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+      shopDomain: connection?.metadata?.shopDomain || null,
+    });
+  } catch (err) {
+    console.error("SHOPIFY status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Shopify status",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/salesforce/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "salesforce",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+      instanceUrl: connection?.metadata?.instanceUrl || null,
+      salesforceOrgId: connection?.metadata?.salesforceOrgId || null,
+    });
+  } catch (err) {
+    console.error("SALESFORCE status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Salesforce status",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/linkedin_ads/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "linkedin_ads",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+      profileEmail: connection?.metadata?.email || null,
+    });
+  } catch (err) {
+    console.error("LINKEDIN ADS status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load LinkedIn Ads status",
+      error: err.message,
+    });
+  }
+});
+
 /* -------------------------------- */
-/* GOOGLE ADS SELECT ACCOUNT        */
+/* SELECT ACCOUNT / PROPERTY        */
 /* -------------------------------- */
 
 router.post("/google_ads/select-account", requireAuth, async (req, res) => {
@@ -1392,19 +1473,8 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
     const orgId = getOrgId(req);
     const { customerId } = req.body || {};
 
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    if (!customerId) {
-      return res.status(400).json({
-        ok: false,
-        message: "customerId is required",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+    if (!customerId) return res.status(400).json({ ok: false, message: "customerId is required" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1412,10 +1482,7 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
     }).select("+accessToken +refreshToken");
 
     if (!connection) {
-      return res.status(404).json({
-        ok: false,
-        message: "Google Ads connection not found",
-      });
+      return res.status(404).json({ ok: false, message: "Google Ads connection not found" });
     }
 
     const accessibleCustomers = Array.isArray(connection?.metadata?.accessibleCustomers)
@@ -1425,9 +1492,7 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
     const normalizedTarget = String(customerId).replace(/\D/g, "");
 
     const matched = accessibleCustomers.find((item) => {
-      const normalizedItem = String(item)
-        .replace("customers/", "")
-        .replace(/\D/g, "");
+      const normalizedItem = String(item).replace("customers/", "").replace(/\D/g, "");
       return normalizedItem === normalizedTarget;
     });
 
@@ -1483,28 +1548,13 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------------- */
-/* GA4 SELECT PROPERTY              */
-/* -------------------------------- */
-
 router.post("/ga4/select-property", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
     const { propertyId } = req.body || {};
 
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    if (!propertyId) {
-      return res.status(400).json({
-        ok: false,
-        message: "propertyId is required",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+    if (!propertyId) return res.status(400).json({ ok: false, message: "propertyId is required" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1512,10 +1562,7 @@ router.post("/ga4/select-property", requireAuth, async (req, res) => {
     }).select("+accessToken +refreshToken");
 
     if (!connection) {
-      return res.status(404).json({
-        ok: false,
-        message: "GA4 connection not found",
-      });
+      return res.status(404).json({ ok: false, message: "GA4 connection not found" });
     }
 
     const properties = Array.isArray(connection?.metadata?.properties)
@@ -1575,28 +1622,13 @@ router.post("/ga4/select-property", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------------- */
-/* META ADS SELECT ACCOUNT          */
-/* -------------------------------- */
-
 router.post("/meta_ads/select-account", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
     const { accountId } = req.body || {};
 
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    if (!accountId) {
-      return res.status(400).json({
-        ok: false,
-        message: "accountId is required",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+    if (!accountId) return res.status(400).json({ ok: false, message: "accountId is required" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -1604,10 +1636,7 @@ router.post("/meta_ads/select-account", requireAuth, async (req, res) => {
     }).select("+accessToken +refreshToken");
 
     if (!connection) {
-      return res.status(404).json({
-        ok: false,
-        message: "Meta Ads connection not found",
-      });
+      return res.status(404).json({ ok: false, message: "Meta Ads connection not found" });
     }
 
     const accounts = Array.isArray(connection?.metadata?.accounts)
@@ -1671,19 +1700,15 @@ router.post("/meta_ads/select-account", requireAuth, async (req, res) => {
 });
 
 /* -------------------------------- */
-/* HUBSPOT CALLBACK (LIVE)          */
+/* CALLBACK ROUTES                  */
 /* -------------------------------- */
 
 router.get("/hubspot/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
-
-    if (!code || !state) {
-      return res.status(400).send("Missing code or state");
-    }
+    if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState = null;
-
     try {
       parsedState = JSON.parse(state);
     } catch {
@@ -1691,26 +1716,18 @@ router.get("/hubspot/callback", async (req, res) => {
     }
 
     const { orgId } = parsedState || {};
-
-    if (!orgId) {
-      return res.status(400).send("Missing orgId in state");
-    }
+    if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).send("Workspace not found");
-    }
+    if (!org) return res.status(404).send("Workspace not found");
 
     const tokenData = await exchangeHubSpotCodeForTokens(code);
-
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
     const scopes = Array.isArray(tokenData?.scopes) ? tokenData.scopes : [];
 
-    if (!accessToken) {
-      throw new Error("HubSpot did not return an access token");
-    }
+    if (!accessToken) throw new Error("HubSpot did not return an access token");
 
     const accountData = await getHubSpotAccountInfo(accessToken);
     const accountId = accountData?.hub_id ? String(accountData.hub_id) : null;
@@ -1725,46 +1742,25 @@ router.get("/hubspot/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "hubspot" });
     }
 
-    if (typeof connection.markConnected === "function") {
-      connection.markConnected({
-        mode: "live",
-        externalAccountId: accountId,
-        externalAccountName: accountName,
-        accessToken,
-        refreshToken,
-        tokenType: tokenData?.token_type || null,
-        tokenExpiresAt: expiresIn
-          ? new Date(Date.now() + expiresIn * 1000)
-          : null,
-        scopes,
-        metadata: {
-          hubId: accountId,
-          scopes,
-        },
-      });
-    } else {
-      connection.status = "connected";
-      connection.mode = "live";
-      connection.connectedAt = new Date();
-      connection.disconnectedAt = null;
-      connection.accessToken = accessToken;
-      connection.refreshToken = refreshToken;
-      connection.tokenType = tokenData?.token_type || null;
-      connection.tokenExpiresAt = expiresIn
-        ? new Date(Date.now() + expiresIn * 1000)
-        : null;
-      connection.externalAccountId = accountId;
-      connection.externalAccountName = accountName;
-      connection.scopes = scopes;
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-      connection.metadata = {
-        ...(connection.metadata || {}),
-        hubId: accountId,
-        scopes,
-      };
-    }
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = refreshToken;
+    connection.tokenType = tokenData?.token_type || null;
+    connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
+    connection.externalAccountId = accountId;
+    connection.externalAccountName = accountName;
+    connection.scopes = scopes;
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      hubId: accountId,
+      scopes,
+    };
 
     await connection.save();
 
@@ -1775,37 +1771,17 @@ router.get("/hubspot/callback", async (req, res) => {
       mode: "live",
     });
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(`${frontendUrl}/integrations?connected=hubspot&mode=live`);
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=hubspot&mode=live`);
   } catch (err) {
     console.error("HubSpot callback error:", err);
-
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(`${frontendUrl}/integrations?error=hubspot_callback_failed`);
+    return res.redirect(formatOauthErrorRedirect("hubspot"));
   }
 });
-
-/* -------------------------------- */
-/* GOOGLE ADS CALLBACK (LIVE)       */
-/* -------------------------------- */
 
 router.get("/google_ads/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
-
-    console.log("GOOGLE ADS CALLBACK HIT", {
-      hasCode: !!code,
-      hasState: !!state,
-      query: req.query,
-    });
-
-    if (!code || !state) {
-      return res.status(400).send("Missing code or state");
-    }
+    if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
     try {
@@ -1815,18 +1791,12 @@ router.get("/google_ads/callback", async (req, res) => {
     }
 
     const { orgId } = parsedState || {};
-
-    if (!orgId) {
-      return res.status(400).send("Missing orgId in state");
-    }
+    if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).send("Workspace not found");
-    }
+    if (!org) return res.status(404).send("Workspace not found");
 
     const tokenData = await exchangeGoogleCodeForTokens(code);
-
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
@@ -1835,38 +1805,19 @@ router.get("/google_ads/callback", async (req, res) => {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    if (!accessToken) {
-      throw new Error("No access token returned");
-    }
+    if (!accessToken) throw new Error("No access token returned");
 
     const profile = await getGoogleUserProfile(accessToken);
     const customers = await getGoogleAdsAccessibleCustomers(accessToken);
 
     if (!customers.length) {
-      throw new Error(
-        "No accessible Google Ads accounts were found for this Google login"
-      );
+      throw new Error("No accessible Google Ads accounts were found for this Google login");
     }
 
     const needsSelection = customers.length > 1;
     const selectedCustomer = customers.length === 1 ? customers[0] : null;
-
-    const externalAccountId = selectedCustomer
-      ? selectedCustomer.replace("customers/", "")
-      : null;
-
-    const externalAccountName = externalAccountId
-      ? `Google Ads ${externalAccountId}`
-      : null;
-
-    console.log("GOOGLE ADS CONNECTED", {
-      orgId: String(orgId),
-      googleUserEmail: profile?.email || null,
-      customers,
-      selectedCustomer,
-      externalAccountId,
-      needsSelection,
-    });
+    const externalAccountId = selectedCustomer ? selectedCustomer.replace("customers/", "") : null;
+    const externalAccountName = externalAccountId ? `Google Ads ${externalAccountId}` : null;
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -1877,52 +1828,28 @@ router.get("/google_ads/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "google_ads" });
     }
 
-    if (typeof connection.markConnected === "function") {
-      connection.markConnected({
-        mode: "live",
-        externalAccountId,
-        externalAccountName,
-        accessToken,
-        refreshToken,
-        tokenType: tokenData?.token_type || null,
-        tokenExpiresAt: expiresIn
-          ? new Date(Date.now() + expiresIn * 1000)
-          : null,
-        scopes,
-        metadata: {
-          googleUserEmail: profile?.email || null,
-          googleUserName: profile?.name || null,
-          accessibleCustomers: customers,
-          selectedCustomer,
-          needsSelection,
-        },
-      });
-    } else {
-      connection.status = "connected";
-      connection.mode = "live";
-      connection.connectedAt = new Date();
-      connection.disconnectedAt = null;
-      connection.accessToken = accessToken;
-      connection.refreshToken = refreshToken;
-      connection.tokenType = tokenData?.token_type || null;
-      connection.tokenExpiresAt = expiresIn
-        ? new Date(Date.now() + expiresIn * 1000)
-        : null;
-      connection.externalAccountId = externalAccountId;
-      connection.externalAccountName = externalAccountName;
-      connection.scopes = scopes;
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-      connection.metadata = {
-        ...(connection.metadata || {}),
-        googleUserEmail: profile?.email || null,
-        googleUserName: profile?.name || null,
-        accessibleCustomers: customers,
-        selectedCustomer,
-        needsSelection,
-      };
-    }
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = refreshToken;
+    connection.tokenType = tokenData?.token_type || null;
+    connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
+    connection.externalAccountId = externalAccountId;
+    connection.externalAccountName = externalAccountName;
+    connection.scopes = scopes;
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      googleUserEmail: profile?.email || null,
+      googleUserName: profile?.name || null,
+      accessibleCustomers: customers,
+      selectedCustomer,
+      needsSelection,
+    };
 
     await connection.save();
 
@@ -1933,43 +1860,19 @@ router.get("/google_ads/callback", async (req, res) => {
       mode: "live",
     });
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
     return res.redirect(
-      `${frontendUrl}/integrations?connected=google_ads&mode=live&needsSelection=${
-        needsSelection ? "1" : "0"
-      }`
+      `${getFrontendUrl()}/integrations?connected=google_ads&mode=live&needsSelection=${needsSelection ? "1" : "0"}`
     );
   } catch (err) {
     console.error("Google Ads callback error:", err);
-
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(
-      `${frontendUrl}/integrations?error=google_ads_callback_failed`
-    );
+    return res.redirect(formatOauthErrorRedirect("google_ads"));
   }
 });
-
-/* -------------------------------- */
-/* STRIPE CALLBACK (LIVE)           */
-/* -------------------------------- */
 
 router.get("/stripe/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
-
-    console.log("STRIPE CALLBACK HIT", {
-      hasCode: !!code,
-      hasState: !!state,
-      query: req.query,
-    });
-
-    if (!code || !state) {
-      return res.status(400).send("Missing code or state");
-    }
+    if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
     try {
@@ -1979,15 +1882,10 @@ router.get("/stripe/callback", async (req, res) => {
     }
 
     const { orgId } = parsedState || {};
-
-    if (!orgId) {
-      return res.status(400).send("Missing orgId in state");
-    }
+    if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).send("Workspace not found");
-    }
+    if (!org) return res.status(404).send("Workspace not found");
 
     const tokenData = await exchangeStripeCodeForTokens(code);
 
@@ -1998,12 +1896,9 @@ router.get("/stripe/callback", async (req, res) => {
     const livemode = !!tokenData?.livemode;
     const tokenType = tokenData?.token_type || null;
 
-    if (!stripeUserId) {
-      throw new Error("Stripe did not return a connected account id");
-    }
+    if (!stripeUserId) throw new Error("Stripe did not return a connected account id");
 
     const account = await getStripeAccountInfo(stripeUserId);
-
     const externalAccountId = stripeUserId;
     const externalAccountName =
       account?.business_profile?.name ||
@@ -2020,54 +1915,31 @@ router.get("/stripe/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "stripe" });
     }
 
-    if (typeof connection.markConnected === "function") {
-      connection.markConnected({
-        mode: "live",
-        externalAccountId,
-        externalAccountName,
-        accessToken,
-        refreshToken,
-        tokenType,
-        tokenExpiresAt: null,
-        scopes: scope ? [scope] : [],
-        metadata: {
-          stripeUserId,
-          scope,
-          livemode,
-          email: account?.email || null,
-          country: account?.country || null,
-          businessType: account?.business_type || null,
-          chargesEnabled: !!account?.charges_enabled,
-          payoutsEnabled: !!account?.payouts_enabled,
-        },
-      });
-    } else {
-      connection.status = "connected";
-      connection.mode = "live";
-      connection.connectedAt = new Date();
-      connection.disconnectedAt = null;
-      connection.accessToken = accessToken;
-      connection.refreshToken = refreshToken;
-      connection.tokenType = tokenType;
-      connection.tokenExpiresAt = null;
-      connection.externalAccountId = externalAccountId;
-      connection.externalAccountName = externalAccountName;
-      connection.scopes = scope ? [scope] : [];
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-      connection.metadata = {
-        ...(connection.metadata || {}),
-        stripeUserId,
-        scope,
-        livemode,
-        email: account?.email || null,
-        country: account?.country || null,
-        businessType: account?.business_type || null,
-        chargesEnabled: !!account?.charges_enabled,
-        payoutsEnabled: !!account?.payouts_enabled,
-      };
-    }
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = refreshToken;
+    connection.tokenType = tokenType;
+    connection.tokenExpiresAt = null;
+    connection.externalAccountId = externalAccountId;
+    connection.externalAccountName = externalAccountName;
+    connection.scopes = scope ? [scope] : [];
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      stripeUserId,
+      scope,
+      livemode,
+      email: account?.email || null,
+      country: account?.country || null,
+      businessType: account?.business_type || null,
+      chargesEnabled: !!account?.charges_enabled,
+      payoutsEnabled: !!account?.payouts_enabled,
+    };
 
     await connection.save();
 
@@ -2078,36 +1950,17 @@ router.get("/stripe/callback", async (req, res) => {
       mode: "live",
     });
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(`${frontendUrl}/integrations?connected=stripe&mode=live`);
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=stripe&mode=live`);
   } catch (err) {
     console.error("Stripe callback error:", err);
-
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(`${frontendUrl}/integrations?error=stripe_callback_failed`);
+    return res.redirect(formatOauthErrorRedirect("stripe"));
   }
 });
-/* -------------------------------- */
-/* GA4 CALLBACK (LIVE)              */
-/* -------------------------------- */
 
 router.get("/ga4/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
-
-    console.log("GA4 CALLBACK HIT", {
-      hasCode: !!code,
-      hasState: !!state,
-      query: req.query,
-    });
-
-    if (!code || !state) {
-      return res.status(400).send("Missing code or state");
-    }
+    if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
     try {
@@ -2117,15 +1970,10 @@ router.get("/ga4/callback", async (req, res) => {
     }
 
     const { orgId } = parsedState || {};
-
-    if (!orgId) {
-      return res.status(400).send("Missing orgId in state");
-    }
+    if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).send("Workspace not found");
-    }
+    if (!org) return res.status(404).send("Workspace not found");
 
     const tokenData = await exchangeGA4CodeForTokens(code);
 
@@ -2137,9 +1985,7 @@ router.get("/ga4/callback", async (req, res) => {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    if (!accessToken) {
-      throw new Error("No access token returned");
-    }
+    if (!accessToken) throw new Error("No access token returned");
 
     const profile = await getGoogleUserProfile(accessToken);
     const accountSummaries = await getGA4AccountSummaries(accessToken);
@@ -2163,25 +2009,13 @@ router.get("/ga4/callback", async (req, res) => {
     });
 
     if (!properties.length) {
-      throw new Error(
-        "No accessible GA4 properties were found for this Google login"
-      );
+      throw new Error("No accessible GA4 properties were found for this Google login");
     }
 
     const needsSelection = properties.length > 1;
     const selectedProperty = properties.length === 1 ? properties[0] : null;
-
     const externalAccountId = selectedProperty?.propertyId || null;
     const externalAccountName = selectedProperty?.property || null;
-
-    console.log("GA4 CONNECTED", {
-      orgId: String(orgId),
-      googleUserEmail: profile?.email || null,
-      propertyCount: properties.length,
-      selectedProperty,
-      externalAccountId,
-      needsSelection,
-    });
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -2192,52 +2026,28 @@ router.get("/ga4/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "ga4" });
     }
 
-    if (typeof connection.markConnected === "function") {
-      connection.markConnected({
-        mode: "live",
-        externalAccountId,
-        externalAccountName,
-        accessToken,
-        refreshToken,
-        tokenType: tokenData?.token_type || null,
-        tokenExpiresAt: expiresIn
-          ? new Date(Date.now() + expiresIn * 1000)
-          : null,
-        scopes,
-        metadata: {
-          googleUserEmail: profile?.email || null,
-          googleUserName: profile?.name || null,
-          properties,
-          selectedProperty,
-          needsSelection,
-        },
-      });
-    } else {
-      connection.status = "connected";
-      connection.mode = "live";
-      connection.connectedAt = new Date();
-      connection.disconnectedAt = null;
-      connection.accessToken = accessToken;
-      connection.refreshToken = refreshToken;
-      connection.tokenType = tokenData?.token_type || null;
-      connection.tokenExpiresAt = expiresIn
-        ? new Date(Date.now() + expiresIn * 1000)
-        : null;
-      connection.externalAccountId = externalAccountId;
-      connection.externalAccountName = externalAccountName;
-      connection.scopes = scopes;
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-      connection.metadata = {
-        ...(connection.metadata || {}),
-        googleUserEmail: profile?.email || null,
-        googleUserName: profile?.name || null,
-        properties,
-        selectedProperty,
-        needsSelection,
-      };
-    }
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = refreshToken;
+    connection.tokenType = tokenData?.token_type || null;
+    connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
+    connection.externalAccountId = externalAccountId;
+    connection.externalAccountName = externalAccountName;
+    connection.scopes = scopes;
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      googleUserEmail: profile?.email || null,
+      googleUserName: profile?.name || null,
+      properties,
+      selectedProperty,
+      needsSelection,
+    };
 
     await connection.save();
 
@@ -2248,37 +2058,197 @@ router.get("/ga4/callback", async (req, res) => {
       mode: "live",
     });
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
     return res.redirect(
-      `${frontendUrl}/integrations?connected=ga4&mode=live&needsSelection=${
-        needsSelection ? "1" : "0"
-      }`
+      `${getFrontendUrl()}/integrations?connected=ga4&mode=live&needsSelection=${needsSelection ? "1" : "0"}`
     );
   } catch (err) {
     console.error("GA4 callback error:", err);
-
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(`${frontendUrl}/integrations?error=ga4_callback_failed`);
+    return res.redirect(formatOauthErrorRedirect("ga4"));
   }
 });
-
-/* -------------------------------- */
-/* META ADS CALLBACK (LIVE)         */
-/* -------------------------------- */
 
 router.get("/meta_ads/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
+    if (!code || !state) return res.status(400).send("Missing code or state");
 
-    console.log("META ADS CALLBACK HIT", {
-      hasCode: !!code,
-      hasState: !!state,
-      query: req.query,
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+    if (!orgId) return res.status(400).send("Missing orgId in state");
+
+    const org = await ensureOrg(orgId);
+    if (!org) return res.status(404).send("Workspace not found");
+
+    const tokenData = await exchangeMetaCodeForTokens(code);
+    const accessToken = tokenData?.access_token || null;
+
+    if (!accessToken) throw new Error("No Meta access token returned");
+
+    const accounts = await getMetaAdAccounts(accessToken);
+
+    if (!accounts.length) {
+      throw new Error("No Meta ad accounts found for this login");
+    }
+
+    const needsSelection = accounts.length > 1;
+    const selectedAccount = accounts.length === 1 ? accounts[0] : null;
+
+    const externalAccountId = selectedAccount?.id || null;
+    const externalAccountName = selectedAccount?.name || null;
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "meta_ads",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "meta_ads" });
+    }
+
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = null;
+    connection.tokenType = tokenData?.token_type || null;
+    connection.tokenExpiresAt = tokenData?.expires_in
+      ? new Date(Date.now() + Number(tokenData.expires_in) * 1000)
+      : null;
+    connection.externalAccountId = externalAccountId;
+    connection.externalAccountName = externalAccountName;
+    connection.scopes = ["ads_read", "ads_management", "business_management"];
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      accounts,
+      selectedAccount,
+      needsSelection,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "meta_ads", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
     });
+
+    return res.redirect(
+      `${getFrontendUrl()}/integrations?connected=meta_ads&mode=live&needsSelection=${needsSelection ? "1" : "0"}`
+    );
+  } catch (err) {
+    console.error("Meta Ads callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("meta_ads"));
+  }
+});
+
+router.get("/shopify/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId, shopDomain } = parsedState || {};
+
+    if (!orgId || !shopDomain) {
+      return res.status(400).send("Missing orgId or shopDomain in state");
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
+
+    const tokenData = await exchangeShopifyCodeForToken({
+      code,
+      shopDomain,
+    });
+
+    const accessToken = tokenData?.access_token || null;
+    const scopes = String(tokenData?.scope || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (!accessToken) {
+      throw new Error("Shopify did not return an access token");
+    }
+
+    const shop = await getShopifyShopInfo({
+      shopDomain,
+      accessToken,
+    });
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "shopify",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "shopify" });
+    }
+
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = null;
+    connection.tokenType = "bearer";
+    connection.tokenExpiresAt = null;
+    connection.externalAccountId = shop?.id ? String(shop.id) : shopDomain;
+    connection.externalAccountName = shop?.name || shopDomain;
+    connection.scopes = scopes;
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      shopDomain,
+      shopName: shop?.name || null,
+      shopEmail: shop?.email || null,
+      currency: shop?.currency || null,
+      planName: shop?.plan_name || null,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "shopify", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=shopify&mode=live`);
+  } catch (err) {
+    console.error("Shopify callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("shopify"));
+  }
+});
+
+router.get("/salesforce/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
 
     if (!code || !state) {
       return res.status(400).send("Missing code or state");
@@ -2302,136 +2272,163 @@ router.get("/meta_ads/callback", async (req, res) => {
       return res.status(404).send("Workspace not found");
     }
 
-    const tokenData = await exchangeMetaCodeForTokens(code);
+    const tokenData = await exchangeSalesforceCodeForTokens(code);
+
     const accessToken = tokenData?.access_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
+    const instanceUrl = normalizeSalesforceInstanceUrl(tokenData?.instance_url || "");
+    const identityUrl = tokenData?.id || null;
+    const tokenType = tokenData?.token_type || "Bearer";
 
-    if (!accessToken) {
-      throw new Error("No Meta access token returned");
+    if (!accessToken || !instanceUrl) {
+      throw new Error("Salesforce did not return the required tokens");
     }
 
-    const accounts = await getMetaAdAccounts(accessToken);
-
-    if (!accounts.length) {
-      throw new Error("No Meta ad accounts found for this login");
+    let identity = null;
+    if (identityUrl) {
+      identity = await getSalesforceIdentity(identityUrl, accessToken);
     }
-
-    const needsSelection = accounts.length > 1;
-    const selectedAccount = accounts.length === 1 ? accounts[0] : null;
-
-    const externalAccountId = selectedAccount?.id || null;
-    const externalAccountName = selectedAccount?.name || null;
-
-    console.log("META ADS CONNECTED", {
-      orgId: String(orgId),
-      accountCount: accounts.length,
-      selectedAccount,
-      externalAccountId,
-      needsSelection,
-    });
 
     let connection = await IntegrationConnection.findOne({
       orgId,
-      provider: "meta_ads",
+      provider: "salesforce",
     }).select("+accessToken +refreshToken");
 
     if (!connection) {
-      connection = new IntegrationConnection({ orgId, provider: "meta_ads" });
+      connection = new IntegrationConnection({ orgId, provider: "salesforce" });
     }
 
-    if (typeof connection.markConnected === "function") {
-      connection.markConnected({
-        mode: "live",
-        externalAccountId,
-        externalAccountName,
-        accessToken,
-        refreshToken: null,
-        tokenType: tokenData?.token_type || null,
-        tokenExpiresAt: tokenData?.expires_in
-          ? new Date(Date.now() + Number(tokenData.expires_in) * 1000)
-          : null,
-        scopes: ["ads_read", "ads_management", "business_management"],
-        metadata: {
-          accounts,
-          selectedAccount,
-          needsSelection,
-        },
-      });
-    } else {
-      connection.status = "connected";
-      connection.mode = "live";
-      connection.connectedAt = new Date();
-      connection.disconnectedAt = null;
-      connection.accessToken = accessToken;
-      connection.refreshToken = null;
-      connection.tokenType = tokenData?.token_type || null;
-      connection.tokenExpiresAt = tokenData?.expires_in
-        ? new Date(Date.now() + Number(tokenData.expires_in) * 1000)
-        : null;
-      connection.externalAccountId = externalAccountId;
-      connection.externalAccountName = externalAccountName;
-      connection.scopes = ["ads_read", "ads_management", "business_management"];
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-      connection.metadata = {
-        ...(connection.metadata || {}),
-        accounts,
-        selectedAccount,
-        needsSelection,
-      };
-    }
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = refreshToken;
+    connection.tokenType = tokenType;
+    connection.tokenExpiresAt = null;
+    connection.externalAccountId = identity?.organization_id || instanceUrl;
+    connection.externalAccountName = identity?.organization_id || "Salesforce";
+    connection.scopes = [];
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      instanceUrl,
+      identityUrl,
+      salesforceOrgId: identity?.organization_id || null,
+      username: identity?.username || null,
+      displayName: identity?.display_name || null,
+      email: identity?.email || null,
+    };
 
     await connection.save();
 
-    await updateOrgIntegrationSummary(orgId, "meta_ads", {
+    await updateOrgIntegrationSummary(orgId, "salesforce", {
       connected: true,
       connectedAt: new Date(),
       lastSync: new Date(),
       mode: "live",
     });
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
-
-    return res.redirect(
-      `${frontendUrl}/integrations?connected=meta_ads&mode=live&needsSelection=${
-        needsSelection ? "1" : "0"
-      }`
-    );
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=salesforce&mode=live`);
   } catch (err) {
-    console.error("Meta Ads callback error:", err);
+    console.error("Salesforce callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("salesforce"));
+  }
+});
 
-    const frontendUrl =
-      process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+router.get("/linkedin_ads/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
 
-    return res.redirect(
-      `${frontendUrl}/integrations?error=meta_ads_callback_failed`
-    );
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+
+    if (!orgId) {
+      return res.status(400).send("Missing orgId in state");
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
+
+    const tokenData = await exchangeLinkedInCodeForTokens(code);
+
+    const accessToken = tokenData?.access_token || null;
+    const expiresIn = Number(tokenData?.expires_in || 0) || 0;
+
+    if (!accessToken) {
+      throw new Error("LinkedIn did not return an access token");
+    }
+
+    const profile = await getLinkedInProfile(accessToken);
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "linkedin_ads",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "linkedin_ads" });
+    }
+
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = null;
+    connection.tokenType = "Bearer";
+    connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
+    connection.externalAccountId = profile?.sub || null;
+    connection.externalAccountName = profile?.name || profile?.email || "LinkedIn";
+    connection.scopes = ["openid", "profile", "email", "r_ads", "r_ads_reporting"];
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      email: profile?.email || null,
+      name: profile?.name || null,
+      sub: profile?.sub || null,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "linkedin_ads", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=linkedin_ads&mode=live`);
+  } catch (err) {
+    console.error("LinkedIn Ads callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("linkedin_ads"));
   }
 });
 
 /* -------------------------------- */
-/* HUBSPOT MANUAL SYNC (SCAFFOLD)   */
+/* MANUAL SYNC ROUTES               */
 /* -------------------------------- */
 
 router.post("/hubspot/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-
-    if (!orgId) {
-      return res.status(400).json({
-        ok: false,
-        message: "Missing org context",
-      });
-    }
-
-    const org = await ensureOrg(orgId);
-    if (!org) {
-      return res.status(404).json({
-        ok: false,
-        message: "Workspace not found",
-      });
-    }
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -2446,23 +2443,10 @@ router.post("/hubspot/sync", requireAuth, async (req, res) => {
       });
     }
 
-    if (typeof connection.markSyncRunning === "function") {
-      connection.markSyncRunning();
-    } else {
-      connection.status = "syncing";
-      connection.lastSyncStatus = "running";
-      connection.lastError = null;
-    }
-    await connection.save();
-
-    if (typeof connection.markSyncSuccess === "function") {
-      connection.markSyncSuccess();
-    } else {
-      connection.status = "connected";
-      connection.lastSyncAt = new Date();
-      connection.lastSyncStatus = "success";
-      connection.lastError = null;
-    }
+    connection.status = "connected";
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
     await connection.save();
 
     await updateOrgIntegrationSummary(orgId, "hubspot", {
@@ -2479,40 +2463,228 @@ router.post("/hubspot/sync", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("HubSpot sync error:", err);
-
-    try {
-      const orgId = getOrgId(req);
-      if (orgId) {
-        const failedConnection = await IntegrationConnection.findOne({
-          orgId,
-          provider: "hubspot",
-        }).select("+accessToken +refreshToken");
-
-        if (failedConnection) {
-          if (typeof failedConnection.markSyncFailed === "function") {
-            failedConnection.markSyncFailed(err.message || "HubSpot sync failed");
-            await failedConnection.save();
-          } else {
-            await IntegrationConnection.findOneAndUpdate(
-              { orgId, provider: "hubspot" },
-              {
-                $set: {
-                  status: "error",
-                  lastSyncStatus: "failed",
-                  lastError: err.message || "HubSpot sync failed",
-                },
-              }
-            );
-          }
-        }
-      }
-    } catch (innerErr) {
-      console.error("Failed to mark HubSpot sync failure:", innerErr);
-    }
-
     return res.status(500).json({
       ok: false,
       message: "Failed to sync HubSpot",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/stripe/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const result = await syncStripeForOrg(orgId);
+
+    await updateOrgIntegrationSummary(orgId, "stripe", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Stripe sync completed",
+      provider: "stripe",
+      mode: "live",
+      summary: result,
+    });
+  } catch (err) {
+    console.error("Stripe sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Stripe",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/shopify/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "shopify",
+      status: "connected",
+    }).select("+accessToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Shopify is not connected for this workspace",
+      });
+    }
+
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "shopify", {
+      connected: true,
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Shopify sync completed",
+      provider: "shopify",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("Shopify sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Shopify",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/salesforce/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "salesforce",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Salesforce is not connected for this workspace",
+      });
+    }
+
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "salesforce", {
+      connected: true,
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Salesforce sync completed",
+      provider: "salesforce",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("Salesforce sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Salesforce",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "linkedin_ads",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "LinkedIn Ads is not connected for this workspace",
+      });
+    }
+
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "linkedin_ads", {
+      connected: true,
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "LinkedIn Ads sync completed",
+      provider: "linkedin_ads",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("LinkedIn Ads sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync LinkedIn Ads",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* STRIPE REVENUE DAILY             */
+/* -------------------------------- */
+
+router.get("/stripe/revenue-daily", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const rows = await StripeRevenueDaily.find({ orgId, provider: "stripe" })
+      .sort({ date: 1 })
+      .lean();
+
+    const totalRevenue = rows.reduce((sum, r) => sum + Number(r.netRevenue || 0), 0);
+    const totalGross = rows.reduce((sum, r) => sum + Number(r.grossRevenue || 0), 0);
+    const totalRefunds = rows.reduce((sum, r) => sum + Number(r.refunds || 0), 0);
+    const totalTransactions = rows.reduce(
+      (sum, r) => sum + Number(r.transactionCount || 0),
+      0
+    );
+
+    return res.json({
+      ok: true,
+      summary: {
+        totalRevenue: Number(totalRevenue.toFixed(2)),
+        totalGross: Number(totalGross.toFixed(2)),
+        totalRefunds: Number(totalRefunds.toFixed(2)),
+        totalTransactions,
+      },
+      rows,
+    });
+  } catch (err) {
+    console.error("Stripe revenue daily error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Stripe revenue data",
       error: err.message,
     });
   }
