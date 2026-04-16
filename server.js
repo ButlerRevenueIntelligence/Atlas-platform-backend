@@ -43,6 +43,7 @@ import trialRoutes from "./routes/trial.js";
 import hubspotSyncRoutes from "./routes/hubspotSync.js";
 import importsRoutes from "./routes/imports.js";
 import ghlRoutes from "./routes/ghl.js";
+import pipedrive from "./routes/integrations/pipedrive.js
 
 const app = express();
 app.set("trust proxy", 1);
@@ -116,6 +117,7 @@ app.use("/api/workspaces", workspaceRoutes);
 app.use("/api/trial", trialRoutes);
 app.use("/api/hubspot", hubspotSyncRoutes);
 app.use("/api/imports", importsRoutes);
+app.use("/api/integrations/pipedrive", pipedriveRoutes);
 
 app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
 app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
