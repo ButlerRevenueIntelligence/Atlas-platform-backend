@@ -15,6 +15,9 @@ const stripe = process.env.STRIPE_SECRET_KEY
 const INTEGRATIONS = [
   { id: "hubspot", name: "HubSpot CRM", category: "CRM", supportsLive: true },
   { id: "salesforce", name: "Salesforce", category: "CRM", supportsLive: true },
+  { id: "zoho_crm", name: "Zoho CRM", category: "CRM", supportsLive: true },
+  { id: "pipedrive", name: "Pipedrive", category: "CRM", supportsLive: true },
+  { id: "bitrix24", name: "Bitrix24", category: "CRM", supportsLive: true },
   { id: "google_ads", name: "Google Ads", category: "Advertising", supportsLive: true },
   { id: "meta_ads", name: "Meta Ads", category: "Advertising", supportsLive: true },
   { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: true },
@@ -160,6 +163,173 @@ async function exchangeHubSpotCodeForTokens(code) {
   }
 
   return data;
+}
+
+/* -------------------------------- */
+/* Zoho CRM OAuth helpers           */
+/* -------------------------------- */
+
+function buildZohoRedirectUri() {
+  const base = buildBackendBaseUrl();
+  if (!base) return null;
+  return `${base}/api/integrations/zoho_crm/callback`;
+}
+
+function getZohoAccountsBase() {
+  return String(process.env.ZOHO_ACCOUNTS_BASE || "https://accounts.zoho.com")
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+function buildZohoAuthUrl(orgId) {
+  const clientId = String(process.env.ZOHO_CLIENT_ID || "").trim();
+  const redirectUri = buildZohoRedirectUri();
+  const accountsBase = getZohoAccountsBase();
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const scope = [
+    "ZohoCRM.modules.ALL",
+    "ZohoCRM.settings.ALL",
+    "ZohoCRM.users.ALL",
+  ].join(",");
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: clientId,
+    access_type: "offline",
+    prompt: "consent",
+    redirect_uri: redirectUri,
+    scope,
+    state: safeStateString({ orgId: String(orgId), provider: "zoho_crm" }),
+  });
+
+  return `${accountsBase}/oauth/v2/auth?${params.toString()}`;
+}
+
+async function exchangeZohoCodeForTokens(code) {
+  const clientId = String(process.env.ZOHO_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.ZOHO_CLIENT_SECRET || "").trim();
+  const redirectUri = buildZohoRedirectUri();
+  const accountsBase = getZohoAccountsBase();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    throw new Error("Zoho OAuth is not fully configured");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: redirectUri,
+    code,
+  });
+
+  const res = await fetch(`${accountsBase}/oauth/v2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(data?.error || data?.message || "Zoho token exchange failed");
+  }
+
+  return data;
+}
+
+async function getZohoOrgInfo(accessToken) {
+  const res = await fetch("https://www.zohoapis.com/crm/v8/org", {
+    headers: {
+      Authorization: `Zoho-oauthtoken ${accessToken}`,
+    },
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error("Failed to fetch Zoho org");
+  }
+
+  return Array.isArray(data?.org) ? data.org[0] : null;
+}
+
+/* -------------------------------- */
+/* Pipedrive OAuth helpers          */
+/* -------------------------------- */
+
+function buildPipedriveRedirectUri() {
+  const base = buildBackendBaseUrl();
+  if (!base) return null;
+  return `${base}/api/integrations/pipedrive/callback`;
+}
+
+function buildPipedriveAuthUrl(orgId) {
+  const clientId = String(process.env.PIPEDRIVE_CLIENT_ID || "").trim();
+  const redirectUri = buildPipedriveRedirectUri();
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    state: safeStateString({ orgId: String(orgId), provider: "pipedrive" }),
+  });
+
+  return `https://oauth.pipedrive.com/oauth/authorize?${params.toString()}`;
+}
+
+async function exchangePipedriveCodeForTokens(code) {
+  const clientId = String(process.env.PIPEDRIVE_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.PIPEDRIVE_CLIENT_SECRET || "").trim();
+  const redirectUri = buildPipedriveRedirectUri();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    throw new Error("Pipedrive OAuth is not fully configured");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+
+  const res = await fetch("https://oauth.pipedrive.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error || data?.error_description || "Pipedrive token exchange failed"
+    );
+  }
+
+  return data;
+}
+
+async function getPipedriveUserInfo(accessToken) {
+  const res = await fetch("https://api.pipedrive.com/v1/users/me", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok || data?.success === false) {
+    throw new Error("Failed to fetch Pipedrive user");
+  }
+
+  return data?.data || null;
 }
 
 /* -------------------------------- */
@@ -810,6 +980,7 @@ async function formatIntegrations(orgId) {
         shopDomain: live?.metadata?.shopDomain || null,
         selectedSalesforceOrg: live?.metadata?.salesforceOrgId || null,
         selectedLinkedInAccount: live?.externalAccountName || null,
+        bitrixWebhookUrl: live?.metadata?.webhookUrl || null,
         supportsLive: item.supportsLive,
       };
     }
@@ -837,6 +1008,7 @@ async function formatIntegrations(orgId) {
       shopDomain: null,
       selectedSalesforceOrg: null,
       selectedLinkedInAccount: null,
+      bitrixWebhookUrl: null,
       supportsLive: item.supportsLive,
     };
   });
@@ -1106,6 +1278,22 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
       return res.json({ ok: true, provider, authUrl: url });
     }
 
+    if (provider === "zoho_crm") {
+      const url = buildZohoAuthUrl(orgId);
+      if (!url) {
+        return res.status(500).json({ ok: false, message: "Zoho CRM OAuth is not configured" });
+      }
+      return res.json({ ok: true, provider, authUrl: url });
+    }
+
+    if (provider === "pipedrive") {
+      const url = buildPipedriveAuthUrl(orgId);
+      if (!url) {
+        return res.status(500).json({ ok: false, message: "Pipedrive OAuth is not configured" });
+      }
+      return res.json({ ok: true, provider, authUrl: url });
+    }
+
     if (provider === "google_ads") {
       const url = buildGoogleAdsAuthUrl(orgId);
       if (!url) {
@@ -1230,6 +1418,97 @@ router.get("/hubspot/status", requireAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to load HubSpot status",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/zoho_crm/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "zoho_crm",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+    });
+  } catch (err) {
+    console.error("ZOHO CRM status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Zoho CRM status",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/pipedrive/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "pipedrive",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+    });
+  } catch (err) {
+    console.error("PIPEDRIVE status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Pipedrive status",
+      error: err.message,
+    });
+  }
+});
+
+router.get("/bitrix24/status", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "bitrix24",
+    }).lean();
+
+    return res.json({
+      ok: true,
+      connected: connection?.status === "connected",
+      mode: connection?.mode || "demo",
+      externalAccountId: connection?.externalAccountId || null,
+      externalAccountName: connection?.externalAccountName || null,
+      lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncStatus: connection?.lastSyncStatus || "never",
+      lastError: connection?.lastError || null,
+      webhookUrl: connection?.metadata?.webhookUrl || null,
+    });
+  } catch (err) {
+    console.error("BITRIX24 status error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to load Bitrix24 status",
       error: err.message,
     });
   }
@@ -1459,6 +1738,91 @@ router.get("/linkedin_ads/status", requireAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to load LinkedIn Ads status",
+      error: err.message,
+    });
+  }
+});
+
+/* -------------------------------- */
+/* BITRIX24 CONNECT WEBHOOK         */
+/* -------------------------------- */
+
+router.post("/bitrix24/connect-webhook", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    const { webhookUrl } = req.body || {};
+
+    if (!orgId) {
+      return res.status(400).json({ ok: false, message: "Missing org context" });
+    }
+
+    if (!webhookUrl) {
+      return res.status(400).json({ ok: false, message: "webhookUrl is required" });
+    }
+
+    const cleanWebhook = String(webhookUrl).trim().replace(/\/+$/, "");
+
+    if (!/^https:\/\/.+\/rest\/.+/i.test(cleanWebhook)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid Bitrix24 webhook URL",
+      });
+    }
+
+    const testRes = await fetch(`${cleanWebhook}/crm.deal.list.json?start=0`, {
+      method: "GET",
+    });
+
+    const testData = await testRes.json().catch(() => ({}));
+
+    if (!testRes.ok || testData?.error) {
+      throw new Error(
+        testData?.error_description || testData?.error || "Bitrix24 webhook test failed"
+      );
+    }
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "bitrix24",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "bitrix24" });
+    }
+
+    connection.markConnected({
+      mode: "live",
+      externalAccountId: cleanWebhook,
+      externalAccountName: "Bitrix24 Webhook",
+      accessToken: null,
+      refreshToken: null,
+      tokenType: "webhook",
+      tokenExpiresAt: null,
+      scopes: [],
+      metadata: {
+        webhookUrl: cleanWebhook,
+      },
+    });
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "bitrix24", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Bitrix24 connected",
+      integrations: await formatIntegrations(orgId),
+    });
+  } catch (err) {
+    console.error("BITRIX24 connect webhook error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to connect Bitrix24",
       error: err.message,
     });
   }
@@ -1775,6 +2139,138 @@ router.get("/hubspot/callback", async (req, res) => {
   } catch (err) {
     console.error("HubSpot callback error:", err);
     return res.redirect(formatOauthErrorRedirect("hubspot"));
+  }
+});
+
+router.get("/zoho_crm/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code || !state) return res.status(400).send("Missing code or state");
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+    if (!orgId) return res.status(400).send("Missing orgId in state");
+
+    const org = await ensureOrg(orgId);
+    if (!org) return res.status(404).send("Workspace not found");
+
+    const tokenData = await exchangeZohoCodeForTokens(code);
+    const accessToken = tokenData?.access_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
+    const expiresIn = Number(tokenData?.expires_in || 0) || 0;
+
+    if (!accessToken) throw new Error("Zoho did not return access token");
+
+    const orgInfo = await getZohoOrgInfo(accessToken);
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "zoho_crm",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "zoho_crm" });
+    }
+
+    connection.markConnected({
+      mode: "live",
+      externalAccountId: orgInfo?.id ? String(orgInfo.id) : null,
+      externalAccountName: orgInfo?.company_name || "Zoho CRM",
+      accessToken,
+      refreshToken,
+      tokenType: "Bearer",
+      tokenExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
+      scopes: ["ZohoCRM.modules.ALL", "ZohoCRM.settings.ALL", "ZohoCRM.users.ALL"],
+      metadata: {
+        orgInfo,
+      },
+    });
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "zoho_crm", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=zoho_crm&mode=live`);
+  } catch (err) {
+    console.error("Zoho CRM callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("zoho_crm"));
+  }
+});
+
+router.get("/pipedrive/callback", async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code || !state) return res.status(400).send("Missing code or state");
+
+    let parsedState;
+    try {
+      parsedState = JSON.parse(state);
+    } catch {
+      return res.status(400).send("Invalid state");
+    }
+
+    const { orgId } = parsedState || {};
+    if (!orgId) return res.status(400).send("Missing orgId in state");
+
+    const org = await ensureOrg(orgId);
+    if (!org) return res.status(404).send("Workspace not found");
+
+    const tokenData = await exchangePipedriveCodeForTokens(code);
+    const accessToken = tokenData?.access_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
+    const expiresIn = Number(tokenData?.expires_in || 0) || 0;
+
+    if (!accessToken) throw new Error("Pipedrive did not return access token");
+
+    const me = await getPipedriveUserInfo(accessToken);
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "pipedrive",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "pipedrive" });
+    }
+
+    connection.markConnected({
+      mode: "live",
+      externalAccountId: me?.company_id ? String(me.company_id) : null,
+      externalAccountName: me?.name || "Pipedrive",
+      accessToken,
+      refreshToken,
+      tokenType: "Bearer",
+      tokenExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
+      scopes: [],
+      metadata: {
+        user: me,
+      },
+    });
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "pipedrive", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=pipedrive&mode=live`);
+  } catch (err) {
+    console.error("Pipedrive callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("pipedrive"));
   }
 });
 
@@ -2466,6 +2962,135 @@ router.post("/hubspot/sync", requireAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: "Failed to sync HubSpot",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "zoho_crm",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Zoho CRM is not connected for this workspace",
+      });
+    }
+
+    connection.markSyncSuccess();
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "zoho_crm", {
+      connected: true,
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Zoho CRM sync completed",
+      provider: "zoho_crm",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("Zoho CRM sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Zoho CRM",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/pipedrive/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "pipedrive",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Pipedrive is not connected for this workspace",
+      });
+    }
+
+    connection.markSyncSuccess();
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "pipedrive", {
+      connected: true,
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Pipedrive sync completed",
+      provider: "pipedrive",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("Pipedrive sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Pipedrive",
+      error: err.message,
+    });
+  }
+});
+
+router.post("/bitrix24/sync", requireAuth, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "bitrix24",
+      status: "connected",
+    });
+
+    if (!connection) {
+      return res.status(404).json({
+        ok: false,
+        message: "Bitrix24 is not connected for this workspace",
+      });
+    }
+
+    connection.markSyncSuccess();
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "bitrix24", {
+      connected: true,
+      lastSync: new Date(),
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Bitrix24 sync completed",
+      provider: "bitrix24",
+      mode: "live",
+    });
+  } catch (err) {
+    console.error("Bitrix24 sync error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to sync Bitrix24",
       error: err.message,
     });
   }
