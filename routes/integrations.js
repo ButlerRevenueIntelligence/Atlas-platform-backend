@@ -865,6 +865,7 @@ function buildLinkedInAdsAuthUrl(orgId) {
 
   return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
 }
+
 async function exchangeLinkedInCodeForTokens(code) {
   const clientId = String(process.env.LINKEDIN_CLIENT_ID || "").trim();
   const clientSecret = String(process.env.LINKEDIN_CLIENT_SECRET || "").trim();
