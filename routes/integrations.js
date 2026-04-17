@@ -841,7 +841,18 @@ async function getSalesforceIdentity(identityUrl, accessToken) {
 /* -------------------------------- */
 
 function buildLinkedInAdsRedirectUri() {
+  const explicit = String(process.env.LINKEDIN_REDIRECT_URI || "").trim();
+  if (explicit) {
+    return explicit.replace(/\/+$/, "");
+  }
+
   const base = buildBackendBaseUrl();
+  if (!base) {
+    throw new Error(
+      "Missing BACKEND_PUBLIC_URL / APP_BASE_URL / LINKEDIN_REDIRECT_URI"
+    );
+  }
+
   return `${base}/api/integrations/linkedin_ads/callback`;
 }
 
@@ -849,7 +860,9 @@ function buildLinkedInAdsAuthUrl(orgId) {
   const clientId = String(process.env.LINKEDIN_CLIENT_ID || "").trim();
   const redirectUri = buildLinkedInAdsRedirectUri();
 
-  if (!clientId || !orgId) return null;
+  if (!clientId || !orgId || !redirectUri) {
+    return null;
+  }
 
   const scope = ["openid", "profile", "email"].join(" ");
 
@@ -858,7 +871,10 @@ function buildLinkedInAdsAuthUrl(orgId) {
     client_id: clientId,
     redirect_uri: redirectUri,
     scope,
-    state: safeStateString({ orgId: String(orgId), provider: "linkedin_ads" }),
+    state: safeStateString({
+      orgId: String(orgId),
+      provider: "linkedin_ads",
+    }),
   });
 
   return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
@@ -875,7 +891,7 @@ async function exchangeLinkedInCodeForTokens(code) {
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
-    code,
+    code: String(code),
     client_id: clientId,
     client_secret: clientSecret,
     redirect_uri: redirectUri,
