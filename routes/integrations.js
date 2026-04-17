@@ -53,13 +53,14 @@ async function ensureOrg(orgId) {
 }
 
 function buildBackendBaseUrl() {
-  return String(
+  const value =
     process.env.BACKEND_PUBLIC_URL ||
-      process.env.APP_BASE_URL ||
-      ""
-  )
-    .trim()
-    .replace(/\/+$/, "");
+    process.env.APP_BASE_URL ||
+    "https://atlas-revenue-backend.onrender.com";
+
+  console.log("🌐 Backend Base URL:", value);
+
+  return String(value).trim().replace(/\/+$/, "");
 }
 
 function getFrontendUrl() {
