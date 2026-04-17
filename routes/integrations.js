@@ -852,7 +852,7 @@ function buildLinkedInAdsAuthUrl(orgId) {
 
   if (!clientId || !redirectUri || !orgId) return null;
 
-  const scope = ["openid", "profile", "email", "r_ads", "r_ads_reporting"].join(" ");
+  const scope = ["openid", "profile", "email"].join(" ");
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -864,7 +864,6 @@ function buildLinkedInAdsAuthUrl(orgId) {
 
   return `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
 }
-
 async function exchangeLinkedInCodeForTokens(code) {
   const clientId = String(process.env.LINKEDIN_CLIENT_ID || "").trim();
   const clientSecret = String(process.env.LINKEDIN_CLIENT_SECRET || "").trim();
