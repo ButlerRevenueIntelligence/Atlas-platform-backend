@@ -3393,6 +3393,7 @@ router.post("/salesforce/sync", requireAuth, async (req, res) => {
 router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
+
     if (!orgId) {
       return res.status(400).json({
         ok: false,
@@ -3429,43 +3430,77 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
 
       if (!response.ok) {
         throw new Error(
-          data?.message || data?.serviceErrorCode || "LinkedIn API request failed"
+          data?.message ||
+            data?.serviceErrorCode ||
+            "LinkedIn API request failed"
         );
       }
 
       return data;
     }
 
-    const adAccountsResponse = await linkedInGet(
-      "https://api.linkedin.com/rest/adAccounts?q=search&search=(status:(values:List(ACTIVE)))"
-    );
+    let adAccounts = [];
 
-    const adAccounts = Array.isArray(adAccountsResponse?.elements)
-      ? adAccountsResponse.elements
-      : [];
+    try {
+      const adAccountsResponse = await linkedInGet(
+        "https://api.linkedin.com/rest/adAccounts?q=search&search=(status:(values:List(ACTIVE)))"
+      );
 
-    if (!adAccounts.length) {
-      throw new Error("No LinkedIn ad accounts found for this login");
+      adAccounts = Array.isArray(adAccountsResponse?.elements)
+        ? adAccountsResponse.elements
+        : [];
+    } catch (err) {
+      const msg = String(err?.message || "").toLowerCase();
+
+      if (
+        msg.includes("no virtual resource found") ||
+        msg.includes("not enough permissions") ||
+        msg.includes("access denied") ||
+        msg.includes("forbidden")
+      ) {
+        adAccounts = [];
+      } else {
+        throw err;
+      }
     }
 
-    const primaryAccount = adAccounts[0];
+    const primaryAccount = adAccounts[0] || null;
+
     const externalAccountId =
       primaryAccount?.id != null ? String(primaryAccount.id) : null;
+
     const externalAccountName =
-      primaryAccount?.name || "LinkedIn Ads Account";
+      primaryAccount?.name ||
+      connection?.externalAccountName ||
+      "LinkedIn Ads";
 
     let campaigns = [];
 
     if (externalAccountId) {
-      const campaignsResponse = await linkedInGet(
-        `https://api.linkedin.com/rest/adCampaigns?q=search&search=(account:(values:List(urn%3Ali%3AsponsoredAccount%3A${encodeURIComponent(
-          externalAccountId
-        )})))`
-      );
+      try {
+        const campaignsResponse = await linkedInGet(
+          `https://api.linkedin.com/rest/adCampaigns?q=search&search=(account:(values:List(urn%3Ali%3AsponsoredAccount%3A${encodeURIComponent(
+            externalAccountId
+          )})))`
+        );
 
-      campaigns = Array.isArray(campaignsResponse?.elements)
-        ? campaignsResponse.elements
-        : [];
+        campaigns = Array.isArray(campaignsResponse?.elements)
+          ? campaignsResponse.elements
+          : [];
+      } catch (err) {
+        const msg = String(err?.message || "").toLowerCase();
+
+        if (
+          msg.includes("no virtual resource found") ||
+          msg.includes("not enough permissions") ||
+          msg.includes("access denied") ||
+          msg.includes("forbidden")
+        ) {
+          campaigns = [];
+        } else {
+          throw err;
+        }
+      }
     }
 
     connection.externalAccountId = externalAccountId;
@@ -3480,6 +3515,7 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
       adAccounts,
       campaigns,
       syncedAt: new Date(),
+      hasAdAccounts: adAccounts.length > 0,
     };
 
     await connection.save();
@@ -3492,7 +3528,9 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
 
     return res.json({
       ok: true,
-      message: "LinkedIn Ads sync completed",
+      message: adAccounts.length
+        ? "LinkedIn Ads sync completed"
+        : "LinkedIn connected successfully. No ad accounts found yet.",
       provider: "linkedin_ads",
       mode: "live",
       summary: {
