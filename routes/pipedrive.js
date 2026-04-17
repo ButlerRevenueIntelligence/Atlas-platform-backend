@@ -1,43 +1,100 @@
 import express from "express";
 import axios from "axios";
+import IntegrationConnection from "../models/IntegrationConnection.js";
+import Organization from "../models/Organization.js";
 
 const router = express.Router();
 
-const CLIENT_ID = process.env.PIPEDRIVE_CLIENT_ID;
-const CLIENT_SECRET = process.env.PIPEDRIVE_CLIENT_SECRET;
-const REDIRECT_URI = process.env.PIPEDRIVE_REDIRECT_URI;
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+const CLIENT_ID = String(process.env.PIPEDRIVE_CLIENT_ID || "").trim();
+const CLIENT_SECRET = String(process.env.PIPEDRIVE_CLIENT_SECRET || "").trim();
+const REDIRECT_URI = String(process.env.PIPEDRIVE_REDIRECT_URI || "").trim();
+const FRONTEND_URL = String(
+  process.env.FRONTEND_URL || "https://app.atlasrevenueai.com"
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+function getOrgId(req) {
+  return (
+    req.query.orgId ||
+    req.headers["x-org-id"] ||
+    req.body?.orgId ||
+    req.orgId ||
+    req.org?._id ||
+    ""
+  );
+}
+
+async function ensureOrg(orgId) {
+  if (!orgId) return null;
+  return Organization.findById(orgId);
+}
+
+async function getPipedriveUserInfo(accessToken) {
+  const res = await axios.get("https://api.pipedrive.com/v1/users/me", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!res?.data || res.data.success === false) {
+    throw new Error("Failed to fetch Pipedrive user");
+  }
+
+  return res.data.data || null;
+}
 
 /**
  * STEP 1: Redirect user to Pipedrive OAuth
  */
-router.get("/connect", (req, res) => {
-  const orgId =
-    req.headers["x-org-id"] ||
-    req.query.orgId ||
-    req.body?.orgId ||
-    req.orgId ||
-    req.org?._id ||
-    "";
+router.get("/connect", async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
 
-  if (!orgId) {
-    return res.status(400).json({
+    if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI) {
+      return res.status(500).json({
+        ok: false,
+        message: "Pipedrive OAuth is not fully configured",
+      });
+    }
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing orgId",
+      });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const state = JSON.stringify({
+      orgId: String(orgId),
+      provider: "pipedrive",
+    });
+
+    const authUrl =
+      `https://oauth.pipedrive.com/oauth/authorize` +
+      `?client_id=${encodeURIComponent(CLIENT_ID)}` +
+      `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+      `&response_type=code` +
+      `&state=${encodeURIComponent(state)}`;
+
+    return res.redirect(authUrl);
+  } catch (err) {
+    console.error("Pipedrive connect error:", err?.response?.data || err.message);
+
+    return res.status(500).json({
       ok: false,
-      message: "Missing orgId",
+      message: "Failed to start Pipedrive OAuth",
+      error: err.message,
     });
   }
-
-  const state = encodeURIComponent(
-    JSON.stringify({ orgId, provider: "pipedrive" })
-  );
-
-  const authUrl = `https://oauth.pipedrive.com/oauth/authorize?client_id=${encodeURIComponent(
-    CLIENT_ID
-  )}&redirect_uri=${encodeURIComponent(
-    REDIRECT_URI
-  )}&response_type=code&state=${state}`;
-
-  return res.redirect(authUrl);
 });
 
 /**
@@ -47,37 +104,33 @@ router.get("/callback", async (req, res) => {
   const { code, state } = req.query;
 
   if (!code || !state) {
-    return res.status(400).json({
-      ok: false,
-      message: "Missing code or state",
-    });
+    return res.redirect(`${FRONTEND_URL}/integrations?error=pipedrive`);
   }
 
   let parsedState;
   try {
     parsedState = JSON.parse(state);
   } catch {
-    return res.status(400).json({
-      ok: false,
-      message: "Invalid OAuth state",
-    });
+    return res.redirect(`${FRONTEND_URL}/integrations?error=pipedrive`);
   }
 
   const orgId = parsedState?.orgId;
 
   if (!orgId) {
-    return res.status(400).json({
-      ok: false,
-      message: "No orgId returned from OAuth",
-    });
+    return res.redirect(`${FRONTEND_URL}/integrations?error=pipedrive`);
   }
 
   try {
-    const response = await axios.post(
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.redirect(`${FRONTEND_URL}/integrations?error=pipedrive`);
+    }
+
+    const tokenResponse = await axios.post(
       "https://oauth.pipedrive.com/oauth/token",
       new URLSearchParams({
         grant_type: "authorization_code",
-        code,
+        code: String(code),
         redirect_uri: REDIRECT_URI,
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
@@ -89,39 +142,100 @@ router.get("/callback", async (req, res) => {
       }
     );
 
-    const { access_token, refresh_token, expires_in } = response.data;
+    const tokenData = tokenResponse.data || {};
+    const accessToken = tokenData.access_token || null;
+    const refreshToken = tokenData.refresh_token || null;
+    const expiresIn = Number(tokenData.expires_in || 0) || 0;
+    const tokenType = tokenData.token_type || "Bearer";
+
+    if (!accessToken) {
+      throw new Error("Pipedrive did not return an access token");
+    }
+
+    const me = await getPipedriveUserInfo(accessToken);
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "pipedrive",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection) {
+      connection = new IntegrationConnection({
+        orgId,
+        provider: "pipedrive",
+      });
+    }
+
+    if (typeof connection.markConnected === "function") {
+      connection.markConnected({
+        mode: "live",
+        externalAccountId: me?.company_id ? String(me.company_id) : null,
+        externalAccountName: me?.name || "Pipedrive",
+        accessToken,
+        refreshToken,
+        tokenType,
+        tokenExpiresAt: expiresIn
+          ? new Date(Date.now() + expiresIn * 1000)
+          : null,
+        scopes: [],
+        metadata: {
+          user: me,
+        },
+      });
+    } else {
+      connection.status = "connected";
+      connection.mode = "live";
+      connection.connectedAt = new Date();
+      connection.disconnectedAt = null;
+      connection.accessToken = accessToken;
+      connection.refreshToken = refreshToken;
+      connection.tokenType = tokenType;
+      connection.tokenExpiresAt = expiresIn
+        ? new Date(Date.now() + expiresIn * 1000)
+        : null;
+      connection.externalAccountId = me?.company_id
+        ? String(me.company_id)
+        : null;
+      connection.externalAccountName = me?.name || "Pipedrive";
+      connection.scopes = [];
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "success";
+      connection.lastError = null;
+      connection.metadata = {
+        ...(connection.metadata || {}),
+        user: me,
+      };
+    }
+
+    await connection.save();
+
+    await Organization.findByIdAndUpdate(
+      orgId,
+      {
+        $set: {
+          "integrations.pipedrive.connected": true,
+          "integrations.pipedrive.connectedAt": new Date(),
+          "integrations.pipedrive.lastSync": new Date(),
+          "integrations.pipedrive.mode": "live",
+        },
+      },
+      { new: true }
+    );
 
     console.log("✅ Pipedrive Connected");
     console.log("Org:", orgId);
-    console.log("Access token exists:", !!access_token);
-
-    // TODO: Save to DB here later
-    // await IntegrationConnection.findOneAndUpdate(
-    //   { orgId, provider: "pipedrive" },
-    //   {
-    //     orgId,
-    //     provider: "pipedrive",
-    //     status: "connected",
-    //     mode: "live",
-    //     accessToken: access_token,
-    //     refreshToken: refresh_token || null,
-    //     tokenExpiresAt: expires_in ? new Date(Date.now() + expires_in * 1000) : null,
-    //     connectedAt: new Date(),
-    //     lastSyncAt: new Date(),
-    //     lastSyncStatus: "success",
-    //   },
-    //   { upsert: true, new: true }
-    // );
+    console.log("Access token exists:", !!accessToken);
 
     return res.redirect(
       `${FRONTEND_URL}/integrations?connected=pipedrive&mode=live`
     );
   } catch (err) {
-    console.error(err.response?.data || err.message);
-
-    return res.redirect(
-      `${FRONTEND_URL}/integrations?error=pipedrive`
+    console.error(
+      "Pipedrive callback error:",
+      err?.response?.data || err.message
     );
+
+    return res.redirect(`${FRONTEND_URL}/integrations?error=pipedrive`);
   }
 });
 
