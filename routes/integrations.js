@@ -842,7 +842,6 @@ async function getSalesforceIdentity(identityUrl, accessToken) {
 
 function buildLinkedInAdsRedirectUri() {
   const base = buildBackendBaseUrl();
-  if (!base) return null;
   return `${base}/api/integrations/linkedin_ads/callback`;
 }
 
@@ -850,7 +849,7 @@ function buildLinkedInAdsAuthUrl(orgId) {
   const clientId = String(process.env.LINKEDIN_CLIENT_ID || "").trim();
   const redirectUri = buildLinkedInAdsRedirectUri();
 
-  if (!clientId || !redirectUri || !orgId) return null;
+  if (!clientId || !orgId) return null;
 
   const scope = ["openid", "profile", "email"].join(" ");
 
