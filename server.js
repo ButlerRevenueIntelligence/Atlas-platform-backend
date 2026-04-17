@@ -10,6 +10,7 @@ import cors from "cors";
 import mongoose from "mongoose";
 
 import { requirePlan } from "./middleware/requirePlan.js";
+import { startIntegrationAutoSync } from "./jobs/integrationAutoSync.js";
 
 import billingRoutes from "./routes/billing.js";
 import authRoutes from "./routes/auth.js";
@@ -197,8 +198,12 @@ async function start() {
     console.log("✅ MongoDB connected");
 
     server = app.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server listening on port ${PORT}`);
-    });
+  console.log(`🚀 Server listening on port ${PORT}`);
+
+  // 🚀 Start integration auto-sync AFTER server + DB are ready
+  startIntegrationAutoSync();
+  console.log("✅ Integration auto-sync started");
+});
   } catch (err) {
     console.error("❌ MongoDB connection error:", err?.message || err);
     process.exit(1);
