@@ -3303,7 +3303,13 @@ router.post("/stripe/sync", requireAuth, async (req, res) => {
 router.post("/shopify/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -3311,16 +3317,211 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
       status: "connected",
     }).select("+accessToken");
 
-    if (!connection) {
+    if (!connection || !connection.accessToken) {
       return res.status(404).json({
         ok: false,
         message: "Shopify is not connected for this workspace",
       });
     }
 
+    const shopDomain =
+      connection?.metadata?.shopDomain || connection?.externalAccountName || "";
+
+    if (!shopDomain) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing Shopify shop domain on this connection",
+      });
+    }
+
+    const accessToken = connection.accessToken;
+    const cleanDomain = String(shopDomain)
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/\/+$/, "");
+
+    async function shopifyGet(path, query = {}) {
+      const qs = new URLSearchParams(query).toString();
+      const url = `https://${cleanDomain}/admin/api/2024-10/${path}${qs ? `?${qs}` : ""}`;
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "X-Shopify-Access-Token": accessToken,
+          "Content-Type": "application/json",
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          data?.errors ||
+            data?.error ||
+            `Failed Shopify request for ${path}`
+        );
+      }
+
+      return data;
+    }
+
+    const [ordersRes, customersRes, productsRes] = await Promise.all([
+      shopifyGet("orders.json", {
+        status: "any",
+        limit: "250",
+      }),
+      shopifyGet("customers.json", {
+        limit: "250",
+      }),
+      shopifyGet("products.json", {
+        limit: "250",
+      }),
+    ]);
+
+    const orders = Array.isArray(ordersRes?.orders) ? ordersRes.orders : [];
+    const customers = Array.isArray(customersRes?.customers)
+      ? customersRes.customers
+      : [];
+    const products = Array.isArray(productsRes?.products)
+      ? productsRes.products
+      : [];
+
+    let accountsUpserted = 0;
+    let dealsUpserted = 0;
+
+    for (const customer of customers) {
+      const shopifyCustomerId =
+        customer?.id != null ? String(customer.id) : null;
+
+      if (!shopifyCustomerId) continue;
+
+      const firstName = String(customer?.first_name || "").trim();
+      const lastName = String(customer?.last_name || "").trim();
+      const fullName = `${firstName} ${lastName}`.trim();
+      const email = String(customer?.email || "").trim();
+      const phone = String(customer?.phone || "").trim();
+
+      const name =
+        fullName ||
+        email ||
+        phone ||
+        `Shopify Customer ${shopifyCustomerId}`;
+
+      await Account.findOneAndUpdate(
+        {
+          orgId,
+          externalSource: "shopify",
+          externalId: shopifyCustomerId,
+        },
+        {
+          $set: {
+            orgId,
+            name,
+            website: "",
+            industry: "",
+            phone,
+            status: "Active",
+            externalSource: "shopify",
+            externalId: shopifyCustomerId,
+            sourcePayload: customer,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+        }
+      );
+
+      accountsUpserted += 1;
+    }
+
+    for (const order of orders) {
+      const shopifyOrderId = order?.id != null ? String(order.id) : null;
+      if (!shopifyOrderId) continue;
+
+      const customerId =
+        order?.customer?.id != null ? String(order.customer.id) : null;
+
+      let matchedAccount = null;
+      if (customerId) {
+        matchedAccount = await Account.findOne({
+          orgId,
+          externalSource: "shopify",
+          externalId: customerId,
+        });
+      }
+
+      const financialStatus = String(order?.financial_status || "").toLowerCase();
+      const fulfillmentStatus = String(order?.fulfillment_status || "").toLowerCase();
+      const cancelledAt = order?.cancelled_at || null;
+
+      let normalizedStage = "Discovery";
+      if (cancelledAt || financialStatus === "voided" || financialStatus === "refunded") {
+        normalizedStage = "Closed Lost";
+      } else if (
+        financialStatus === "paid" ||
+        fulfillmentStatus === "fulfilled" ||
+        fulfillmentStatus === "partial"
+      ) {
+        normalizedStage = "Closed Won";
+      } else if (
+        financialStatus === "pending" ||
+        financialStatus === "authorized"
+      ) {
+        normalizedStage = "Negotiation";
+      }
+
+      const orderName =
+        order?.name ||
+        order?.order_number != null
+          ? `Order ${order.name || `#${order.order_number}`}`
+          : `Shopify Order ${shopifyOrderId}`;
+
+      await Deal.findOneAndUpdate(
+        {
+          orgId,
+          externalSource: "shopify",
+          externalId: shopifyOrderId,
+        },
+        {
+          $set: {
+            orgId,
+            name: orderName,
+            clientId: matchedAccount?._id || null,
+            amount: Number(order?.current_total_price || order?.total_price || 0),
+            stage: normalizedStage,
+            closeDate: order?.processed_at || order?.created_at || null,
+            externalSource: "shopify",
+            externalId: shopifyOrderId,
+            sourcePayload: order,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+        }
+      );
+
+      dealsUpserted += 1;
+    }
+
     connection.lastSyncAt = new Date();
     connection.lastSyncStatus = "success";
     connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      ordersCount: orders.length,
+      customersCount: customers.length,
+      productsCount: products.length,
+      lastOrdersSample: orders.slice(0, 5).map((o) => ({
+        id: o?.id || null,
+        name: o?.name || null,
+        total: o?.current_total_price || o?.total_price || null,
+      })),
+      syncedAt: new Date(),
+    };
+
     await connection.save();
 
     await updateOrgIntegrationSummary(orgId, "shopify", {
@@ -3334,9 +3535,17 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
       message: "Shopify sync completed",
       provider: "shopify",
       mode: "live",
+      summary: {
+        customersFetched: customers.length,
+        ordersFetched: orders.length,
+        productsFetched: products.length,
+        accountsUpserted,
+        dealsUpserted,
+      },
     });
   } catch (err) {
     console.error("Shopify sync error:", err);
+
     return res.status(500).json({
       ok: false,
       message: "Failed to sync Shopify",
