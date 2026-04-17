@@ -5,6 +5,8 @@ import IntegrationConnection from "../models/IntegrationConnection.js";
 import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
 import { requireAuth } from "../middleware/auth.js";
 import { syncStripeForOrg } from "../services/stripeSync.js";
+import Account from "../models/Account.js";
+import Deal from "../models/Deal.js";
 
 const router = express.Router();
 
@@ -2970,7 +2972,13 @@ router.post("/hubspot/sync", requireAuth, async (req, res) => {
 router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -2978,14 +2986,151 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
       status: "connected",
     }).select("+accessToken +refreshToken");
 
-    if (!connection) {
+    if (!connection || !connection.accessToken) {
       return res.status(404).json({
         ok: false,
         message: "Zoho CRM is not connected for this workspace",
       });
     }
 
-    connection.markSyncSuccess();
+    const accessToken = connection.accessToken;
+
+    async function zohoGetAll(moduleName) {
+      let page = 1;
+      let more = true;
+      const allRecords = [];
+
+      while (more) {
+        const response = await fetch(
+          `https://www.zohoapis.com/crm/v8/${moduleName}?page=${page}&per_page=200`,
+          {
+            method: "GET",
+            headers: {
+              Authorization: `Zoho-oauthtoken ${accessToken}`,
+            },
+          }
+        );
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(
+            data?.message || `Failed to fetch Zoho ${moduleName}`
+          );
+        }
+
+        const rows = Array.isArray(data?.data) ? data.data : [];
+        allRecords.push(...rows);
+
+        const info = data?.info || {};
+        more = !!info.more_records;
+        page += 1;
+      }
+
+      return allRecords;
+    }
+
+    const [zohoAccounts, zohoDeals] = await Promise.all([
+      zohoGetAll("Accounts"),
+      zohoGetAll("Deals"),
+    ]);
+
+    let accountsUpserted = 0;
+    let dealsUpserted = 0;
+
+    for (const acc of zohoAccounts) {
+      const zohoAccountId = acc?.id ? String(acc.id) : null;
+      const name = acc?.Account_Name || acc?.name || "Unnamed Account";
+
+      if (!zohoAccountId || !name) continue;
+
+      await Account.findOneAndUpdate(
+        {
+          orgId,
+          externalSource: "zoho_crm",
+          externalId: zohoAccountId,
+        },
+        {
+          $set: {
+            orgId,
+            name,
+            website: acc?.Website || "",
+            industry: acc?.Industry || "",
+            phone: acc?.Phone || "",
+            status: "Active",
+            externalSource: "zoho_crm",
+            externalId: zohoAccountId,
+            sourcePayload: acc,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+        }
+      );
+
+      accountsUpserted += 1;
+    }
+
+    for (const deal of zohoDeals) {
+      const zohoDealId = deal?.id ? String(deal.id) : null;
+      const dealName = deal?.Deal_Name || deal?.name || "Unnamed Deal";
+
+      if (!zohoDealId || !dealName) continue;
+
+      const accountRef =
+        deal?.Account_Name?.id ? String(deal.Account_Name.id) : null;
+
+      let matchedAccount = null;
+
+      if (accountRef) {
+        matchedAccount = await Account.findOne({
+          orgId,
+          externalSource: "zoho_crm",
+          externalId: accountRef,
+        });
+      }
+
+      const rawStage = String(deal?.Stage || "").toLowerCase();
+
+      let normalizedStage = "Discovery";
+      if (rawStage.includes("proposal")) normalizedStage = "Proposal";
+      else if (rawStage.includes("negotiation")) normalizedStage = "Negotiation";
+      else if (rawStage.includes("closed won")) normalizedStage = "Closed Won";
+      else if (rawStage.includes("closed lost")) normalizedStage = "Closed Lost";
+      else if (rawStage.includes("follow")) normalizedStage = "Follow-Up";
+
+      await Deal.findOneAndUpdate(
+        {
+          orgId,
+          externalSource: "zoho_crm",
+          externalId: zohoDealId,
+        },
+        {
+          $set: {
+            orgId,
+            name: dealName,
+            clientId: matchedAccount?._id || null,
+            amount: Number(deal?.Amount || 0),
+            stage: normalizedStage,
+            closeDate: deal?.Closing_Date || null,
+            externalSource: "zoho_crm",
+            externalId: zohoDealId,
+            sourcePayload: deal,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+        }
+      );
+
+      dealsUpserted += 1;
+    }
+
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
     await connection.save();
 
     await updateOrgIntegrationSummary(orgId, "zoho_crm", {
@@ -2999,9 +3144,16 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
       message: "Zoho CRM sync completed",
       provider: "zoho_crm",
       mode: "live",
+      summary: {
+        accountsFetched: zohoAccounts.length,
+        dealsFetched: zohoDeals.length,
+        accountsUpserted,
+        dealsUpserted,
+      },
     });
   } catch (err) {
     console.error("Zoho CRM sync error:", err);
+
     return res.status(500).json({
       ok: false,
       message: "Failed to sync Zoho CRM",
