@@ -117,9 +117,9 @@ app.use("/api/workspaces", workspaceRoutes);
 app.use("/api/trial", trialRoutes);
 app.use("/api/hubspot", hubspotSyncRoutes);
 app.use("/api/imports", importsRoutes);
-app.use("/api/pipedrive", pipedriveRoutes);
 
 app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
+app.use("/api/integrations/pipedrive", pipedriveRoutes);
 app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
 app.use("/api/pipeline", requirePlan("CORE"), pipelineRoutes);
 app.use("/api/integrations/ghl", requirePlan("CORE"), ghlRoutes);
