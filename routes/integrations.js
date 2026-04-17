@@ -3393,7 +3393,12 @@ router.post("/salesforce/sync", requireAuth, async (req, res) => {
 router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
 
     const connection = await IntegrationConnection.findOne({
       orgId,
@@ -3401,16 +3406,82 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
       status: "connected",
     }).select("+accessToken +refreshToken");
 
-    if (!connection) {
+    if (!connection || !connection.accessToken) {
       return res.status(404).json({
         ok: false,
         message: "LinkedIn Ads is not connected for this workspace",
       });
     }
 
+    const accessToken = connection.accessToken;
+
+    async function linkedInGet(url) {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "LinkedIn-Version": "202404",
+          "X-Restli-Protocol-Version": "2.0.0",
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          data?.message || data?.serviceErrorCode || "LinkedIn API request failed"
+        );
+      }
+
+      return data;
+    }
+
+    const adAccountsResponse = await linkedInGet(
+      "https://api.linkedin.com/rest/adAccounts?q=search&search=(status:(values:List(ACTIVE)))"
+    );
+
+    const adAccounts = Array.isArray(adAccountsResponse?.elements)
+      ? adAccountsResponse.elements
+      : [];
+
+    if (!adAccounts.length) {
+      throw new Error("No LinkedIn ad accounts found for this login");
+    }
+
+    const primaryAccount = adAccounts[0];
+    const externalAccountId =
+      primaryAccount?.id != null ? String(primaryAccount.id) : null;
+    const externalAccountName =
+      primaryAccount?.name || "LinkedIn Ads Account";
+
+    let campaigns = [];
+
+    if (externalAccountId) {
+      const campaignsResponse = await linkedInGet(
+        `https://api.linkedin.com/rest/adCampaigns?q=search&search=(account:(values:List(urn%3Ali%3AsponsoredAccount%3A${encodeURIComponent(
+          externalAccountId
+        )})))`
+      );
+
+      campaigns = Array.isArray(campaignsResponse?.elements)
+        ? campaignsResponse.elements
+        : [];
+    }
+
+    connection.externalAccountId = externalAccountId;
+    connection.externalAccountName = externalAccountName;
+    connection.mode = "live";
+    connection.status = "connected";
     connection.lastSyncAt = new Date();
     connection.lastSyncStatus = "success";
     connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      adAccounts,
+      campaigns,
+      syncedAt: new Date(),
+    };
+
     await connection.save();
 
     await updateOrgIntegrationSummary(orgId, "linkedin_ads", {
@@ -3424,9 +3495,15 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
       message: "LinkedIn Ads sync completed",
       provider: "linkedin_ads",
       mode: "live",
+      summary: {
+        adAccountsFound: adAccounts.length,
+        campaignsFound: campaigns.length,
+        primaryAccount: externalAccountName,
+      },
     });
   } catch (err) {
     console.error("LinkedIn Ads sync error:", err);
+
     return res.status(500).json({
       ok: false,
       message: "Failed to sync LinkedIn Ads",
