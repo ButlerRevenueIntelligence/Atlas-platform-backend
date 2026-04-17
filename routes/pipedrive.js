@@ -2,6 +2,8 @@ import express from "express";
 import axios from "axios";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import Organization from "../models/Organization.js";
+import Deal from "../models/Deal.js";
+import Account from "../models/Account.js";
 
 const router = express.Router();
 
@@ -30,6 +32,19 @@ async function ensureOrg(orgId) {
   return Organization.findById(orgId);
 }
 
+function normalizeAtlasStage(stageName) {
+  const s = String(stageName || "").toLowerCase();
+
+  if (s.includes("discover")) return "Discovery";
+  if (s.includes("proposal")) return "Proposal";
+  if (s.includes("follow")) return "Follow-Up";
+  if (s.includes("negotiat")) return "Negotiation";
+  if (s.includes("won") || s.includes("closed won")) return "Closed Won";
+  if (s.includes("lost") || s.includes("closed lost")) return "Closed Lost";
+
+  return "Discovery";
+}
+
 async function getPipedriveUserInfo(accessToken) {
   const res = await axios.get("https://api.pipedrive.com/v1/users/me", {
     headers: {
@@ -42,6 +57,57 @@ async function getPipedriveUserInfo(accessToken) {
   }
 
   return res.data.data || null;
+}
+
+async function getPipedriveStages(accessToken) {
+  const res = await axios.get("https://api.pipedrive.com/v1/stages", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!res?.data || res.data.success === false) {
+    throw new Error("Failed to fetch Pipedrive stages");
+  }
+
+  return Array.isArray(res.data.data) ? res.data.data : [];
+}
+
+async function getPipedriveDeals(accessToken) {
+  const res = await axios.get("https://api.pipedrive.com/v1/deals", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    params: {
+      limit: 500,
+      start: 0,
+      status: "all_not_deleted",
+    },
+  });
+
+  if (!res?.data || res.data.success === false) {
+    throw new Error("Failed to fetch Pipedrive deals");
+  }
+
+  return Array.isArray(res.data.data) ? res.data.data : [];
+}
+
+async function getPipedriveOrganizations(accessToken) {
+  const res = await axios.get("https://api.pipedrive.com/v1/organizations", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    params: {
+      limit: 500,
+      start: 0,
+    },
+  });
+
+  if (!res?.data || res.data.success === false) {
+    throw new Error("Failed to fetch Pipedrive organizations");
+  }
+
+  return Array.isArray(res.data.data) ? res.data.data : [];
 }
 
 /**
@@ -236,6 +302,159 @@ router.get("/callback", async (req, res) => {
     );
 
     return res.redirect(`${FRONTEND_URL}/integrations?error=pipedrive`);
+  }
+});
+
+/**
+ * STEP 3: Sync data from Pipedrive into Atlas
+ */
+router.post("/sync", async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing orgId",
+      });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({
+        ok: false,
+        message: "Workspace not found",
+      });
+    }
+
+    const connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "pipedrive",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection || !connection.accessToken) {
+      return res.status(400).json({
+        ok: false,
+        message: "Pipedrive not connected",
+      });
+    }
+
+    const accessToken = connection.accessToken;
+
+    const [stages, organizations, deals] = await Promise.all([
+      getPipedriveStages(accessToken),
+      getPipedriveOrganizations(accessToken),
+      getPipedriveDeals(accessToken),
+    ]);
+
+    const stageMap = new Map(
+      stages.map((s) => [String(s.id), s.name || "Discovery"])
+    );
+
+    let accountsSynced = 0;
+    let dealsSynced = 0;
+
+    for (const orgItem of organizations) {
+      const externalId = String(orgItem.id);
+
+      await Account.findOneAndUpdate(
+        { orgId, externalId },
+        {
+          $set: {
+            orgId,
+            externalId,
+            name: orgItem.name || "Pipedrive Organization",
+            status: "Active",
+          },
+        },
+        { upsert: true, new: true }
+      );
+
+      accountsSynced += 1;
+    }
+
+    for (const deal of deals) {
+      const externalId = String(deal.id);
+      const stageName = stageMap.get(String(deal.stage_id)) || "Discovery";
+      const mappedStage = normalizeAtlasStage(stageName);
+
+      let accountDoc = null;
+      const orgValue = deal.org_id;
+
+      if (orgValue && typeof orgValue === "object" && orgValue.value) {
+        accountDoc = await Account.findOne({
+          orgId,
+          externalId: String(orgValue.value),
+        });
+      } else if (orgValue) {
+        accountDoc = await Account.findOne({
+          orgId,
+          externalId: String(orgValue),
+        });
+      }
+
+      await Deal.findOneAndUpdate(
+        { orgId, externalId },
+        {
+          $set: {
+            orgId,
+            externalId,
+            name: deal.title || "Pipedrive Deal",
+            amount: Number(deal.value || 0),
+            stage: mappedStage,
+            status: deal.status === "won"
+              ? "Closed Won"
+              : deal.status === "lost"
+              ? "Closed Lost"
+              : mappedStage,
+            clientId: accountDoc?._id || null,
+            closeDate: deal.expected_close_date
+              ? new Date(deal.expected_close_date)
+              : null,
+            probability:
+              typeof deal.probability === "number"
+                ? deal.probability / 100
+                : 0.5,
+          },
+        },
+        { upsert: true, new: true }
+      );
+
+      dealsSynced += 1;
+    }
+
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    await connection.save();
+
+    await Organization.findByIdAndUpdate(
+      orgId,
+      {
+        $set: {
+          "integrations.pipedrive.connected": true,
+          "integrations.pipedrive.lastSync": new Date(),
+          "integrations.pipedrive.mode": "live",
+        },
+      },
+      { new: true }
+    );
+
+    return res.json({
+      ok: true,
+      message: "Pipedrive sync completed",
+      accountsSynced,
+      dealsSynced,
+    });
+  } catch (err) {
+    console.error("Pipedrive sync error:", err?.response?.data || err.message);
+
+    return res.status(500).json({
+      ok: false,
+      message: "Sync failed",
+      error: err.message,
+    });
   }
 });
 
