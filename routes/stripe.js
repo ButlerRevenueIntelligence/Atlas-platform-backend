@@ -49,7 +49,7 @@ function buildBillingState({
   };
 }
 
-router.post("/create-checkout-session", async (req, res) => {
+router.post("/create-checkout-session", express.json(), async (req, res) => {
   try {
     const { priceId, email } = req.body || {};
     const orgId = resolveOrgId(req);
@@ -108,7 +108,7 @@ router.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-router.post("/create-portal-session", async (req, res) => {
+router.post("/create-portal-session", express.json(), async (req, res) => {
   try {
     const orgId = resolveOrgId(req);
 
@@ -144,7 +144,7 @@ router.post("/create-portal-session", async (req, res) => {
   }
 });
 
-router.post("/create-invoice", async (req, res) => {
+router.post("/create-invoice", express.json(), async (req, res) => {
   try {
     const { customerId, amount } = req.body || {};
 
@@ -175,6 +175,7 @@ router.post("/create-invoice", async (req, res) => {
   }
 });
 
+// IMPORTANT: Keep webhook as raw body. Do not use express.json() here.
 router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
