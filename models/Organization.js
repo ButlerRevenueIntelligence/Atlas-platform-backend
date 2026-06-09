@@ -1,20 +1,10 @@
-// backend/models/Organization.js
 import mongoose from "mongoose";
 
 const integrationStateSchema = new mongoose.Schema(
   {
-    connected: {
-      type: Boolean,
-      default: false,
-    },
-    lastSync: {
-      type: Date,
-      default: null,
-    },
-    connectedAt: {
-      type: Date,
-      default: null,
-    },
+    connected: { type: Boolean, default: false },
+    lastSync: { type: Date, default: null },
+    connectedAt: { type: Date, default: null },
     mode: {
       type: String,
       enum: ["demo", "live"],
@@ -59,30 +49,16 @@ const trialSchema = new mongoose.Schema(
 
 const billingSchema = new mongoose.Schema(
   {
-    stripeCustomerId: {
-      type: String,
-      default: null,
-      index: true,
-    },
-    stripeSubscriptionId: {
-      type: String,
-      default: null,
-      index: true,
-    },
-    stripePriceId: {
-      type: String,
-      default: null,
-    },
+    stripeCustomerId: { type: String, default: null, index: true },
+    stripeSubscriptionId: { type: String, default: null, index: true },
+    stripePriceId: { type: String, default: null },
     status: {
       type: String,
       enum: ["inactive", "active", "past_due", "canceled", "trialing"],
       default: "trialing",
       index: true,
     },
-    currentPeriodEnd: {
-      type: Date,
-      default: null,
-    },
+    currentPeriodEnd: { type: Date, default: null },
   },
   { _id: false }
 );
@@ -135,10 +111,6 @@ const OrganizationSchema = new mongoose.Schema(
       default: () => ({}),
     },
 
-    /* -------------------------------- */
-    /* Atlas access control             */
-    /* -------------------------------- */
-
     demoCompleted: {
       type: Boolean,
       default: true,
@@ -165,55 +137,40 @@ const OrganizationSchema = new mongoose.Schema(
       index: true,
     },
 
-    /* -------------------------------- */
-    /* Integrations                     */
-    /* -------------------------------- */
-
     integrations: {
       hubspot: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       salesforce: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       google_ads: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       meta_ads: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       linkedin_ads: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       ga4: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       stripe: {
         type: integrationStateSchema,
         default: () => ({}),
       },
-
       shopify: {
         type: integrationStateSchema,
         default: () => ({}),
       },
     },
-
-    /* -------------------------------- */
-    /* Stripe billing                   */
-    /* -------------------------------- */
 
     billing: {
       type: billingSchema,
@@ -229,11 +186,16 @@ const OrganizationSchema = new mongoose.Schema(
 OrganizationSchema.pre("save", function (next) {
   const now = new Date();
 
-  if (
+  const trialExpired =
     this.trial?.status === "trialing" &&
     this.trial?.endsAt &&
-    now > new Date(this.trial.endsAt)
-  ) {
+    now > new Date(this.trial.endsAt);
+
+  const hasPaidAccess =
+    this.billing?.status === "active" ||
+    this.paymentStatus === "paid";
+
+  if (trialExpired && !hasPaidAccess) {
     this.trial.status = "expired";
 
     if (this.billing?.status === "trialing") {
@@ -244,15 +206,11 @@ OrganizationSchema.pre("save", function (next) {
       this.paymentStatus = "pending";
     }
 
-    if (this.accessStatus === "active") {
-      this.accessStatus = "suspended";
-    }
+    this.accessStatus = "suspended";
+    this.approvedForAccess = false;
   }
 
-  if (
-    this.billing?.status === "active" &&
-    this.trial?.status !== "converted"
-  ) {
+  if (hasPaidAccess && this.trial?.status !== "converted") {
     this.trial.status = "converted";
     this.paymentStatus = "paid";
     this.accessStatus = "active";
@@ -261,10 +219,6 @@ OrganizationSchema.pre("save", function (next) {
 
   next();
 });
-
-/* -------------------------------- */
-/* Atlas collection name            */
-/* -------------------------------- */
 
 const Organization =
   mongoose.models.Organization ||
