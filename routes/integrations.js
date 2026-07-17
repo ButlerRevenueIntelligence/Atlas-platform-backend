@@ -774,11 +774,15 @@ function buildSalesforceAuthUrl(orgId) {
   if (!clientId || !redirectUri || !orgId) return null;
 
   const params = new URLSearchParams({
-    response_type: "code",
-    client_id: clientId,
-    redirect_uri: redirectUri,
-    state: safeStateString({ orgId: String(orgId), provider: "salesforce" }),
-  });
+  response_type: "code",
+  client_id: clientId,
+  redirect_uri: redirectUri,
+  scope: "api refresh_token offline_access",
+  state: safeStateString({
+    orgId: String(orgId),
+    provider: "salesforce",
+  }),
+});
 
   return `${loginUrl}/services/oauth2/authorize?${params.toString()}`;
 }
@@ -821,7 +825,63 @@ async function exchangeSalesforceCodeForTokens(code) {
 
   return data;
 }
+async function refreshSalesforceAccessToken(refreshToken) {
+  const clientId = String(
+    process.env.SALESFORCE_CLIENT_ID || ""
+  ).trim();
 
+  const clientSecret = String(
+    process.env.SALESFORCE_CLIENT_SECRET || ""
+  ).trim();
+
+  const loginUrl = String(
+    process.env.SALESFORCE_LOGIN_URL || "https://login.salesforce.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error(
+      "Salesforce refresh token configuration is incomplete"
+    );
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken,
+  });
+
+  const response = await fetch(
+    `${loginUrl}/services/oauth2/token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error_description ||
+        data?.error ||
+        "Failed to refresh Salesforce access token"
+    );
+  }
+
+  if (!data?.access_token) {
+    throw new Error(
+      "Salesforce refresh did not return an access token"
+    );
+  }
+
+  return data;
+}
 async function getSalesforceIdentity(identityUrl, accessToken) {
   const res = await fetch(identityUrl, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -835,7 +895,83 @@ async function getSalesforceIdentity(identityUrl, accessToken) {
 
   return data;
 }
+const SALESFORCE_API_VERSION = String(
+  process.env.SALESFORCE_API_VERSION || "v65.0"
+).trim();
 
+async function salesforceApiRequest({
+  instanceUrl,
+  accessToken,
+  path,
+}) {
+  const cleanInstanceUrl =
+    normalizeSalesforceInstanceUrl(instanceUrl);
+
+  if (!cleanInstanceUrl) {
+    throw new Error("Missing Salesforce instance URL");
+  }
+
+  if (!accessToken) {
+    throw new Error("Missing Salesforce access token");
+  }
+
+  const response = await fetch(
+    `${cleanInstanceUrl}${path}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message =
+      Array.isArray(data) && data[0]?.message
+        ? data[0].message
+        : data?.message ||
+          `Salesforce request failed with status ${response.status}`;
+
+    const error = new Error(message);
+    error.status = response.status;
+    error.salesforceResponse = data;
+
+    throw error;
+  }
+
+  return data;
+}
+
+async function salesforceQueryAll({
+  instanceUrl,
+  accessToken,
+  soql,
+}) {
+  const records = [];
+
+  let nextPath =
+    `/services/data/${SALESFORCE_API_VERSION}/query` +
+    `?q=${encodeURIComponent(soql)}`;
+
+  while (nextPath) {
+    const data = await salesforceApiRequest({
+      instanceUrl,
+      accessToken,
+      path: nextPath,
+    });
+
+    if (Array.isArray(data?.records)) {
+      records.push(...data.records);
+    }
+
+    nextPath = data?.nextRecordsUrl || null;
+  }
+
+  return records;
+}
 /* -------------------------------- */
 /* LinkedIn Ads OAuth helpers       */
 /* -------------------------------- */
@@ -2818,7 +2954,8 @@ router.get("/salesforce/callback", async (req, res) => {
     connection.accessToken = accessToken;
     connection.refreshToken = refreshToken;
     connection.tokenType = tokenType;
-    connection.tokenExpiresAt = null;
+    connection.refreshToken =
+      refreshToken || connection.refreshToken || null;
     connection.externalAccountId = identity?.organization_id || instanceUrl;
     connection.externalAccountName = identity?.organization_id || "Salesforce";
     connection.scopes = [];
@@ -3555,11 +3692,19 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
 });
 
 router.post("/salesforce/sync", requireAuth, async (req, res) => {
+  let connection = null;
+
   try {
     const orgId = getOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
 
-    const connection = await IntegrationConnection.findOne({
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    connection = await IntegrationConnection.findOne({
       orgId,
       provider: "salesforce",
       status: "connected",
@@ -3572,30 +3717,353 @@ router.post("/salesforce/sync", requireAuth, async (req, res) => {
       });
     }
 
-    connection.lastSyncAt = new Date();
+    if (!connection.accessToken) {
+      return res.status(401).json({
+        ok: false,
+        message:
+          "Salesforce access token is missing. Please reconnect Salesforce.",
+      });
+    }
+
+    let accessToken = connection.accessToken;
+
+    let instanceUrl = normalizeSalesforceInstanceUrl(
+      connection?.metadata?.instanceUrl || ""
+    );
+
+    if (!instanceUrl) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          "Salesforce instance URL is missing. Please reconnect Salesforce.",
+      });
+    }
+
+    const accountQuery = [
+      "SELECT",
+      "Id,",
+      "Name,",
+      "Website,",
+      "Industry,",
+      "Phone,",
+      "Type,",
+      "BillingCity,",
+      "BillingState,",
+      "BillingCountry,",
+      "AnnualRevenue,",
+      "NumberOfEmployees,",
+      "OwnerId,",
+      "CreatedDate,",
+      "LastModifiedDate",
+      "FROM Account",
+      "ORDER BY LastModifiedDate DESC",
+    ].join(" ");
+
+    const opportunityQuery = [
+      "SELECT",
+      "Id,",
+      "Name,",
+      "AccountId,",
+      "Amount,",
+      "StageName,",
+      "Probability,",
+      "CloseDate,",
+      "IsClosed,",
+      "IsWon,",
+      "Type,",
+      "LeadSource,",
+      "ForecastCategoryName,",
+      "NextStep,",
+      "OwnerId,",
+      "CreatedDate,",
+      "LastModifiedDate",
+      "FROM Opportunity",
+      "ORDER BY LastModifiedDate DESC",
+    ].join(" ");
+
+    async function fetchSalesforceRecords() {
+      return Promise.all([
+        salesforceQueryAll({
+          instanceUrl,
+          accessToken,
+          soql: accountQuery,
+        }),
+        salesforceQueryAll({
+          instanceUrl,
+          accessToken,
+          soql: opportunityQuery,
+        }),
+      ]);
+    }
+
+    let salesforceAccounts;
+    let salesforceOpportunities;
+
+    try {
+      [salesforceAccounts, salesforceOpportunities] =
+        await fetchSalesforceRecords();
+    } catch (queryError) {
+      const authorizationExpired =
+        queryError?.status === 401 ||
+        String(queryError?.message || "")
+          .toLowerCase()
+          .includes("session expired");
+
+      if (!authorizationExpired || !connection.refreshToken) {
+        throw queryError;
+      }
+
+      const refreshedTokenData =
+        await refreshSalesforceAccessToken(
+          connection.refreshToken
+        );
+
+      accessToken = refreshedTokenData.access_token;
+
+      if (refreshedTokenData.instance_url) {
+        instanceUrl = normalizeSalesforceInstanceUrl(
+          refreshedTokenData.instance_url
+        );
+      }
+
+      connection.accessToken = accessToken;
+      connection.tokenType =
+        refreshedTokenData.token_type ||
+        connection.tokenType ||
+        "Bearer";
+
+      connection.metadata = {
+        ...(connection.metadata || {}),
+        instanceUrl,
+        tokenRefreshedAt: new Date(),
+      };
+
+      await connection.save();
+
+      [salesforceAccounts, salesforceOpportunities] =
+        await fetchSalesforceRecords();
+    }
+
+    const accountMap = new Map();
+
+    let accountsUpserted = 0;
+    let opportunitiesUpserted = 0;
+
+    for (const salesforceAccount of salesforceAccounts) {
+      const externalId = salesforceAccount?.Id
+        ? String(salesforceAccount.Id)
+        : null;
+
+      if (!externalId) continue;
+
+      const accountName =
+        String(salesforceAccount?.Name || "").trim() ||
+        "Unnamed Salesforce Account";
+
+      const atlasAccount = await Account.findOneAndUpdate(
+        {
+          orgId,
+          externalSource: "salesforce",
+          externalId,
+        },
+        {
+          $set: {
+            orgId,
+            name: accountName,
+            website: salesforceAccount?.Website || "",
+            industry: salesforceAccount?.Industry || "",
+            phone: salesforceAccount?.Phone || "",
+            status: "Active",
+            externalSource: "salesforce",
+            externalId,
+            sourcePayload: salesforceAccount,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+        }
+      );
+
+      accountMap.set(externalId, atlasAccount);
+      accountsUpserted += 1;
+    }
+
+    function normalizeSalesforceStage(opportunity) {
+      if (opportunity?.IsWon === true) {
+        return "Closed Won";
+      }
+
+      if (opportunity?.IsClosed === true) {
+        return "Closed Lost";
+      }
+
+      const rawStage = String(
+        opportunity?.StageName || ""
+      ).toLowerCase();
+
+      if (
+        rawStage.includes("proposal") ||
+        rawStage.includes("quote") ||
+        rawStage.includes("value proposition")
+      ) {
+        return "Proposal";
+      }
+
+      if (
+        rawStage.includes("negotiation") ||
+        rawStage.includes("review")
+      ) {
+        return "Negotiation";
+      }
+
+      if (
+        rawStage.includes("follow") ||
+        rawStage.includes("nurture")
+      ) {
+        return "Follow-Up";
+      }
+
+      return "Discovery";
+    }
+
+    for (const opportunity of salesforceOpportunities) {
+      const externalId = opportunity?.Id
+        ? String(opportunity.Id)
+        : null;
+
+      if (!externalId) continue;
+
+      const accountExternalId = opportunity?.AccountId
+        ? String(opportunity.AccountId)
+        : null;
+
+      let matchedAccount = accountExternalId
+        ? accountMap.get(accountExternalId)
+        : null;
+
+      if (!matchedAccount && accountExternalId) {
+        matchedAccount = await Account.findOne({
+          orgId,
+          externalSource: "salesforce",
+          externalId: accountExternalId,
+        });
+      }
+
+      const opportunityName =
+        String(opportunity?.Name || "").trim() ||
+        "Unnamed Salesforce Opportunity";
+
+      await Deal.findOneAndUpdate(
+        {
+          orgId,
+          externalSource: "salesforce",
+          externalId,
+        },
+        {
+          $set: {
+            orgId,
+            name: opportunityName,
+            clientId: matchedAccount?._id || null,
+            amount: Number(opportunity?.Amount || 0),
+            stage: normalizeSalesforceStage(opportunity),
+            closeDate: opportunity?.CloseDate || null,
+            externalSource: "salesforce",
+            externalId,
+            sourcePayload: opportunity,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+        }
+      );
+
+      opportunitiesUpserted += 1;
+    }
+
+    const syncedAt = new Date();
+
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.lastSyncAt = syncedAt;
     connection.lastSyncStatus = "success";
     connection.lastError = null;
+    connection.syncCursor = syncedAt.toISOString();
+
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      instanceUrl,
+      lastSalesforceSync: {
+        accountsFetched: salesforceAccounts.length,
+        opportunitiesFetched:
+          salesforceOpportunities.length,
+        accountsUpserted,
+        opportunitiesUpserted,
+        syncedAt,
+      },
+    };
+
     await connection.save();
 
-    await updateOrgIntegrationSummary(orgId, "salesforce", {
-      connected: true,
-      lastSync: new Date(),
-      mode: "live",
-    });
+    await updateOrgIntegrationSummary(
+      orgId,
+      "salesforce",
+      {
+        connected: true,
+        lastSync: syncedAt,
+        mode: "live",
+      }
+    );
 
     return res.json({
       ok: true,
       message: "Salesforce sync completed",
       provider: "salesforce",
       mode: "live",
+      summary: {
+        accountsFetched: salesforceAccounts.length,
+        opportunitiesFetched:
+          salesforceOpportunities.length,
+        accountsUpserted,
+        opportunitiesUpserted,
+      },
     });
   } catch (err) {
-    console.error("Salesforce sync error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Failed to sync Salesforce",
-      error: err.message,
-    });
+    console.error(
+      "Salesforce sync error:",
+      err?.salesforceResponse || err
+    );
+
+    if (connection) {
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "failed";
+      connection.lastError =
+        err?.message || "Salesforce sync failed";
+
+      await connection.save().catch((saveError) => {
+        console.error(
+          "Failed to save Salesforce sync error:",
+          saveError
+        );
+      });
+    }
+
+    const authorizationError =
+      err?.status === 401 ||
+      String(err?.message || "")
+        .toLowerCase()
+        .includes("session expired");
+
+    return res
+      .status(authorizationError ? 401 : 500)
+      .json({
+        ok: false,
+        message: authorizationError
+          ? "Salesforce authorization expired. Please reconnect Salesforce."
+          : "Failed to sync Salesforce",
+        error: err.message,
+      });
   }
 });
 
