@@ -1,7 +1,7 @@
 // backend/routes/seed.js
 import express from "express";
 import mongoose from "mongoose";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth } from "../middleware/auth.js"; 
 
 import Membership from "../models/Membership.js";
 import Client from "../models/Client.js";
