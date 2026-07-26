@@ -125,77 +125,374 @@ router.post("/refresh", requireAuth, async (req, res) => {
     ]);
 
     // -------------------- Seed Clients + Deals --------------------
-    const emailA = `demo-owner+${String(orgId)}@atlasrevenueai.com`;
-    const emailB = `ops-director+${String(orgId)}@atlasrevenueai.com`;
+const emailA = `demo-owner+${String(orgId)}@atlasrevenueai.com`;
+const emailB = `ops-director+${String(orgId)}@atlasrevenueai.com`;
 
-    const clients = await Client.insertMany([
-      {
-        orgId,
-        name: "Demo Client — Butler & Co",
-        industry: "B2B Services",
-        website: "https://example.com",
-        primaryContactName: "Demo Contact",
-        primaryContactEmail: emailA,
-        primaryContactPhone: "",
-        status: "active",
-        notes: "Seeded client for demo.",
-        createdBy: userId,
-        updatedBy: userId,
-        createdAt: now(),
-        updatedAt: now(),
-      },
-      {
-        orgId,
-        name: "Demo Client — Atlas Manufacturing",
-        industry: "Manufacturing",
-        website: "https://example.com",
-        primaryContactName: "Ops Director",
-        primaryContactEmail: emailB,
-        primaryContactPhone: "",
-        status: "prospect",
-        notes: "Seeded client for demo.",
-        createdBy: userId,
-        updatedBy: userId,
-        createdAt: now(),
-        updatedAt: now(),
-      },
-    ]);
+const clients = await Client.insertMany([
+  {
+    orgId,
+    name: "Northstar Technology Group",
+    industry: "Information Technology",
+    website: "https://example.com",
+    primaryContactName: "Michael Grant",
+    primaryContactEmail: emailA,
+    primaryContactPhone: "",
+    status: "active",
+    notes: "Enterprise technology prospect.",
+    createdBy: userId,
+    updatedBy: userId,
+    createdAt: now(),
+    updatedAt: now(),
+  },
+  {
+    orgId,
+    name: "Atlas Manufacturing",
+    industry: "Manufacturing",
+    website: "https://example.com",
+    primaryContactName: "Sarah Mitchell",
+    primaryContactEmail: emailB,
+    primaryContactPhone: "",
+    status: "prospect",
+    notes: "Manufacturing revenue intelligence opportunity.",
+    createdBy: userId,
+    updatedBy: userId,
+    createdAt: now(),
+    updatedAt: now(),
+  },
+  {
+    orgId,
+    name: "Elevate Financial Partners",
+    industry: "Financial Services",
+    website: "https://example.com",
+    primaryContactName: "David Brooks",
+    primaryContactEmail: `finance+${String(orgId)}@atlasrevenueai.com`,
+    primaryContactPhone: "",
+    status: "active",
+    notes: "Financial services expansion opportunity.",
+    createdBy: userId,
+    updatedBy: userId,
+    createdAt: now(),
+    updatedAt: now(),
+  },
+  {
+    orgId,
+    name: "Summit B2B Solutions",
+    industry: "Professional Services",
+    website: "https://example.com",
+    primaryContactName: "Jessica Carter",
+    primaryContactEmail: `summit+${String(orgId)}@atlasrevenueai.com`,
+    primaryContactPhone: "",
+    status: "prospect",
+    notes: "B2B professional services prospect.",
+    createdBy: userId,
+    updatedBy: userId,
+    createdAt: now(),
+    updatedAt: now(),
+  },
+  {
+    orgId,
+    name: "Vertex Growth Agency",
+    industry: "Marketing Agency",
+    website: "https://example.com",
+    primaryContactName: "Anthony Reed",
+    primaryContactEmail: `vertex+${String(orgId)}@atlasrevenueai.com`,
+    primaryContactPhone: "",
+    status: "active",
+    notes: "Agency Global HQ opportunity.",
+    createdBy: userId,
+    updatedBy: userId,
+    createdAt: now(),
+    updatedAt: now(),
+  },
+]);
 
-    await Deal.insertMany([
+const daysAgo = (days, hour = 12) => {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  d.setHours(hour, 0, 0, 0);
+  return d;
+};
+
+const daysFromNow = (days, hour = 12) => {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  d.setHours(hour, 0, 0, 0);
+  return d;
+};
+
+const dealTemplates = [
+  {
+    clientIndex: 0,
+    name: "Enterprise Revenue Intelligence Rollout",
+    stage: "Negotiation",
+    amount: 120000,
+    probability: 0.82,
+    createdDaysAgo: 24,
+    lastActivityDaysAgo: 1,
+    closeDaysFromNow: 12,
+    nextAction: "Finalize security review and commercial terms",
+  },
+  {
+    clientIndex: 1,
+    name: "Manufacturing Pipeline Visibility Program",
+    stage: "Proposal",
+    amount: 85000,
+    probability: 0.65,
+    createdDaysAgo: 21,
+    lastActivityDaysAgo: 3,
+    closeDaysFromNow: 18,
+    nextAction: "Review proposal with VP of Sales",
+  },
+  {
+    clientIndex: 2,
+    name: "Executive Forecasting Expansion",
+    stage: "Follow-Up",
+    amount: 64000,
+    probability: 0.48,
+    createdDaysAgo: 18,
+    lastActivityDaysAgo: 5,
+    closeDaysFromNow: 25,
+    nextAction: "Confirm finance and RevOps stakeholders",
+  },
+  {
+    clientIndex: 3,
+    name: "Revenue Operations Assessment",
+    stage: "Discovery",
+    amount: 42000,
+    probability: 0.3,
+    createdDaysAgo: 14,
+    lastActivityDaysAgo: 2,
+    closeDaysFromNow: 32,
+    nextAction: "Complete discovery session",
+  },
+  {
+    clientIndex: 4,
+    name: "Agency Global HQ Deployment",
+    stage: "Negotiation",
+    amount: 96000,
+    probability: 0.78,
+    createdDaysAgo: 27,
+    lastActivityDaysAgo: 2,
+    closeDaysFromNow: 9,
+    nextAction: "Confirm workspace requirements",
+  },
+  {
+    clientIndex: 0,
+    name: "CRM and Attribution Integration",
+    stage: "Proposal",
+    amount: 55000,
+    probability: 0.6,
+    createdDaysAgo: 11,
+    lastActivityDaysAgo: 1,
+    closeDaysFromNow: 20,
+    nextAction: "Send integration scope",
+  },
+  {
+    clientIndex: 1,
+    name: "Sales Forecast Optimization",
+    stage: "Follow-Up",
+    amount: 38000,
+    probability: 0.44,
+    createdDaysAgo: 9,
+    lastActivityDaysAgo: 4,
+    closeDaysFromNow: 28,
+    nextAction: "Schedule technical walkthrough",
+  },
+  {
+    clientIndex: 2,
+    name: "Account Intelligence Pilot",
+    stage: "Discovery",
+    amount: 28000,
+    probability: 0.25,
+    createdDaysAgo: 6,
+    lastActivityDaysAgo: 1,
+    closeDaysFromNow: 35,
+    nextAction: "Identify pilot accounts",
+  },
+
+  // Stale opportunities
+  {
+    clientIndex: 3,
+    name: "Pipeline Health Initiative",
+    stage: "Proposal",
+    amount: 73000,
+    probability: 0.52,
+    createdDaysAgo: 29,
+    lastActivityDaysAgo: 19,
+    closeDaysFromNow: 15,
+    nextAction: "Re-engage executive sponsor",
+  },
+  {
+    clientIndex: 4,
+    name: "Multi-Client Reporting Expansion",
+    stage: "Follow-Up",
+    amount: 46000,
+    probability: 0.4,
+    createdDaysAgo: 26,
+    lastActivityDaysAgo: 17,
+    closeDaysFromNow: 22,
+    nextAction: "Follow up on reporting requirements",
+  },
+  {
+    clientIndex: 1,
+    name: "Revenue Data Consolidation",
+    stage: "Discovery",
+    amount: 34000,
+    probability: 0.2,
+    createdDaysAgo: 23,
+    lastActivityDaysAgo: 16,
+    closeDaysFromNow: 30,
+    nextAction: "Confirm project timeline",
+  },
+
+  // Closed Won
+  {
+    clientIndex: 0,
+    name: "Revenue Command Center Launch",
+    stage: "Closed Won",
+    amount: 58000,
+    probability: 1,
+    createdDaysAgo: 28,
+    lastActivityDaysAgo: 8,
+    closeDaysAgo: 8,
+    nextAction: "Begin onboarding",
+    closedReason: "Strong executive alignment and clear ROI",
+  },
+  {
+    clientIndex: 2,
+    name: "Forecast Accuracy Pilot",
+    stage: "Closed Won",
+    amount: 36000,
+    probability: 1,
+    createdDaysAgo: 22,
+    lastActivityDaysAgo: 6,
+    closeDaysAgo: 6,
+    nextAction: "Launch pilot workspace",
+    closedReason: "Needed stronger forecast visibility",
+  },
+  {
+    clientIndex: 4,
+    name: "Agency Reporting Automation",
+    stage: "Closed Won",
+    amount: 49000,
+    probability: 1,
+    createdDaysAgo: 19,
+    lastActivityDaysAgo: 4,
+    closeDaysAgo: 4,
+    nextAction: "Connect client data sources",
+    closedReason: "Manual reporting was limiting growth",
+  },
+  {
+    clientIndex: 1,
+    name: "Pipeline Risk Detection",
+    stage: "Closed Won",
+    amount: 67000,
+    probability: 1,
+    createdDaysAgo: 16,
+    lastActivityDaysAgo: 2,
+    closeDaysAgo: 2,
+    nextAction: "Start implementation",
+    closedReason: "Leadership needed earlier risk detection",
+  },
+
+  // Closed Lost
+  {
+    clientIndex: 3,
+    name: "Executive Analytics Modernization",
+    stage: "Closed Lost",
+    amount: 51000,
+    probability: 0,
+    createdDaysAgo: 25,
+    lastActivityDaysAgo: 10,
+    closeDaysAgo: 10,
+    nextAction: "",
+    closedReason: "Budget postponed until next quarter",
+    reactivationDaysFromNow: 60,
+  },
+  {
+    clientIndex: 2,
+    name: "Customer Intelligence Expansion",
+    stage: "Closed Lost",
+    amount: 44000,
+    probability: 0,
+    createdDaysAgo: 20,
+    lastActivityDaysAgo: 7,
+    closeDaysAgo: 7,
+    nextAction: "",
+    closedReason: "Selected incumbent provider",
+    competitor: "Legacy analytics vendor",
+    reactivationDaysFromNow: 90,
+  },
+];
+
+const seededDeals = dealTemplates.map((deal, index) => {
+  const createdAt = daysAgo(deal.createdDaysAgo, 9 + (index % 7));
+  const lastActivityAt = daysAgo(
+    deal.lastActivityDaysAgo,
+    10 + (index % 6)
+  );
+
+  const isClosed =
+    deal.stage === "Closed Won" || deal.stage === "Closed Lost";
+
+  const closedAt =
+    deal.closeDaysAgo != null
+      ? daysAgo(deal.closeDaysAgo, 15)
+      : null;
+
+  const closeDate =
+    deal.closeDaysAgo != null
+      ? daysAgo(deal.closeDaysAgo, 15)
+      : daysFromNow(deal.closeDaysFromNow || 30, 15);
+
+  return {
+    orgId,
+    workspaceId: orgId,
+    clientId: clients[deal.clientIndex]._id,
+    name: deal.name,
+    stage: deal.stage,
+    amount: deal.amount,
+    probability: deal.probability,
+    closeDate,
+    nextAction: deal.nextAction || "",
+    nextActionDueAt: isClosed ? null : daysFromNow((index % 7) + 1, 10),
+    lastActivityAt,
+    lastActivityType: isClosed ? "stage_move" : "meeting",
+    lastActivityNote: isClosed
+      ? `Deal moved to ${deal.stage}`
+      : "Stakeholder follow-up completed",
+    activities: [
       {
-        orgId,
-        clientId: clients[0]._id,
-        name: "Example Deal — Website + Ads",
-        stage: "Discovery",
-        amount: 15000,
-        probability: 0.35,
-        nextAction: "Schedule discovery call",
-        createdAt: now(),
-        updatedAt: now(),
+        type: "system",
+        note: `Deal created in stage: ${deal.stage}`,
+        nextAction: deal.nextAction || "",
+        createdAt,
+        createdBy: userId,
       },
       {
-        orgId,
-        clientId: clients[0]._id,
-        name: "Example Deal — Revenue Intel Rollout",
-        stage: "Proposal",
-        amount: 48000,
-        probability: 0.55,
-        nextAction: "Send proposal + confirm stakeholders",
-        createdAt: now(),
-        updatedAt: now(),
+        type: isClosed ? "stage_move" : "meeting",
+        note: isClosed
+          ? `Deal moved to ${deal.stage}`
+          : "Stakeholder follow-up completed",
+        nextAction: deal.nextAction || "",
+        createdAt: lastActivityAt,
+        createdBy: userId,
       },
-      {
-        orgId,
-        clientId: clients[1]._id,
-        name: "Example Deal — HubSpot + Attribution Setup",
-        stage: "Follow-Up",
-        amount: 22000,
-        probability: 0.45,
-        nextAction: "Book technical walkthrough",
-        createdAt: now(),
-        updatedAt: now(),
-      },
-    ]);
+    ],
+    closedAt,
+    closedReason: deal.closedReason || "",
+    competitor: deal.competitor || "",
+    reactivationAt:
+      deal.reactivationDaysFromNow != null
+        ? daysFromNow(deal.reactivationDaysFromNow)
+        : null,
+    archivedAt: null,
+    createdAt,
+    updatedAt: lastActivityAt,
+  };
+});
+
+const insertedDeals = await Deal.insertMany(seededDeals);
 
     // -------------------- Seed Integrations (FIX: never key:null) --------------------
     // DB has unique index: { orgId: 1, key: 1 }
@@ -253,7 +550,7 @@ router.post("/refresh", requireAuth, async (req, res) => {
       ok: true,
       orgId: String(orgId),
       clientsInserted: clients.length,
-      dealsInserted: 3,
+      dealsInserted: insertedDeals.length,
       integrationsUpserted: integrations.length,
       metricsInserted: metrics.length,
     });
