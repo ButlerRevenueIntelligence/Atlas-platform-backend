@@ -60,6 +60,15 @@ function safeNum(v) {
 router.get("/summary", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
+    console.log("METRICS ORG:", String(ctx.orgId));
+
+    const total = await Deal.countDocuments({});
+    const orgDeals = await Deal.countDocuments({ orgId: ctx.orgId });
+
+console.log({
+  totalDealsInDatabase: total,
+  dealsForThisOrg: orgDeals,
+});
     if (!ctx.ok) return res.status(ctx.status).json({ ok: false, message: ctx.message });
     if (!ctx.orgId) return res.status(200).json({ ok: true, summary: {} });
 
