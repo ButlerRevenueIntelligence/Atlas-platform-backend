@@ -74,6 +74,21 @@ console.log({
 
     const days = Math.max(7, Math.min(365, parseInt(req.query.days || "30", 10) || 30));
     const from = addDays(startOfDay(new Date()), -days);
+    const recentDealsForOrg = await Deal.countDocuments({
+  orgId: ctx.orgId,
+  createdAt: { $gte: from },
+});
+
+const sampleDeals = await Deal.find({ orgId: ctx.orgId })
+  .select("name createdAt stage amount")
+  .limit(5)
+  .lean();
+
+console.log({
+  metricsFromDate: from,
+  recentDealsForOrg,
+  sampleDeals,
+});
 
     const deals = await Deal.find({ orgId: ctx.orgId, createdAt: { $gte: from } })
       .select("stage amount probability createdAt closeDate lastActivityAt")
