@@ -46,6 +46,7 @@ import importsRoutes from "./routes/imports.js";
 import ghlRoutes from "./routes/ghl.js";
 import pipedriveRoutes from "./routes/pipedrive.js";
 import linkedinAdsRoutes from "./routes/linkedinAds.js";
+import graphiqRoutes from "./routes/graphiq.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -147,6 +148,7 @@ app.use("/api/organizations", requirePlan("CORE"), organizationsRoutes);
 
 app.use("/api/seed", requirePlan("ENTERPRISE"), seedRoutes);
 app.use("/api/accounts", requirePlan("CORE"), accountsRoutes);
+app.use("/api/graphiq", requirePlan("CORE"), graphiqRoutes);
 app.use("/api/metrics", requirePlan("GROWTH"), metricsRoutes);
 app.use("/api/me", meRoutes);
 app.use("/api/ai", requirePlan("CORE"), aiRoutes);
