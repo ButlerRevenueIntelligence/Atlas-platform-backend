@@ -50,10 +50,6 @@ router.post("/organizations/search", async (req, res) => {
       };
     }
 
-    console.log(
-  "GraphIQ raw response:",
-  JSON.stringify(data, null, 2)
-);
     if (!response.ok) {
       console.error("GraphIQ organization search failed:", {
         status: response.status,
