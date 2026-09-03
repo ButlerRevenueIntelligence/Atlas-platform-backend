@@ -1,20 +1,75 @@
 // backend/routes/clients.js
 import express from "express";
 import mongoose from "mongoose";
+
 import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
 import Client from "../models/Client.js";
-import Deal from "../models/Deal.js";
 
 const router = express.Router();
 
-const toObjectId = (v) => {
-  if (!v) return null;
-  const s = String(v);
-  return mongoose.Types.ObjectId.isValid(s)
-    ? new mongoose.Types.ObjectId(s)
+const ALLOWED_STATUSES = [
+  "active",
+  "paused",
+  "prospect",
+  "archived",
+];
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const toObjectId = (value) => {
+  if (!value) return null;
+
+  const stringValue = String(value);
+
+  return mongoose.Types.ObjectId.isValid(stringValue)
+    ? new mongoose.Types.ObjectId(stringValue)
     : null;
 };
+
+const cleanString = (value, maxLength = 500) =>
+  String(value || "").trim().slice(0, maxLength);
+
+const normalizeEmail = (value) =>
+  cleanString(value, 200).toLowerCase();
+
+const escapeRegex = (value) =>
+  String(value || "").replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&"
+  );
+
+function normalizeWebsite(value) {
+  const website = cleanString(value, 500);
+
+  if (!website) {
+    return {
+      website: "",
+      domain: "",
+    };
+  }
+
+  try {
+    const normalized = /^https?:\/\//i.test(website)
+      ? website
+      : `https://${website}`;
+
+    const parsed = new URL(normalized);
+
+    if (!parsed.hostname || !parsed.hostname.includes(".")) {
+      return null;
+    }
+
+    return {
+      website: normalized,
+      domain: parsed.hostname
+        .toLowerCase()
+        .replace(/^www\./, ""),
+    };
+  } catch {
+    return null;
+  }
+}
 
 function pickUserId(req) {
   return (
@@ -43,6 +98,7 @@ function pickOrgId(req) {
 
 async function getOrgContext(req) {
   const userId = pickUserId(req);
+
   if (!userId) {
     return {
       ok: false,
@@ -53,21 +109,20 @@ async function getOrgContext(req) {
   }
 
   const orgId = pickOrgId(req);
+
   if (!orgId) {
     return {
       ok: false,
       status: 400,
-      message: "Missing org context (x-org-id).",
+      message: "Missing workspace context.",
       code: "ORG_CONTEXT_REQUIRED",
-      userId,
-      orgId: null,
     };
   }
 
   const membership = await Membership.findOne({
     userId,
     orgId,
-    status: { $ne: "disabled" },
+    status: { $nin: ["disabled", "suspended"] },
   })
     .select("_id role status userId orgId")
     .lean();
@@ -76,359 +131,719 @@ async function getOrgContext(req) {
     return {
       ok: false,
       status: 403,
-      message: "Not a member of this workspace",
+      message: "Not an active member of this workspace.",
       code: "ORG_ACCESS_DENIED",
     };
   }
 
-  const role = String(membership.role || "analyst").toLowerCase();
-  const canWrite = ["owner", "admin", "manager"].includes(role);
+  const role = String(
+    membership.role || "analyst"
+  ).toLowerCase();
+
+  const canWrite = [
+    "owner",
+    "admin",
+    "manager",
+  ].includes(role);
 
   return {
     ok: true,
     userId,
     orgId,
     membership,
+    role,
     canWrite,
   };
 }
 
-// LIST clients
+function sendContextError(res, ctx) {
+  return res.status(ctx.status).json({
+    ok: false,
+    message: ctx.message,
+    code: ctx.code,
+  });
+}
+
+function sendWritePermissionError(res) {
+  return res.status(403).json({
+    ok: false,
+    message:
+      "Only workspace owners, administrators, and managers can manage customer accounts.",
+    code: "INSUFFICIENT_PERMISSIONS",
+  });
+}
+
+function validateStatus(value) {
+  const status = cleanString(
+    value || "active",
+    30
+  ).toLowerCase();
+
+  return ALLOWED_STATUSES.includes(status)
+    ? status
+    : null;
+}
+
+function validateContactEmail(value) {
+  const email = normalizeEmail(value);
+
+  if (!email) {
+    return {
+      ok: true,
+      email: "",
+    };
+  }
+
+  if (!EMAIL_PATTERN.test(email)) {
+    return {
+      ok: false,
+      email: "",
+    };
+  }
+
+  return {
+    ok: true,
+    email,
+  };
+}
+
+/**
+ * GET /api/clients
+ *
+ * Lists customer accounts in the active workspace.
+ * Archived accounts are hidden unless status=archived.
+ */
 router.get("/", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
+
     if (!ctx.ok) {
-      return res.status(ctx.status).json({
-        ok: false,
-        message: ctx.message,
-        code: ctx.code,
-      });
+      return sendContextError(res, ctx);
     }
 
-    const q = (req.query.q || "").toString().trim();
-    const status = (req.query.status || "").toString().trim().toLowerCase();
+    const query = cleanString(req.query?.q, 100);
+    const requestedStatus = cleanString(
+      req.query?.status,
+      30
+    ).toLowerCase();
 
-    const filter = { orgId: ctx.orgId };
+    const filter = {
+      orgId: ctx.orgId,
+    };
 
-    if (status) {
-      filter.status = status;
+    if (requestedStatus) {
+      if (!ALLOWED_STATUSES.includes(requestedStatus)) {
+        return res.status(400).json({
+          ok: false,
+          message: "Invalid account status.",
+          code: "INVALID_STATUS",
+        });
+      }
+
+      filter.status = requestedStatus;
+    } else {
+      filter.status = { $ne: "archived" };
     }
 
-    if (q) {
+    if (query) {
+      const safeQuery = escapeRegex(query);
+
       filter.$or = [
-        { name: { $regex: q, $options: "i" } },
-        { industry: { $regex: q, $options: "i" } },
-        { website: { $regex: q, $options: "i" } },
-        { domain: { $regex: q, $options: "i" } },
-        { primaryContactName: { $regex: q, $options: "i" } },
-        { primaryContactEmail: { $regex: q, $options: "i" } },
+        {
+          name: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+        {
+          industry: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+        {
+          website: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+        {
+          domain: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+        {
+          primaryContactName: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
+        {
+          primaryContactEmail: {
+            $regex: safeQuery,
+            $options: "i",
+          },
+        },
       ];
     }
 
     const clients = await Client.find(filter)
-      .sort({ createdAt: -1 })
+      .sort({
+        status: 1,
+        name: 1,
+        createdAt: -1,
+      })
       .limit(200)
       .lean();
 
-    return res.status(200).json({
+    return res.json({
       ok: true,
-      orgId: ctx.orgId,
+      orgId: String(ctx.orgId),
+
       membership: {
-        role: ctx.membership.role,
+        role: ctx.role,
         status: ctx.membership.status,
+        canWrite: ctx.canWrite,
       },
+
       clients,
     });
   } catch (err) {
-    console.error("Clients list error:", err);
+    console.error("GET /api/clients error:", err);
+
     return res.status(500).json({
       ok: false,
-      message: err?.message || "Failed to list clients",
+      message:
+        err?.message ||
+        "Failed to list customer accounts.",
     });
   }
 });
 
-// GET single client
+/**
+ * GET /api/clients/:id
+ *
+ * Returns one workspace-scoped customer account.
+ */
 router.get("/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
+
     if (!ctx.ok) {
-      return res.status(ctx.status).json({
-        ok: false,
-        message: ctx.message,
-        code: ctx.code,
-      });
+      return sendContextError(res, ctx);
     }
 
-    const id = toObjectId(req.params.id);
-    if (!id) {
+    const clientId = toObjectId(req.params.id);
+
+    if (!clientId) {
       return res.status(400).json({
         ok: false,
-        message: "Invalid client id",
+        message: "Invalid account ID.",
+        code: "INVALID_CLIENT_ID",
       });
     }
 
-    const client = await Client.findOne({ _id: id, orgId: ctx.orgId }).lean();
+    const client = await Client.findOne({
+      _id: clientId,
+      orgId: ctx.orgId,
+    }).lean();
 
     if (!client) {
       return res.status(404).json({
         ok: false,
-        message: "Client not found",
+        message: "Customer account not found.",
+        code: "CLIENT_NOT_FOUND",
       });
     }
 
-    return res.status(200).json({
+    return res.json({
       ok: true,
       client,
+
       membership: {
-        role: ctx.membership.role,
+        role: ctx.role,
         status: ctx.membership.status,
+        canWrite: ctx.canWrite,
       },
     });
   } catch (err) {
-    console.error("Client get error:", err);
+    console.error("GET /api/clients/:id error:", err);
+
     return res.status(500).json({
       ok: false,
-      message: err?.message || "Failed to get client",
+      message:
+        err?.message ||
+        "Failed to load customer account.",
     });
   }
 });
 
-// CREATE client
+/**
+ * POST /api/clients
+ *
+ * Creates a customer account in the active workspace.
+ */
 router.post("/", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
+
     if (!ctx.ok) {
-      return res.status(ctx.status).json({
-        ok: false,
-        message: ctx.message,
-        code: ctx.code,
-      });
+      return sendContextError(res, ctx);
     }
 
     if (!ctx.canWrite) {
-      return res.status(403).json({
-        ok: false,
-        message: "Insufficient permissions",
-        code: "INSUFFICIENT_PERMISSIONS",
-      });
+      return sendWritePermissionError(res);
     }
 
-    const payload = req.body || {};
-    const name = (payload.name || "").toString().trim();
+    const name = cleanString(
+      req.body?.name,
+      150
+    );
 
     if (!name) {
       return res.status(400).json({
         ok: false,
-        message: "Client name is required",
+        message: "Account name is required.",
+        code: "NAME_REQUIRED",
       });
     }
 
-    const doc = await Client.create({
+    const status = validateStatus(
+      req.body?.status || "active"
+    );
+
+    if (!status || status === "archived") {
+      return res.status(400).json({
+        ok: false,
+        message:
+          "New accounts must be active, paused, or prospect.",
+        code: "INVALID_STATUS",
+      });
+    }
+
+    const websiteData = normalizeWebsite(
+      req.body?.website
+    );
+
+    if (req.body?.website && !websiteData) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          "Enter a valid company website.",
+        code: "INVALID_WEBSITE",
+      });
+    }
+
+    const contactEmail = validateContactEmail(
+      req.body?.primaryContactEmail
+    );
+
+    if (!contactEmail.ok) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          "Enter a valid primary contact email.",
+        code: "INVALID_EMAIL",
+      });
+    }
+
+    const duplicateConditions = [
+      {
+        name: {
+          $regex: `^${escapeRegex(name)}$`,
+          $options: "i",
+        },
+      },
+    ];
+
+    if (websiteData?.domain) {
+      duplicateConditions.push({
+        domain: websiteData.domain,
+      });
+    }
+
+    const duplicate = await Client.findOne({
+      orgId: ctx.orgId,
+      status: { $ne: "archived" },
+      $or: duplicateConditions,
+    }).lean();
+
+    if (duplicate) {
+      return res.status(409).json({
+        ok: false,
+        message:
+          "A customer account with this name or domain already exists.",
+        code: "CLIENT_ALREADY_EXISTS",
+      });
+    }
+
+    const client = await Client.create({
       orgId: ctx.orgId,
       workspaceId: ctx.orgId,
       name,
-      website: (payload.website || "").toString().trim(),
-      industry: (payload.industry || "").toString().trim(),
-      primaryContactName: (payload.primaryContactName || "").toString().trim(),
-      primaryContactEmail: (payload.primaryContactEmail || "")
-        .toString()
-        .trim()
-        .toLowerCase(),
-      primaryContactPhone: (payload.primaryContactPhone || "").toString().trim(),
-      status: (payload.status || "active").toString().trim().toLowerCase(),
-      notes: (payload.notes || "").toString().trim(),
+      website: websiteData?.website || "",
+      domain: websiteData?.domain || "",
+      industry: cleanString(
+        req.body?.industry,
+        120
+      ),
+      primaryContactName: cleanString(
+        req.body?.primaryContactName,
+        120
+      ),
+      primaryContactEmail:
+        contactEmail.email,
+      primaryContactPhone: cleanString(
+        req.body?.primaryContactPhone,
+        50
+      ),
+      status,
+      notes: cleanString(
+        req.body?.notes,
+        3000
+      ),
+      archivedAt: null,
       createdBy: ctx.userId,
       updatedBy: ctx.userId,
     });
 
     return res.status(201).json({
       ok: true,
-      client: doc.toObject(),
+      client: client.toObject(),
     });
   } catch (err) {
-    console.error("Client create error:", err);
+    console.error("POST /api/clients error:", err);
 
     if (err?.code === 11000) {
       return res.status(409).json({
         ok: false,
-        message: "A client with that primary contact email already exists in this workspace.",
-        code: "DUPLICATE_CLIENT_CONTACT_EMAIL",
+        message:
+          "A customer account with this contact email already exists.",
+        code: "DUPLICATE_CLIENT",
       });
     }
 
     return res.status(500).json({
       ok: false,
-      message: err?.message || "Failed to create client",
+      message:
+        err?.message ||
+        "Failed to create customer account.",
     });
   }
 });
 
-// UPDATE client
+/**
+ * PUT /api/clients/:id
+ *
+ * Updates a workspace-scoped customer account.
+ */
 router.put("/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
+
     if (!ctx.ok) {
-      return res.status(ctx.status).json({
-        ok: false,
-        message: ctx.message,
-        code: ctx.code,
-      });
+      return sendContextError(res, ctx);
     }
 
     if (!ctx.canWrite) {
-      return res.status(403).json({
-        ok: false,
-        message: "Insufficient permissions",
-        code: "INSUFFICIENT_PERMISSIONS",
-      });
+      return sendWritePermissionError(res);
     }
 
-    const id = toObjectId(req.params.id);
-    if (!id) {
+    const clientId = toObjectId(req.params.id);
+
+    if (!clientId) {
       return res.status(400).json({
         ok: false,
-        message: "Invalid client id",
+        message: "Invalid account ID.",
+        code: "INVALID_CLIENT_ID",
       });
     }
 
-    const payload = req.body || {};
-    const update = {};
+    const existingClient = await Client.findOne({
+      _id: clientId,
+      orgId: ctx.orgId,
+    });
 
-    const setIf = (key, value) => {
-      if (value === undefined) return;
-      update[key] = value;
-    };
-
-    setIf("name", payload.name !== undefined ? String(payload.name).trim() : undefined);
-    setIf("website", payload.website !== undefined ? String(payload.website).trim() : undefined);
-    setIf("industry", payload.industry !== undefined ? String(payload.industry).trim() : undefined);
-    setIf(
-      "primaryContactName",
-      payload.primaryContactName !== undefined
-        ? String(payload.primaryContactName).trim()
-        : undefined
-    );
-    setIf(
-      "primaryContactEmail",
-      payload.primaryContactEmail !== undefined
-        ? String(payload.primaryContactEmail).trim().toLowerCase()
-        : undefined
-    );
-    setIf(
-      "primaryContactPhone",
-      payload.primaryContactPhone !== undefined
-        ? String(payload.primaryContactPhone).trim()
-        : undefined
-    );
-    setIf(
-      "status",
-      payload.status !== undefined
-        ? String(payload.status).trim().toLowerCase()
-        : undefined
-    );
-    setIf("notes", payload.notes !== undefined ? String(payload.notes).trim() : undefined);
-
-    update.updatedBy = ctx.userId;
-
-    if (update.name !== undefined && !update.name) {
-      return res.status(400).json({
-        ok: false,
-        message: "Client name cannot be empty",
-      });
-    }
-
-    const client = await Client.findOneAndUpdate(
-      { _id: id, orgId: ctx.orgId },
-      { $set: update },
-      { new: true }
-    ).lean();
-
-    if (!client) {
+    if (!existingClient) {
       return res.status(404).json({
         ok: false,
-        message: "Client not found",
+        message: "Customer account not found.",
+        code: "CLIENT_NOT_FOUND",
       });
     }
 
-    return res.status(200).json({
+    const updates = {
+      updatedBy: ctx.userId,
+    };
+
+    if (req.body?.name !== undefined) {
+      const name = cleanString(
+        req.body.name,
+        150
+      );
+
+      if (!name) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            "Account name cannot be empty.",
+          code: "NAME_REQUIRED",
+        });
+      }
+
+      updates.name = name;
+    }
+
+    if (req.body?.website !== undefined) {
+      const websiteData = normalizeWebsite(
+        req.body.website
+      );
+
+      if (req.body.website && !websiteData) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            "Enter a valid company website.",
+          code: "INVALID_WEBSITE",
+        });
+      }
+
+      updates.website =
+        websiteData?.website || "";
+
+      updates.domain =
+        websiteData?.domain || "";
+    }
+
+    if (req.body?.industry !== undefined) {
+      updates.industry = cleanString(
+        req.body.industry,
+        120
+      );
+    }
+
+    if (
+      req.body?.primaryContactName !== undefined
+    ) {
+      updates.primaryContactName = cleanString(
+        req.body.primaryContactName,
+        120
+      );
+    }
+
+    if (
+      req.body?.primaryContactEmail !== undefined
+    ) {
+      const contactEmail = validateContactEmail(
+        req.body.primaryContactEmail
+      );
+
+      if (!contactEmail.ok) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            "Enter a valid primary contact email.",
+          code: "INVALID_EMAIL",
+        });
+      }
+
+      updates.primaryContactEmail =
+        contactEmail.email;
+    }
+
+    if (
+      req.body?.primaryContactPhone !== undefined
+    ) {
+      updates.primaryContactPhone = cleanString(
+        req.body.primaryContactPhone,
+        50
+      );
+    }
+
+    if (req.body?.status !== undefined) {
+      const status = validateStatus(
+        req.body.status
+      );
+
+      if (!status) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            "Invalid customer account status.",
+          code: "INVALID_STATUS",
+        });
+      }
+
+      updates.status = status;
+      updates.archivedAt =
+        status === "archived"
+          ? new Date()
+          : null;
+    }
+
+    if (req.body?.notes !== undefined) {
+      updates.notes = cleanString(
+        req.body.notes,
+        3000
+      );
+    }
+
+    const finalName =
+      updates.name || existingClient.name;
+
+    const finalDomain =
+      updates.domain !== undefined
+        ? updates.domain
+        : existingClient.domain;
+
+    const duplicateConditions = [
+      {
+        name: {
+          $regex: `^${escapeRegex(
+            finalName
+          )}$`,
+          $options: "i",
+        },
+      },
+    ];
+
+    if (finalDomain) {
+      duplicateConditions.push({
+        domain: finalDomain,
+      });
+    }
+
+    const duplicate = await Client.findOne({
+      _id: { $ne: clientId },
+      orgId: ctx.orgId,
+      status: { $ne: "archived" },
+      $or: duplicateConditions,
+    }).lean();
+
+    if (duplicate) {
+      return res.status(409).json({
+        ok: false,
+        message:
+          "Another customer account already uses this name or domain.",
+        code: "CLIENT_ALREADY_EXISTS",
+      });
+    }
+
+    const client =
+      await Client.findOneAndUpdate(
+        {
+          _id: clientId,
+          orgId: ctx.orgId,
+        },
+        {
+          $set: updates,
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).lean();
+
+    return res.json({
       ok: true,
       client,
     });
   } catch (err) {
-    console.error("Client update error:", err);
+    console.error(
+      "PUT /api/clients/:id error:",
+      err
+    );
 
     if (err?.code === 11000) {
       return res.status(409).json({
         ok: false,
-        message: "A client with that primary contact email already exists in this workspace.",
-        code: "DUPLICATE_CLIENT_CONTACT_EMAIL",
+        message:
+          "Another customer account already uses this contact email.",
+        code: "DUPLICATE_CLIENT",
       });
     }
 
     return res.status(500).json({
       ok: false,
-      message: err?.message || "Failed to update client",
+      message:
+        err?.message ||
+        "Failed to update customer account.",
     });
   }
 });
 
-// DELETE client
+/**
+ * DELETE /api/clients/:id
+ *
+ * Safely archives the account instead of deleting it.
+ * Linked deals and account history remain intact.
+ */
 router.delete("/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
+
     if (!ctx.ok) {
-      return res.status(ctx.status).json({
-        ok: false,
-        message: ctx.message,
-        code: ctx.code,
-      });
+      return sendContextError(res, ctx);
     }
 
     if (!ctx.canWrite) {
-      return res.status(403).json({
-        ok: false,
-        message: "Insufficient permissions",
-        code: "INSUFFICIENT_PERMISSIONS",
-      });
+      return sendWritePermissionError(res);
     }
 
-    const id = toObjectId(req.params.id);
-    if (!id) {
+    const clientId = toObjectId(req.params.id);
+
+    if (!clientId) {
       return res.status(400).json({
         ok: false,
-        message: "Invalid client id",
+        message: "Invalid account ID.",
+        code: "INVALID_CLIENT_ID",
       });
     }
 
-    const existingDeals = await Deal.countDocuments({
-      clientId: id,
-      orgId: ctx.orgId,
-    });
+    const client =
+      await Client.findOneAndUpdate(
+        {
+          _id: clientId,
+          orgId: ctx.orgId,
+        },
+        {
+          $set: {
+            status: "archived",
+            archivedAt: new Date(),
+            updatedBy: ctx.userId,
+          },
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).lean();
 
-    if (existingDeals > 0) {
-      return res.status(400).json({
-        ok: false,
-        message: `Cannot delete client. ${existingDeals} deal(s) are still linked.`,
-        code: "CLIENT_HAS_DEALS",
-      });
-    }
-
-    const result = await Client.deleteOne({ _id: id, orgId: ctx.orgId });
-
-    if (!result.deletedCount) {
+    if (!client) {
       return res.status(404).json({
         ok: false,
-        message: "Client not found",
+        message: "Customer account not found.",
+        code: "CLIENT_NOT_FOUND",
       });
     }
 
-    return res.status(200).json({ ok: true });
+    return res.json({
+      ok: true,
+      message: "Customer account archived.",
+      client,
+    });
   } catch (err) {
-    console.error("Client delete error:", err);
+    console.error(
+      "DELETE /api/clients/:id error:",
+      err
+    );
+
     return res.status(500).json({
       ok: false,
-      message: err?.message || "Failed to delete client",
+      message:
+        err?.message ||
+        "Failed to archive customer account.",
     });
   }
 });
