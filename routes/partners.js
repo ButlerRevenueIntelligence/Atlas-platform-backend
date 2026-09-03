@@ -1,97 +1,393 @@
-// backend/routes/partners.js
 import express from "express";
 import mongoose from "mongoose";
-import User from "../models/User.js";
-import Membership from "../models/Membership.js";
+import Partner from "../models/Partner.js";
 import { requireAuth, requireOrgRole } from "../middleware/auth.js";
 
 const router = express.Router();
 
-const toObjId = (v) => {
-  if (!v) return null;
-  const s = String(v);
-  return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
+const toObjId = (value) => {
+  if (!value) return null;
+
+  const stringValue = String(value);
+
+  return mongoose.Types.ObjectId.isValid(stringValue)
+    ? new mongoose.Types.ObjectId(stringValue)
+    : null;
 };
+
+const cleanString = (value) =>
+  typeof value === "string" ? value.trim() : "";
+
+const cleanNumber = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+};
+
+const allowedTypes = [
+  "referral",
+  "reseller",
+  "technology",
+  "strategic",
+  "affiliate",
+  "agency",
+  "other",
+];
+
+const allowedStatuses = [
+  "active",
+  "prospective",
+  "inactive",
+  "archived",
+];
+
+function getOrgId(req) {
+  return toObjId(req.user?.orgId);
+}
+
+function getUserId(req) {
+  return toObjId(req.user?.userId || req.user?._id || req.user?.id);
+}
 
 /**
  * GET /api/partners
- * Returns members in the active org (tenant)
- * ✅ Any authenticated org member can view the list
+ * Returns actual partner records belonging to the active workspace.
  */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const orgId = toObjId(req.user?.orgId);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+    const orgId = getOrgId(req);
 
-    const memberships = await Membership.find({ orgId, status: { $ne: "disabled" } })
-      .select("_id userId orgId role permissions status createdAt")
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    const query = {
+      orgId,
+      status: { $ne: "archived" },
+    };
+
+    const requestedStatus = cleanString(req.query?.status).toLowerCase();
+
+    if (
+      requestedStatus &&
+      allowedStatuses.includes(requestedStatus) &&
+      requestedStatus !== "archived"
+    ) {
+      query.status = requestedStatus;
+    }
+
+    const partners = await Partner.find(query)
       .sort({ createdAt: -1 })
       .lean();
 
-    const userIds = memberships.map((m) => m.userId).filter(Boolean);
-    const users = await User.find({ _id: { $in: userIds } })
-      .select("_id name email company role")
-      .lean();
-
-    const userMap = new Map(users.map((u) => [String(u._id), u]));
-
-    const partners = memberships.map((m) => {
-      const u = userMap.get(String(m.userId));
-      return {
-        membershipId: m._id,
-        userId: m.userId,
-        name: u?.name || "—",
-        email: u?.email || "—",
-        company: u?.company || "",
-        orgRole: String(m.role || "analyst").toLowerCase(),
-        status: m.status || "active",
-        overrides: Array.isArray(m.permissions) ? m.permissions : [],
-        createdAt: m.createdAt,
-      };
+    return res.json({
+      ok: true,
+      partners,
     });
-
-    return res.json({ ok: true, partners });
   } catch (err) {
     console.error("GET /api/partners error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Server error" });
+
+    return res.status(500).json({
+      ok: false,
+      message: err?.message || "Server error",
+    });
   }
 });
 
 /**
- * PATCH /api/partners/:membershipId/role
- * body: { role }
- * ✅ LOCKED: only org admin/owner can change roles
+ * POST /api/partners
+ * Creates a partner in the active workspace.
+ * Only owners and admins should manage partner records.
  */
-router.patch("/:membershipId/role", requireAuth, requireOrgRole("admin"), async (req, res) => {
-  try {
-    const orgId = toObjId(req.user?.orgId);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+router.post(
+  "/",
+  requireAuth,
+  requireOrgRole("admin"),
+  async (req, res) => {
+    try {
+      const orgId = getOrgId(req);
+      const userId = getUserId(req);
 
-    const membershipId = toObjId(req.params.membershipId);
-    if (!membershipId) return res.status(400).json({ ok: false, message: "Invalid membershipId" });
+      if (!orgId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing org context",
+        });
+      }
 
-    const role = String(req.body?.role || "").toLowerCase();
-    const allowed = ["owner", "admin", "manager", "analyst", "sales"];
-    if (!allowed.includes(role)) {
-      return res.status(400).json({ ok: false, message: `Invalid role. Use: ${allowed.join(", ")}` });
+      const companyName = cleanString(req.body?.companyName);
+      const contactName = cleanString(req.body?.contactName);
+      const email = cleanString(req.body?.email).toLowerCase();
+
+      const partnershipType = cleanString(
+        req.body?.partnershipType
+      ).toLowerCase();
+
+      const status = cleanString(req.body?.status).toLowerCase();
+
+      if (!companyName) {
+        return res.status(400).json({
+          ok: false,
+          message: "Partner company name is required",
+        });
+      }
+
+      const duplicate = await Partner.findOne({
+        orgId,
+        companyName: {
+          $regex: `^${companyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          $options: "i",
+        },
+        status: { $ne: "archived" },
+      }).lean();
+
+      if (duplicate) {
+        return res.status(409).json({
+          ok: false,
+          message: "A partner with this company name already exists",
+        });
+      }
+
+      const partner = await Partner.create({
+        orgId,
+        companyName,
+        contactName,
+        email,
+        partnershipType: allowedTypes.includes(partnershipType)
+          ? partnershipType
+          : "referral",
+        status: allowedStatuses.includes(status) ? status : "active",
+        referredOpportunities: cleanNumber(
+          req.body?.referredOpportunities
+        ),
+        influencedPipeline: cleanNumber(req.body?.influencedPipeline),
+        revenueGenerated: cleanNumber(req.body?.revenueGenerated),
+        notes: cleanString(req.body?.notes),
+        createdBy: userId,
+        updatedBy: userId,
+      });
+
+      return res.status(201).json({
+        ok: true,
+        partner,
+      });
+    } catch (err) {
+      console.error("POST /api/partners error:", err);
+
+      return res.status(500).json({
+        ok: false,
+        message: err?.message || "Server error",
+      });
     }
-
-    const m = await Membership.findOne({ _id: membershipId, orgId });
-    if (!m) return res.status(404).json({ ok: false, message: "Membership not found" });
-
-    // Optional: prevent demoting yourself from owner/admin if you want (hard lock)
-    // if (String(m.userId) === String(req.user.userId) && role !== m.role) {
-    //   return res.status(403).json({ ok: false, message: "You can't change your own role." });
-    // }
-
-    m.role = role;
-    await m.save();
-
-    return res.json({ ok: true, membershipId: m._id, role: m.role });
-  } catch (err) {
-    console.error("PATCH /api/partners/:membershipId/role error:", err);
-    return res.status(500).json({ ok: false, message: err?.message || "Server error" });
   }
-});
+);
+
+/**
+ * PATCH /api/partners/:partnerId
+ * Updates a partner in the active workspace.
+ */
+router.patch(
+  "/:partnerId",
+  requireAuth,
+  requireOrgRole("admin"),
+  async (req, res) => {
+    try {
+      const orgId = getOrgId(req);
+      const partnerId = toObjId(req.params.partnerId);
+      const userId = getUserId(req);
+
+      if (!orgId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing org context",
+        });
+      }
+
+      if (!partnerId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Invalid partner ID",
+        });
+      }
+
+      const updates = {};
+
+      if (req.body?.companyName !== undefined) {
+        const companyName = cleanString(req.body.companyName);
+
+        if (!companyName) {
+          return res.status(400).json({
+            ok: false,
+            message: "Partner company name is required",
+          });
+        }
+
+        updates.companyName = companyName;
+      }
+
+      if (req.body?.contactName !== undefined) {
+        updates.contactName = cleanString(req.body.contactName);
+      }
+
+      if (req.body?.email !== undefined) {
+        updates.email = cleanString(req.body.email).toLowerCase();
+      }
+
+      if (req.body?.partnershipType !== undefined) {
+        const partnershipType = cleanString(
+          req.body.partnershipType
+        ).toLowerCase();
+
+        if (!allowedTypes.includes(partnershipType)) {
+          return res.status(400).json({
+            ok: false,
+            message: "Invalid partnership type",
+          });
+        }
+
+        updates.partnershipType = partnershipType;
+      }
+
+      if (req.body?.status !== undefined) {
+        const status = cleanString(req.body.status).toLowerCase();
+
+        if (!allowedStatuses.includes(status)) {
+          return res.status(400).json({
+            ok: false,
+            message: "Invalid partner status",
+          });
+        }
+
+        updates.status = status;
+      }
+
+      if (req.body?.referredOpportunities !== undefined) {
+        updates.referredOpportunities = cleanNumber(
+          req.body.referredOpportunities
+        );
+      }
+
+      if (req.body?.influencedPipeline !== undefined) {
+        updates.influencedPipeline = cleanNumber(
+          req.body.influencedPipeline
+        );
+      }
+
+      if (req.body?.revenueGenerated !== undefined) {
+        updates.revenueGenerated = cleanNumber(
+          req.body.revenueGenerated
+        );
+      }
+
+      if (req.body?.notes !== undefined) {
+        updates.notes = cleanString(req.body.notes);
+      }
+
+      updates.updatedBy = userId;
+
+      const partner = await Partner.findOneAndUpdate(
+        {
+          _id: partnerId,
+          orgId,
+        },
+        {
+          $set: updates,
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).lean();
+
+      if (!partner) {
+        return res.status(404).json({
+          ok: false,
+          message: "Partner not found",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        partner,
+      });
+    } catch (err) {
+      console.error("PATCH /api/partners/:partnerId error:", err);
+
+      return res.status(500).json({
+        ok: false,
+        message: err?.message || "Server error",
+      });
+    }
+  }
+);
+
+/**
+ * DELETE /api/partners/:partnerId
+ * Archives the partner instead of permanently deleting it.
+ */
+router.delete(
+  "/:partnerId",
+  requireAuth,
+  requireOrgRole("admin"),
+  async (req, res) => {
+    try {
+      const orgId = getOrgId(req);
+      const partnerId = toObjId(req.params.partnerId);
+      const userId = getUserId(req);
+
+      if (!orgId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing org context",
+        });
+      }
+
+      if (!partnerId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Invalid partner ID",
+        });
+      }
+
+      const partner = await Partner.findOneAndUpdate(
+        {
+          _id: partnerId,
+          orgId,
+        },
+        {
+          $set: {
+            status: "archived",
+            updatedBy: userId,
+          },
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).lean();
+
+      if (!partner) {
+        return res.status(404).json({
+          ok: false,
+          message: "Partner not found",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        message: "Partner archived",
+      });
+    } catch (err) {
+      console.error("DELETE /api/partners/:partnerId error:", err);
+
+      return res.status(500).json({
+        ok: false,
+        message: err?.message || "Server error",
+      });
+    }
+  }
+);
 
 export default router;
