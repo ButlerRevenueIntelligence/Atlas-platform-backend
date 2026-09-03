@@ -2,9 +2,6 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-console.log("SMTP USER:", process.env.SMTP_USER);
-console.log("SMTP PASS EXISTS:", !!process.env.SMTP_PASS);
-
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
@@ -12,7 +9,6 @@ import mongoose from "mongoose";
 import { requirePlan } from "./middleware/requirePlan.js";
 import { startIntegrationAutoSync } from "./jobs/integrationAutoSync.js";
 
-import billingRoutes from "./routes/billing.js";
 import authRoutes from "./routes/auth.js";
 import dashboardRoutes from "./routes/dashboard.js";
 import integrationsRoute from "./routes/integrations.js";
@@ -49,9 +45,12 @@ import linkedinAdsRoutes from "./routes/linkedinAds.js";
 import graphiqRoutes from "./routes/graphiq.js";
 
 const app = express();
+
 app.set("trust proxy", 1);
 
-/** -------------------- CORS (ONLY ONCE) -------------------- */
+/**
+ * CORS
+ */
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   "https://app.atlasrevenueai.com",
@@ -64,13 +63,36 @@ const allowedOrigins = [
 ].filter(Boolean);
 
 const corsOptions = {
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(new Error(`CORS blocked: ${origin}`));
+  origin(origin, callback) {
+    // Allow server-to-server requests and health checks.
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    const error = new Error(
+      `CORS blocked request from ${origin}`
+    );
+
+    error.status = 403;
+
+    return callback(error);
   },
+
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
+
   allowedHeaders: [
     "Content-Type",
     "Authorization",
@@ -79,6 +101,7 @@ const corsOptions = {
     "X-Requested-With",
     "stripe-signature",
   ],
+
   exposedHeaders: ["x-org-id"],
   optionsSuccessStatus: 204,
 };
@@ -86,88 +109,264 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
-/** -------------------- STRIPE/BILLING ROUTES FIRST -------------------- */
-/** These must be mounted before express.json() so raw webhook bodies still work */
-app.use("/api/billing", billingRoutes);
+/**
+ * STRIPE ROUTES
+ *
+ * This router must remain before express.json().
+ * The webhook endpoint requires Stripe's untouched raw body.
+ *
+ * Non-webhook Stripe endpoints use route-level express.json().
+ */
 app.use("/api/stripe", stripeRoutes);
 
-/** -------------------- BODY PARSERS AFTER WEBHOOK ROUTES -------------------- */
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json({ limit: "2mb" }));
+/**
+ * STANDARD BODY PARSERS
+ */
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "2mb",
+  })
+);
 
-/** -------------------- Invalid JSON handler -------------------- */
+app.use(
+  express.json({
+    limit: "2mb",
+  })
+);
+
+/**
+ * Invalid JSON handler
+ */
 app.use((err, req, res, next) => {
-  if (err instanceof SyntaxError && err.status === 400 && "body" in err) {
-    return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+  if (
+    err instanceof SyntaxError &&
+    err.status === 400 &&
+    "body" in err
+  ) {
+    return res.status(400).json({
+      ok: false,
+      message: "Invalid JSON body.",
+    });
   }
+
   return next(err);
 });
 
-/** -------------------- Health check -------------------- */
+/**
+ * Health check
+ */
 app.get("/api/health", (req, res) => {
-  res.json({
+  return res.json({
     ok: true,
-    mongoReadyState: mongoose.connection?.readyState ?? null,
+    mongoReadyState:
+      mongoose.connection?.readyState ?? null,
     mongoHost: mongoose.connection?.host ?? null,
     mongoDb: mongoose.connection?.name ?? null,
-    env: process.env.NODE_ENV || "development",
+    environment:
+      process.env.NODE_ENV || "development",
   });
 });
 
-/** -------------------- Routes -------------------- */
+/**
+ * AUTHENTICATION AND WORKSPACE ROUTES
+ */
 app.use("/api/auth", authRoutes);
 app.use("/api/workspaces", workspaceRoutes);
 app.use("/api/trial", trialRoutes);
+app.use("/api/me", meRoutes);
+
+/**
+ * IMPORT AND CONNECTION ROUTES
+ */
 app.use("/api/hubspot", hubspotSyncRoutes);
 app.use("/api/imports", importsRoutes);
-app.use("/api/integrations/linkedin_ads", linkedinAdsRoutes);
 
-app.use("/api/dashboard", requirePlan("CORE"), dashboardRoutes);
-app.use("/api/integrations/pipedrive", pipedriveRoutes);
-app.use("/api/integrations", requirePlan("CORE"), integrationsRoute);
-app.use("/api/pipeline", requirePlan("CORE"), pipelineRoutes);
-app.use("/api/integrations/ghl", requirePlan("CORE"), ghlRoutes);
+app.use(
+  "/api/integrations/linkedin_ads",
+  linkedinAdsRoutes
+);
 
-app.use("/api/invites", requirePlan("CORE"), invitesRoutes);
-app.use("/api/members", requirePlan("CORE"), membersRoutes);
+app.use(
+  "/api/integrations/pipedrive",
+  pipedriveRoutes
+);
 
-app.use("/api/revenue-stability", requirePlan("CORE"), revenueStabilityRouter);
-app.use("/api/revenue-intel", requirePlan("CORE"), revenueIntelRouter);
-app.use("/api/forecast", requirePlan("GROWTH"), forecastRoutes);
+app.use(
+  "/api/integrations",
+  requirePlan("CORE"),
+  integrationsRoute
+);
 
-app.use("/api/partners", requirePlan("CORE"), partnersRoutes);
-app.use("/api/clients", requirePlan("CORE"), clientsRouter);
-app.use("/api/deals", requirePlan("CORE"), dealsRouter);
-app.use("/api/deal-intel", requirePlan("GROWTH"), dealIntelRouter);
+app.use(
+  "/api/integrations/ghl",
+  requirePlan("CORE"),
+  ghlRoutes
+);
 
-app.use("/api/atlas", requirePlan("CORE"), atlasRoutes);
-app.use("/api/atlas", requirePlan("ENTERPRISE"), atlasOperator);
+/**
+ * CORE PLAN ROUTES
+ */
+app.use(
+  "/api/dashboard",
+  requirePlan("CORE"),
+  dashboardRoutes
+);
 
-app.use("/api/org", requirePlan("CORE"), orgRoutes);
-app.use("/api/organizations", requirePlan("CORE"), organizationsRoutes);
+app.use(
+  "/api/pipeline",
+  requirePlan("CORE"),
+  pipelineRoutes
+);
 
-app.use("/api/seed", requirePlan("ENTERPRISE"), seedRoutes);
-app.use("/api/accounts", requirePlan("CORE"), accountsRoutes);
-app.use("/api/graphiq", requirePlan("CORE"), graphiqRoutes);
-app.use("/api/metrics", requirePlan("GROWTH"), metricsRoutes);
-app.use("/api/me", meRoutes);
-app.use("/api/ai", requirePlan("CORE"), aiRoutes);
-app.use("/api/export", requirePlan("GROWTH"), exportRoutes);
-app.use("/api/attribution", requirePlan("GROWTH"), attributionRoutes);
-app.use("/api/operator", requirePlan("ENTERPRISE"), operatorRoutes);
+app.use(
+  "/api/invites",
+  requirePlan("CORE"),
+  invitesRoutes
+);
 
-/** -------------------- 404 fallback LAST -------------------- */
+app.use(
+  "/api/members",
+  requirePlan("CORE"),
+  membersRoutes
+);
+
+app.use(
+  "/api/revenue-stability",
+  requirePlan("CORE"),
+  revenueStabilityRouter
+);
+
+app.use(
+  "/api/revenue-intel",
+  requirePlan("CORE"),
+  revenueIntelRouter
+);
+
+app.use(
+  "/api/partners",
+  requirePlan("CORE"),
+  partnersRoutes
+);
+
+app.use(
+  "/api/clients",
+  requirePlan("CORE"),
+  clientsRouter
+);
+
+app.use(
+  "/api/deals",
+  requirePlan("CORE"),
+  dealsRouter
+);
+
+app.use(
+  "/api/atlas",
+  requirePlan("CORE"),
+  atlasRoutes
+);
+
+app.use(
+  "/api/org",
+  requirePlan("CORE"),
+  orgRoutes
+);
+
+app.use(
+  "/api/organizations",
+  requirePlan("CORE"),
+  organizationsRoutes
+);
+
+app.use(
+  "/api/accounts",
+  requirePlan("CORE"),
+  accountsRoutes
+);
+
+app.use(
+  "/api/graphiq",
+  requirePlan("CORE"),
+  graphiqRoutes
+);
+
+/**
+ * GROWTH PLAN ROUTES
+ */
+app.use(
+  "/api/forecast",
+  requirePlan("GROWTH"),
+  forecastRoutes
+);
+
+app.use(
+  "/api/deal-intel",
+  requirePlan("GROWTH"),
+  dealIntelRouter
+);
+
+app.use(
+  "/api/metrics",
+  requirePlan("GROWTH"),
+  metricsRoutes
+);
+
+app.use(
+  "/api/ai",
+  requirePlan("GROWTH"),
+  aiRoutes
+);
+
+app.use(
+  "/api/export",
+  requirePlan("GROWTH"),
+  exportRoutes
+);
+
+app.use(
+  "/api/attribution",
+  requirePlan("GROWTH"),
+  attributionRoutes
+);
+
+/**
+ * ENTERPRISE PLAN ROUTES
+ */
+app.use(
+  "/api/atlas",
+  requirePlan("ENTERPRISE"),
+  atlasOperator
+);
+
+app.use(
+  "/api/operator",
+  requirePlan("ENTERPRISE"),
+  operatorRoutes
+);
+
+app.use(
+  "/api/seed",
+  requirePlan("ENTERPRISE"),
+  seedRoutes
+);
+
+/**
+ * 404 fallback
+ */
 app.use((req, res) => {
-  res.status(404).json({
+  return res.status(404).json({
     ok: false,
     message: "Not Found",
     path: req.originalUrl,
   });
 });
 
-/** -------------------- Global error handler -------------------- */
+/**
+ * Global error handler
+ */
 app.use((err, req, res, next) => {
-  console.error("❌ Express error:", err);
+  console.error("Express error:", err);
 
   if (res.headersSent) {
     return next(err);
@@ -175,79 +374,136 @@ app.use((err, req, res, next) => {
 
   return res.status(err.status || 500).json({
     ok: false,
-    message: err.message || "Internal Server Error",
+    message:
+      err.message || "Internal Server Error",
   });
 });
 
-/** -------------------- Boot -------------------- */
+/**
+ * Server startup
+ */
 const PORT = Number(process.env.PORT) || 5001;
-const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
+
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  process.env.MONGODB_URI;
 
 let server;
+let syncStarted = false;
 
 async function start() {
   try {
-    console.log("ENV PORT:", PORT);
-    console.log("ENV MONGO_URI exists?", !!MONGO_URI);
-    console.log("ENV STRIPE_SECRET_KEY exists?", !!process.env.STRIPE_SECRET_KEY);
-    console.log("ENV APP_BASE_URL:", process.env.APP_BASE_URL);
-    console.log("Allowed origins:", allowedOrigins);
-
     if (!MONGO_URI) {
-      console.error("❌ Missing MONGO_URI (or MONGODB_URI) in backend/.env");
+      console.error(
+        "Missing MONGO_URI or MONGODB_URI."
+      );
       process.exit(1);
     }
 
+    if (!process.env.STRIPE_SECRET_KEY) {
+      console.warn(
+        "STRIPE_SECRET_KEY is not configured."
+      );
+    }
+
+    if (!process.env.STRIPE_WEBHOOK_SECRET) {
+      console.warn(
+        "STRIPE_WEBHOOK_SECRET is not configured."
+      );
+    }
+
     await mongoose.connect(MONGO_URI);
-    console.log("✅ MongoDB connected");
 
-    server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+    console.log("MongoDB connected");
 
-  // 🚀 Start integration auto-sync AFTER server + DB are ready
-  startIntegrationAutoSync();
-  console.log("✅ Integration auto-sync started");
-});
+    server = app.listen(
+      PORT,
+      "0.0.0.0",
+      () => {
+        console.log(
+          `Server listening on port ${PORT}`
+        );
+
+        if (!syncStarted) {
+          syncStarted = true;
+
+          try {
+            startIntegrationAutoSync();
+            console.log(
+              "Integration auto-sync started"
+            );
+          } catch (err) {
+            console.error(
+              "Integration auto-sync failed to start:",
+              err
+            );
+          }
+        }
+      }
+    );
   } catch (err) {
-    console.error("❌ MongoDB connection error:", err?.message || err);
+    console.error(
+      "Server startup error:",
+      err?.message || err
+    );
+
     process.exit(1);
   }
 }
 
 start();
 
-/** -------------------- Process safety -------------------- */
+/**
+ * Process safety
+ */
 process.on("unhandledRejection", (err) => {
-  console.error("❌ unhandledRejection:", err);
+  console.error("Unhandled rejection:", err);
 });
 
 process.on("uncaughtException", (err) => {
-  console.error("❌ uncaughtException:", err);
+  console.error("Uncaught exception:", err);
 });
 
 async function shutdown(signal) {
   try {
-    console.log(`\n${signal} received. Shutting down gracefully...`);
+    console.log(
+      `${signal} received. Shutting down gracefully.`
+    );
 
     if (server) {
       await new Promise((resolve, reject) => {
         server.close((err) => {
-          if (err) return reject(err);
+          if (err) {
+            reject(err);
+            return;
+          }
+
           resolve();
         });
       });
-      console.log("✅ HTTP server closed");
+
+      console.log("HTTP server closed");
     }
 
     await mongoose.connection.close();
-    console.log("✅ MongoDB connection closed");
+
+    console.log("MongoDB connection closed");
 
     process.exit(0);
   } catch (err) {
-    console.error("❌ Error during shutdown:", err);
+    console.error(
+      "Shutdown error:",
+      err
+    );
+
     process.exit(1);
   }
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () =>
+  shutdown("SIGTERM")
+);
+
+process.on("SIGINT", () =>
+  shutdown("SIGINT")
+);
