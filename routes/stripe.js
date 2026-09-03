@@ -1,389 +1,750 @@
+// backend/routes/stripe.js
 import express from "express";
 import Stripe from "stripe";
+import mongoose from "mongoose";
+
 import Organization from "../models/Organization.js";
+import Membership from "../models/Membership.js";
+import User from "../models/User.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-const PRICE_TO_PLAN = {
-  price_1TC9EyKmVYjJJZfS0ung29G2: "SCALE",
-  price_1TC9FwKmVYjJJZfSAgSN5oK8: "GROWTH",
-  price_1TC9GUKmVYjJJZfS8E3rxQoG: "ENTERPRISE",
+const stripe = stripeSecretKey
+  ? new Stripe(stripeSecretKey)
+  : null;
+
+const PLAN_CONFIG = {
+  SCALE: {
+    name: "Atlas Core",
+    priceId: process.env.STRIPE_PRICE_CORE || "",
+  },
+  GROWTH: {
+    name: "Atlas Growth",
+    priceId: process.env.STRIPE_PRICE_GROWTH || "",
+  },
+  ENTERPRISE: {
+    name: "Atlas Enterprise",
+    priceId: process.env.STRIPE_PRICE_ENTERPRISE || "",
+  },
 };
 
-function normalizePlanFromPrice(priceId = "") {
-  return PRICE_TO_PLAN[String(priceId)] || "SCALE";
+function toObjectId(value) {
+  if (!value) return null;
+
+  const stringValue = String(value);
+
+  return mongoose.Types.ObjectId.isValid(stringValue)
+    ? new mongoose.Types.ObjectId(stringValue)
+    : null;
+}
+
+function normalizePlan(value) {
+  const plan = String(value || "")
+    .trim()
+    .toUpperCase();
+
+  if (plan === "CORE") return "SCALE";
+  if (plan === "SCALE") return "SCALE";
+  if (plan === "GROWTH") return "GROWTH";
+  if (plan === "ENTERPRISE") return "ENTERPRISE";
+
+  return "";
+}
+
+function planFromPriceId(priceId) {
+  const match = Object.entries(PLAN_CONFIG).find(
+    ([, config]) =>
+      config.priceId &&
+      config.priceId === String(priceId || "")
+  );
+
+  return match?.[0] || "";
 }
 
 function getFrontendUrl() {
-  return process.env.FRONTEND_URL || "https://app.atlasrevenueai.com";
+  return String(
+    process.env.FRONTEND_URL ||
+      process.env.APP_FRONTEND_URL ||
+      "https://app.atlasrevenueai.com"
+  ).replace(/\/+$/, "");
 }
 
-function resolveOrgId(req) {
-  return (
-    req.body?.orgId ||
-    req.headers["x-org-id"] ||
-    req.headers["x-workspace-id"] ||
-    req.user?.orgId ||
-    req.user?.activeWorkspace ||
-    ""
+function stripeReady() {
+  return Boolean(
+    stripe &&
+      stripeSecretKey &&
+      stripeWebhookSecret
   );
 }
 
-function buildBillingState({
-  stripeCustomerId = null,
-  stripeSubscriptionId = null,
-  stripePriceId = null,
-  status = "inactive",
-  currentPeriodEnd = null,
-  existingBilling = {},
-}) {
+function currentPeriodEnd(subscription) {
+  const unixValue =
+    subscription?.current_period_end ||
+    subscription?.items?.data?.[0]?.current_period_end ||
+    null;
+
+  return unixValue
+    ? new Date(unixValue * 1000)
+    : null;
+}
+
+function subscriptionAccessState(status) {
+  const normalized = String(status || "").toLowerCase();
+
+  if (normalized === "active") {
+    return {
+      billingStatus: "active",
+      paymentStatus: "paid",
+      accessStatus: "active",
+      approvedForAccess: true,
+    };
+  }
+
+  if (normalized === "trialing") {
+    return {
+      billingStatus: "trialing",
+      paymentStatus: "trialing",
+      accessStatus: "active",
+      approvedForAccess: true,
+    };
+  }
+
+  if (normalized === "past_due") {
+    return {
+      billingStatus: "past_due",
+      paymentStatus: "past_due",
+      accessStatus: "suspended",
+      approvedForAccess: false,
+    };
+  }
+
+  if (
+    [
+      "canceled",
+      "unpaid",
+      "incomplete_expired",
+      "paused",
+    ].includes(normalized)
+  ) {
+    return {
+      billingStatus: normalized,
+      paymentStatus:
+        normalized === "canceled"
+          ? "canceled"
+          : normalized,
+      accessStatus: "suspended",
+      approvedForAccess: false,
+    };
+  }
+
   return {
-    ...(existingBilling || {}),
-    stripeCustomerId: stripeCustomerId ?? existingBilling?.stripeCustomerId ?? null,
-    stripeSubscriptionId: stripeSubscriptionId ?? existingBilling?.stripeSubscriptionId ?? null,
-    stripePriceId: stripePriceId ?? existingBilling?.stripePriceId ?? null,
-    status,
-    currentPeriodEnd: currentPeriodEnd ?? existingBilling?.currentPeriodEnd ?? null,
+    billingStatus: normalized || "pending",
+    paymentStatus: "pending",
+    accessStatus: "pending",
+    approvedForAccess: false,
   };
 }
 
-router.post("/create-checkout-session", express.json(), async (req, res) => {
-  try {
-    const { priceId, email } = req.body || {};
-    const orgId = resolveOrgId(req);
+async function getAuthorizedWorkspace(req, options = {}) {
+  const requireManager = Boolean(options.requireManager);
 
-    if (!priceId) {
-      return res.status(400).json({ error: "priceId is required" });
-    }
+  const userId = toObjectId(
+    req.user?.userId ||
+      req.user?._id ||
+      req.user?.id
+  );
 
-    if (!orgId) {
-      return res.status(400).json({ error: "orgId is required" });
-    }
+  const orgId = toObjectId(
+    req.user?.orgId ||
+      req.headers["x-org-id"] ||
+      req.headers["x-workspace-id"]
+  );
 
-    const org = await Organization.findById(orgId);
-
-    if (!org) {
-      return res.status(404).json({ error: "Organization not found" });
-    }
-
-    const targetPlan = normalizePlanFromPrice(priceId);
-    const frontendUrl = getFrontendUrl();
-
-    const checkoutPayload = {
-      mode: "subscription",
-      payment_method_types: ["card"],
-      line_items: [{ price: priceId, quantity: 1 }],
-      metadata: {
-        orgId: String(org._id),
-        targetPlan,
-        priceId: String(priceId),
+  if (!userId || !orgId) {
+    return {
+      error: {
+        status: 400,
+        message: "Missing workspace context.",
       },
-      subscription_data: {
-        metadata: {
-          orgId: String(org._id),
-          targetPlan,
-          priceId: String(priceId),
-        },
-      },
-      success_url: `${frontendUrl}/billing-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${frontendUrl}/billing?checkout=cancelled`,
     };
+  }
 
-    if (org?.billing?.stripeCustomerId) {
-      checkoutPayload.customer = org.billing.stripeCustomerId;
-    } else if (email) {
-      checkoutPayload.customer_email = email;
+  const membership = await Membership.findOne({
+    userId,
+    orgId,
+    status: { $nin: ["disabled", "suspended"] },
+  }).lean();
+
+  if (!membership) {
+    return {
+      error: {
+        status: 403,
+        message:
+          "You do not have access to this workspace.",
+      },
+    };
+  }
+
+  const role = String(
+    membership.role || ""
+  ).toLowerCase();
+
+  if (
+    requireManager &&
+    !["owner", "admin"].includes(role)
+  ) {
+    return {
+      error: {
+        status: 403,
+        message:
+          "Only workspace owners and admins can manage billing.",
+      },
+    };
+  }
+
+  const organization = await Organization.findById(orgId);
+
+  if (!organization) {
+    return {
+      error: {
+        status: 404,
+        message: "Workspace not found.",
+      },
+    };
+  }
+
+  return {
+    userId,
+    orgId,
+    role,
+    membership,
+    organization,
+  };
+}
+
+async function syncSubscriptionToWorkspace({
+  subscription,
+  organization = null,
+}) {
+  if (!subscription) return null;
+
+  const subscriptionId = subscription.id || null;
+  const customerId = subscription.customer || null;
+  const priceId =
+    subscription.items?.data?.[0]?.price?.id || null;
+
+  const metadataOrgId = toObjectId(
+    subscription.metadata?.orgId
+  );
+
+  let org = organization;
+
+  if (!org && metadataOrgId) {
+    org = await Organization.findById(metadataOrgId);
+  }
+
+  if (!org && subscriptionId) {
+    org = await Organization.findOne({
+      "billing.stripeSubscriptionId":
+        subscriptionId,
+    });
+  }
+
+  if (!org && customerId) {
+    org = await Organization.findOne({
+      "billing.stripeCustomerId": customerId,
+    });
+  }
+
+  if (!org) return null;
+
+  const mappedPlan = planFromPriceId(priceId);
+  const state = subscriptionAccessState(
+    subscription.status
+  );
+
+  if (mappedPlan) {
+    org.plan = mappedPlan;
+  }
+
+  org.paymentStatus = state.paymentStatus;
+  org.accessStatus = state.accessStatus;
+  org.approvedForAccess =
+    state.approvedForAccess;
+
+  org.billing = {
+    ...(org.billing?.toObject
+      ? org.billing.toObject()
+      : org.billing || {}),
+    stripeCustomerId: customerId,
+    stripeSubscriptionId: subscriptionId,
+    stripePriceId: priceId,
+    status: state.billingStatus,
+    currentPeriodEnd:
+      currentPeriodEnd(subscription),
+  };
+
+  if (
+    ["active", "trialing"].includes(
+      String(subscription.status).toLowerCase()
+    )
+  ) {
+    org.demoCompleted = true;
+
+    org.trial = {
+      ...(org.trial?.toObject
+        ? org.trial.toObject()
+        : org.trial || {}),
+      status: "converted",
+    };
+  }
+
+  await org.save();
+
+  return org;
+}
+
+/**
+ * GET /api/stripe/summary
+ * Returns billing information for the active workspace.
+ */
+router.get("/summary", requireAuth, async (req, res) => {
+  try {
+    const context =
+      await getAuthorizedWorkspace(req);
+
+    if (context.error) {
+      return res
+        .status(context.error.status)
+        .json({
+          ok: false,
+          message: context.error.message,
+        });
     }
 
-    const session = await stripe.checkout.sessions.create(checkoutPayload);
+    const { organization, role } = context;
 
-    return res.json({ url: session.url });
+    const billing =
+      organization.billing?.toObject
+        ? organization.billing.toObject()
+        : organization.billing || {};
+
+    return res.json({
+      ok: true,
+      billing: {
+        orgId: String(organization._id),
+        orgName: organization.name,
+        plan: normalizePlan(
+          organization.plan
+        ) || "SCALE",
+        accessStatus:
+          organization.accessStatus || "pending",
+        paymentStatus:
+          organization.paymentStatus || "pending",
+        billingStatus:
+          billing.status ||
+          organization.paymentStatus ||
+          "inactive",
+        currentPeriodEnd:
+          billing.currentPeriodEnd || null,
+        hasStripeCustomer: Boolean(
+          billing.stripeCustomerId
+        ),
+        hasSubscription: Boolean(
+          billing.stripeSubscriptionId
+        ),
+        trial: organization.trial || null,
+        role,
+        canManage: ["owner", "admin"].includes(
+          role
+        ),
+      },
+    });
   } catch (err) {
-    console.error("Stripe checkout failed:", err);
+    console.error(
+      "GET STRIPE SUMMARY ERROR:",
+      err
+    );
+
     return res.status(500).json({
-      error: err?.message || "Stripe checkout failed",
+      ok: false,
+      message:
+        "Unable to load billing information.",
     });
   }
 });
 
-router.post("/create-portal-session", express.json(), async (req, res) => {
-  try {
-    const orgId = resolveOrgId(req);
+/**
+ * POST /api/stripe/create-checkout-session
+ * Starts a new subscription for an owner/admin.
+ */
+router.post(
+  "/create-checkout-session",
+  express.json(),
+  requireAuth,
+  async (req, res) => {
+    try {
+      if (!stripe) {
+        return res.status(503).json({
+          ok: false,
+          message:
+            "Stripe is not configured.",
+        });
+      }
 
-    if (!orgId) {
-      return res.status(400).json({ error: "orgId is required" });
+      const context =
+        await getAuthorizedWorkspace(req, {
+          requireManager: true,
+        });
+
+      if (context.error) {
+        return res
+          .status(context.error.status)
+          .json({
+            ok: false,
+            message:
+              context.error.message,
+          });
+      }
+
+      const { organization, userId } = context;
+      const requestedPlan = normalizePlan(
+        req.body?.plan
+      );
+
+      if (
+        !requestedPlan ||
+        !PLAN_CONFIG[requestedPlan]
+      ) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            "Select a valid Atlas plan.",
+        });
+      }
+
+      const priceId =
+        PLAN_CONFIG[requestedPlan].priceId;
+
+      if (!priceId) {
+        return res.status(503).json({
+          ok: false,
+          message: `${PLAN_CONFIG[requestedPlan].name} is not configured in Stripe.`,
+        });
+      }
+
+      const existingSubscriptionId =
+        organization.billing
+          ?.stripeSubscriptionId;
+
+      const existingCustomerId =
+        organization.billing
+          ?.stripeCustomerId;
+
+      if (
+        existingSubscriptionId &&
+        existingCustomerId
+      ) {
+        return res.status(409).json({
+          ok: false,
+          code: "USE_BILLING_PORTAL",
+          message:
+            "This workspace already has a subscription. Use Manage Billing to change its plan.",
+        });
+      }
+
+      const user = await User.findById(userId)
+        .select("email")
+        .lean();
+
+      const checkoutPayload = {
+        mode: "subscription",
+        line_items: [
+          {
+            price: priceId,
+            quantity: 1,
+          },
+        ],
+        allow_promotion_codes: true,
+        success_url: `${getFrontendUrl()}/billing?checkout=success`,
+        cancel_url: `${getFrontendUrl()}/billing?checkout=cancelled`,
+        metadata: {
+          orgId: String(organization._id),
+          targetPlan: requestedPlan,
+        },
+        subscription_data: {
+          metadata: {
+            orgId: String(
+              organization._id
+            ),
+            targetPlan: requestedPlan,
+          },
+        },
+      };
+
+      if (existingCustomerId) {
+        checkoutPayload.customer =
+          existingCustomerId;
+      } else if (user?.email) {
+        checkoutPayload.customer_email =
+          user.email;
+      }
+
+      const session =
+        await stripe.checkout.sessions.create(
+          checkoutPayload
+        );
+
+      return res.json({
+        ok: true,
+        url: session.url,
+      });
+    } catch (err) {
+      console.error(
+        "CREATE CHECKOUT SESSION ERROR:",
+        err
+      );
+
+      return res.status(500).json({
+        ok: false,
+        message:
+          "Unable to start secure checkout.",
+      });
     }
+  }
+);
 
-    const org = await Organization.findById(orgId).lean();
+/**
+ * POST /api/stripe/create-portal-session
+ * Opens Stripe’s hosted subscription manager.
+ */
+router.post(
+  "/create-portal-session",
+  express.json(),
+  requireAuth,
+  async (req, res) => {
+    try {
+      if (!stripe) {
+        return res.status(503).json({
+          ok: false,
+          message:
+            "Stripe is not configured.",
+        });
+      }
 
-    if (!org) {
-      return res.status(404).json({ error: "Organization not found" });
+      const context =
+        await getAuthorizedWorkspace(req, {
+          requireManager: true,
+        });
+
+      if (context.error) {
+        return res
+          .status(context.error.status)
+          .json({
+            ok: false,
+            message:
+              context.error.message,
+          });
+      }
+
+      const customerId =
+        context.organization.billing
+          ?.stripeCustomerId;
+
+      if (!customerId) {
+        return res.status(400).json({
+          ok: false,
+          code: "NO_STRIPE_CUSTOMER",
+          message:
+            "Choose a plan before opening the billing portal.",
+        });
+      }
+
+      const session =
+        await stripe.billingPortal.sessions.create(
+          {
+            customer: customerId,
+            return_url: `${getFrontendUrl()}/billing`,
+          }
+        );
+
+      return res.json({
+        ok: true,
+        url: session.url,
+      });
+    } catch (err) {
+      console.error(
+        "CREATE PORTAL SESSION ERROR:",
+        err
+      );
+
+      return res.status(500).json({
+        ok: false,
+        message:
+          "Unable to open the billing portal.",
+      });
     }
+  }
+);
 
-    const customerId = org?.billing?.stripeCustomerId;
-
-    if (!customerId) {
-      return res.status(400).json({
-        error: "No Stripe customer found yet. Choose a plan first.",
+/**
+ * POST /api/stripe/webhook
+ *
+ * This endpoint must receive the untouched raw body.
+ */
+router.post(
+  "/webhook",
+  express.raw({
+    type: "application/json",
+  }),
+  async (req, res) => {
+    if (!stripe || !stripeWebhookSecret) {
+      return res.status(503).json({
+        received: false,
+        message:
+          "Stripe webhook is not configured.",
       });
     }
 
-    const portalSession = await stripe.billingPortal.sessions.create({
-      customer: customerId,
-      return_url: `${getFrontendUrl()}/billing`,
-    });
+    const signature =
+      req.headers["stripe-signature"];
 
-    return res.json({ url: portalSession.url });
-  } catch (err) {
-    console.error("Stripe portal failed:", err);
-    return res.status(500).json({
-      error: err?.message || "Stripe portal failed",
-    });
-  }
-});
+    let event;
 
-router.post("/create-invoice", express.json(), async (req, res) => {
-  try {
-    const { customerId, amount } = req.body || {};
+    try {
+      event =
+        stripe.webhooks.constructEvent(
+          req.body,
+          signature,
+          stripeWebhookSecret
+        );
+    } catch (err) {
+      console.error(
+        "STRIPE WEBHOOK SIGNATURE ERROR:",
+        err?.message
+      );
 
-    if (!customerId) {
-      return res.status(400).json({ error: "customerId is required" });
+      return res
+        .status(400)
+        .send("Invalid Stripe signature.");
     }
 
-    if (!amount) {
-      return res.status(400).json({ error: "amount is required" });
-    }
+    try {
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const checkoutSession =
+            event.data.object;
 
-    await stripe.invoiceItems.create({
-      customer: customerId,
-      amount,
-      currency: "usd",
-      description: "Atlas Revenue AI Invoice",
-    });
+          const subscriptionId =
+            checkoutSession.subscription;
 
-    const invoice = await stripe.invoices.create({
-      customer: customerId,
-      auto_advance: true,
-    });
+          if (subscriptionId) {
+            const subscription =
+              await stripe.subscriptions.retrieve(
+                subscriptionId
+              );
 
-    return res.json(invoice);
-  } catch (err) {
-    console.error("Invoice creation failed:", err);
-    return res.status(500).json({ error: "Invoice creation failed" });
-  }
-});
+            await syncSubscriptionToWorkspace({
+              subscription,
+            });
+          }
 
-// IMPORTANT: Keep webhook as raw body. Do not use express.json() here.
-router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  let event;
+          break;
+        }
 
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error("Webhook signature failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+        case "customer.subscription.created":
+        case "customer.subscription.updated":
+        case "customer.subscription.deleted": {
+          await syncSubscriptionToWorkspace({
+            subscription: event.data.object,
+          });
 
-  try {
-    switch (event.type) {
-      case "checkout.session.completed": {
-        const session = event.data.object;
+          break;
+        }
 
-        const orgId = session?.metadata?.orgId;
-        const targetPlan = session?.metadata?.targetPlan || "SCALE";
-        const stripeCustomerId = session?.customer || null;
-        const stripeSubscriptionId = session?.subscription || null;
-        const stripePriceId = session?.metadata?.priceId || null;
+        case "invoice.paid": {
+          const invoice = event.data.object;
+          const subscriptionId =
+            invoice.subscription;
 
-        if (orgId) {
-          const org = await Organization.findById(orgId);
+          if (subscriptionId) {
+            const subscription =
+              await stripe.subscriptions.retrieve(
+                subscriptionId
+              );
 
-          if (org) {
-            org.plan = targetPlan;
-            org.paymentStatus = "paid";
-            org.accessStatus = "active";
-            org.approvedForAccess = true;
-            org.demoCompleted = true;
-            org.trial = { ...(org.trial || {}), status: "converted" };
+            await syncSubscriptionToWorkspace({
+              subscription,
+            });
+          }
 
-            org.billing = buildBillingState({
-              stripeCustomerId,
-              stripeSubscriptionId,
-              stripePriceId,
-              status: "active",
-              existingBilling: org.billing,
+          break;
+        }
+
+        case "invoice.payment_failed": {
+          const invoice = event.data.object;
+
+          const organization =
+            await Organization.findOne({
+              $or: [
+                {
+                  "billing.stripeSubscriptionId":
+                    invoice.subscription,
+                },
+                {
+                  "billing.stripeCustomerId":
+                    invoice.customer,
+                },
+              ],
             });
 
-            await org.save();
-          }
-        }
+          if (organization) {
+            organization.paymentStatus =
+              "past_due";
+            organization.accessStatus =
+              "suspended";
+            organization.approvedForAccess =
+              false;
 
-        break;
-      }
+            organization.billing = {
+              ...(organization.billing
+                ?.toObject
+                ? organization.billing.toObject()
+                : organization.billing ||
+                  {}),
+              status: "past_due",
+            };
 
-      case "customer.subscription.created":
-      case "customer.subscription.updated": {
-        const subscription = event.data.object;
-
-        const stripeSubscriptionId = subscription?.id || null;
-        const stripeCustomerId = subscription?.customer || null;
-        const stripePriceId = subscription?.items?.data?.[0]?.price?.id || null;
-        const targetPlan = normalizePlanFromPrice(stripePriceId);
-
-        const currentPeriodEnd = subscription?.current_period_end
-          ? new Date(subscription.current_period_end * 1000)
-          : null;
-
-        const org =
-          (subscription?.metadata?.orgId
-            ? await Organization.findById(subscription.metadata.orgId)
-            : null) ||
-          (stripeCustomerId
-            ? await Organization.findOne({ "billing.stripeCustomerId": stripeCustomerId })
-            : null);
-
-        if (org) {
-          const subStatus = String(subscription?.status || "").toLowerCase();
-          const paidLike = subStatus === "active" || subStatus === "trialing";
-
-          org.plan = targetPlan || org.plan;
-          org.paymentStatus = paidLike ? "paid" : "past_due";
-          org.accessStatus = paidLike ? "active" : "suspended";
-          org.approvedForAccess = paidLike;
-          org.demoCompleted = true;
-
-          if (paidLike) {
-            org.trial = { ...(org.trial || {}), status: "converted" };
+            await organization.save();
           }
 
-          org.billing = buildBillingState({
-            stripeCustomerId,
-            stripeSubscriptionId,
-            stripePriceId,
-            status: paidLike ? "active" : "past_due",
-            currentPeriodEnd,
-            existingBilling: org.billing,
-          });
-
-          await org.save();
+          break;
         }
 
-        break;
+        default:
+          break;
       }
 
-      case "invoice.paid": {
-        const invoice = event.data.object;
+      return res.json({
+        received: true,
+      });
+    } catch (err) {
+      console.error(
+        "STRIPE WEBHOOK PROCESSING ERROR:",
+        err
+      );
 
-        const stripeCustomerId = invoice?.customer || null;
-        const stripeSubscriptionId = invoice?.subscription || null;
-        const stripePriceId = invoice?.lines?.data?.[0]?.price?.id || null;
-        const targetPlan = normalizePlanFromPrice(stripePriceId);
-
-        const org = await Organization.findOne({
-          "billing.stripeCustomerId": stripeCustomerId,
-        });
-
-        if (org) {
-          org.plan = targetPlan || org.plan;
-          org.paymentStatus = "paid";
-          org.accessStatus = "active";
-          org.approvedForAccess = true;
-          org.demoCompleted = true;
-          org.trial = { ...(org.trial || {}), status: "converted" };
-
-          org.billing = buildBillingState({
-            stripeCustomerId,
-            stripeSubscriptionId,
-            stripePriceId,
-            status: "active",
-            currentPeriodEnd: invoice?.lines?.data?.[0]?.period?.end
-              ? new Date(invoice.lines.data[0].period.end * 1000)
-              : org.billing?.currentPeriodEnd || null,
-            existingBilling: org.billing,
-          });
-
-          await org.save();
-        }
-
-        break;
-      }
-
-      case "invoice.payment_failed": {
-        const invoice = event.data.object;
-        const stripeCustomerId = invoice?.customer || null;
-
-        const org = await Organization.findOne({
-          "billing.stripeCustomerId": stripeCustomerId,
-        });
-
-        if (org) {
-          org.paymentStatus = "past_due";
-          org.accessStatus = "suspended";
-          org.approvedForAccess = false;
-
-          org.billing = buildBillingState({
-            stripeCustomerId,
-            stripeSubscriptionId: org.billing?.stripeSubscriptionId || null,
-            stripePriceId: org.billing?.stripePriceId || null,
-            status: "past_due",
-            existingBilling: org.billing,
-          });
-
-          await org.save();
-        }
-
-        break;
-      }
-
-      case "customer.subscription.deleted": {
-        const subscription = event.data.object;
-
-        const stripeSubscriptionId = subscription?.id || null;
-        const stripeCustomerId = subscription?.customer || null;
-
-        const org =
-          (stripeSubscriptionId
-            ? await Organization.findOne({ "billing.stripeSubscriptionId": stripeSubscriptionId })
-            : null) ||
-          (stripeCustomerId
-            ? await Organization.findOne({ "billing.stripeCustomerId": stripeCustomerId })
-            : null);
-
-        if (org) {
-          org.paymentStatus = "canceled";
-          org.accessStatus = "suspended";
-          org.approvedForAccess = false;
-
-          org.billing = buildBillingState({
-            stripeCustomerId,
-            stripeSubscriptionId,
-            stripePriceId: org.billing?.stripePriceId || null,
-            status: "canceled",
-            existingBilling: org.billing,
-          });
-
-          await org.save();
-        }
-
-        break;
-      }
-
-      default:
-        console.log(`Unhandled event type ${event.type}`);
+      return res.status(500).json({
+        received: false,
+        message:
+          "Stripe webhook processing failed.",
+      });
     }
-
-    return res.json({ received: true });
-  } catch (err) {
-    console.error("Webhook handling failed:", err);
-    return res.status(500).json({ error: "Webhook handling failed" });
   }
-});
+);
 
 export default router;
