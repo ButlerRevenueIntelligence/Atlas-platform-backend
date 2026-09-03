@@ -335,13 +335,13 @@ app.use(
  */
 app.use(
   "/api/atlas",
-  requirePlan("ENTERPRISE"),
+  requirePlan("GROWTH"),
   atlasOperator
 );
 
 app.use(
   "/api/operator",
-  requirePlan("ENTERPRISE"),
+  requirePlan("GROWTH"),
   operatorRoutes
 );
 
