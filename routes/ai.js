@@ -88,6 +88,76 @@ const DEMO_DEALS = [
   },
 ];
 
+const DEMO_ENRICHMENT = [
+  {
+    accountName: "Northstar Technology Group",
+    owner: "Maya Thompson",
+    risk: "Buyer activity has slowed and the legal review deadline is still unconfirmed.",
+    nextStep: "Have Maya confirm the legal deadline and schedule an executive sponsor call within 48 hours.",
+  },
+  {
+    accountName: "Elevate Financial Partners",
+    owner: "Jordan Lee",
+    risk: "The economic buyer has not participated in the final evaluation.",
+    nextStep: "Bring the economic buyer into the next meeting and confirm the decision process this week.",
+  },
+  {
+    accountName: "Vertex Growth Agency",
+    owner: "Chris Morgan",
+    risk: "The deal is close to its decision date without a confirmed final approval meeting.",
+    nextStep: "Lock the final decision call and verify procurement requirements within 48 hours.",
+  },
+  {
+    accountName: "Summit B2B Solutions",
+    owner: "Taylor Brooks",
+    risk: "Business impact has not been fully validated with the buying committee.",
+    nextStep: "Complete financial-impact discovery and document the buyer's success criteria.",
+  },
+  {
+    accountName: "Atlas Manufacturing",
+    owner: "Alex Carter",
+    risk: "Engagement has weakened and the next buyer action is not confirmed.",
+    nextStep: "Re-engage the champion and establish a dated mutual action plan.",
+  },
+];
+
+function hasUsefulValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== "";
+}
+
+function enrichDemoDeals(deals = []) {
+  if (!deals.length) return DEMO_DEALS;
+
+  return deals.map((deal, index) => {
+    const defaults = DEMO_ENRICHMENT[index % DEMO_ENRICHMENT.length];
+    return {
+      ...deal,
+      accountName: hasUsefulValue(deal.accountName)
+        ? deal.accountName
+        : hasUsefulValue(deal.companyName)
+        ? deal.companyName
+        : defaults.accountName,
+      ownerName: hasUsefulValue(deal.ownerName)
+        ? deal.ownerName
+        : hasUsefulValue(deal.salesRep)
+        ? deal.salesRep
+        : defaults.owner,
+      risk: hasUsefulValue(deal.risk)
+        ? deal.risk
+        : hasUsefulValue(deal.riskReason)
+        ? deal.riskReason
+        : hasUsefulValue(deal.blocker)
+        ? deal.blocker
+        : defaults.risk,
+      nextStep: hasUsefulValue(deal.nextStep)
+        ? deal.nextStep
+        : hasUsefulValue(deal.recommendedAction)
+        ? deal.recommendedAction
+        : defaults.nextStep,
+    };
+  });
+}
+
 function normalizeStage(value) {
   const stage = String(value || "Unknown").trim();
   const lower = stage.toLowerCase();
@@ -127,9 +197,17 @@ function isDealPriorityQuestion(question) {
 
 function normalizeDeal(deal = {}) {
   const amount = safeNum(deal.amount ?? deal.value ?? deal.pipelineValue);
+  const rawProbability = safeNum(
+    deal.probability ?? deal.winProbability ?? deal.confidence
+  );
   const probability = Math.max(
     0,
-    Math.min(100, safeNum(deal.probability ?? deal.winProbability ?? deal.confidence))
+    Math.min(
+      100,
+      rawProbability > 0 && rawProbability <= 1
+        ? rawProbability * 100
+        : rawProbability
+    )
   );
   const closeDate = deal.closeDate || deal.expectedCloseDate || deal.targetCloseDate || null;
   const lastActivityAt =
@@ -431,8 +509,8 @@ router.post("/analyze", requireAuth, async (req, res) => {
         console.error("DEAL PRIORITY LOOKUP ERROR:", dealError);
       }
 
-      if (isDemo && deals.length < 3) {
-        deals = DEMO_DEALS;
+      if (isDemo) {
+        deals = enrichDemoDeals(deals);
       }
 
       const result = buildDealPriorityAnswer({
