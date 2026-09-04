@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import { requireAuth } from "../middleware/auth.js";
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
+import Deal from "../models/Deal.js";
 
 const router = express.Router();
 
@@ -16,6 +17,233 @@ const safeNum = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
+
+const money = (value) =>
+  safeNum(value).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+
+const DEMO_DEALS = [
+  {
+    name: "Northstar Enterprise Expansion",
+    accountName: "Northstar Technology Group",
+    amount: 480000,
+    stage: "Negotiation",
+    probability: 72,
+    daysToClose: 18,
+    daysSinceActivity: 9,
+    owner: "Maya Thompson",
+    nextStep: "Confirm the legal review deadline and schedule an executive sponsor call.",
+    risk: "Legal review is still open and buyer activity has slowed.",
+  },
+  {
+    name: "Elevate Financial Platform Rollout",
+    accountName: "Elevate Financial Partners",
+    amount: 365000,
+    stage: "Proposal",
+    probability: 65,
+    daysToClose: 24,
+    daysSinceActivity: 4,
+    owner: "Jordan Lee",
+    nextStep: "Bring the economic buyer into the next meeting and confirm the decision process.",
+    risk: "The economic buyer has not yet joined the evaluation.",
+  },
+  {
+    name: "Atlas Manufacturing Modernization",
+    accountName: "Atlas Manufacturing",
+    amount: 310000,
+    stage: "Negotiation",
+    probability: 58,
+    daysToClose: 14,
+    daysSinceActivity: 6,
+    owner: "Chris Morgan",
+    nextStep: "Deliver the competitive response and lock a final decision meeting within 48 hours.",
+    risk: "A competitor entered the deal late and the close date is approaching.",
+  },
+  {
+    name: "Summit Revenue Operations Program",
+    accountName: "Summit B2B Solutions",
+    amount: 225000,
+    stage: "Discovery",
+    probability: 35,
+    daysToClose: 46,
+    daysSinceActivity: 3,
+    owner: "Taylor Brooks",
+    nextStep: "Complete discovery and validate the financial impact with the buying committee.",
+    risk: "The opportunity is early stage and business impact has not been validated.",
+  },
+  {
+    name: "Vertex Growth Intelligence Expansion",
+    accountName: "Vertex Growth Agency",
+    amount: 190000,
+    stage: "Proposal",
+    probability: 52,
+    daysToClose: 32,
+    daysSinceActivity: 12,
+    owner: "Alex Carter",
+    nextStep: "Re-engage the champion and confirm whether the proposal remains in the current buying window.",
+    risk: "No meaningful activity has been recorded for 12 days.",
+  },
+];
+
+function normalizeStage(value) {
+  const stage = String(value || "Unknown").trim();
+  const lower = stage.toLowerCase();
+  if (lower.includes("neg")) return "Negotiation";
+  if (lower.includes("prop")) return "Proposal";
+  if (lower.includes("disc")) return "Discovery";
+  if (lower.includes("qual")) return "Qualification";
+  if (lower.includes("won")) return "Closed Won";
+  if (lower.includes("lost")) return "Closed Lost";
+  return stage;
+}
+
+function daysBetween(from, to) {
+  const start = new Date(from);
+  const end = new Date(to);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  return Math.ceil((end.getTime() - start.getTime()) / 86400000);
+}
+
+function isDealPriorityQuestion(question) {
+  const q = String(question || "").toLowerCase();
+  const dealTerms = ["deal", "deals", "opportunity", "opportunities", "pipeline"];
+  const priorityTerms = [
+    "focus",
+    "prioritize",
+    "priority",
+    "work on",
+    "attention",
+    "close",
+    "at risk",
+    "save",
+    "next",
+  ];
+  return dealTerms.some((term) => q.includes(term)) &&
+    priorityTerms.some((term) => q.includes(term));
+}
+
+function normalizeDeal(deal = {}) {
+  const amount = safeNum(deal.amount ?? deal.value ?? deal.pipelineValue);
+  const probability = Math.max(
+    0,
+    Math.min(100, safeNum(deal.probability ?? deal.winProbability ?? deal.confidence))
+  );
+  const closeDate = deal.closeDate || deal.expectedCloseDate || deal.targetCloseDate || null;
+  const lastActivityAt =
+    deal.lastActivityAt || deal.lastActivityDate || deal.lastContactedAt || deal.updatedAt || null;
+  const daysToClose =
+    deal.daysToClose ?? (closeDate ? daysBetween(new Date(), closeDate) : null);
+  const daysSinceActivity =
+    deal.daysSinceActivity ??
+    (lastActivityAt ? Math.max(0, daysBetween(lastActivityAt, new Date())) : null);
+
+  return {
+    id: String(deal._id || deal.id || ""),
+    name: String(deal.name || deal.title || deal.dealName || "Untitled deal"),
+    accountName: String(
+      deal.accountName || deal.companyName || deal.account?.name || deal.client?.name || "Account not recorded"
+    ),
+    amount,
+    stage: normalizeStage(deal.stage || deal.status),
+    probability,
+    closeDate,
+    daysToClose,
+    daysSinceActivity,
+    owner: String(
+      deal.ownerName || deal.owner?.name || deal.assignedTo?.name || deal.salesRep || "Owner not recorded"
+    ),
+    nextStep: String(deal.nextStep || deal.recommendedAction || "Confirm the next buyer action and its due date."),
+    risk: String(deal.risk || deal.riskReason || deal.blocker || deal.notes || "No explicit blocker is recorded."),
+  };
+}
+
+function scoreDeal(deal) {
+  const stageWeight = {
+    Negotiation: 30,
+    Proposal: 24,
+    Qualification: 14,
+    Discovery: 10,
+  }[deal.stage] || 6;
+  const valueScore = Math.min(30, deal.amount / 20000);
+  const probabilityScore = deal.probability * 0.2;
+  const closeScore =
+    deal.daysToClose == null
+      ? 3
+      : deal.daysToClose < 0
+      ? 18
+      : deal.daysToClose <= 30
+      ? 16
+      : deal.daysToClose <= 60
+      ? 9
+      : 3;
+  const inactivityScore =
+    deal.daysSinceActivity == null
+      ? 4
+      : deal.daysSinceActivity >= 14
+      ? 14
+      : deal.daysSinceActivity >= 7
+      ? 10
+      : 4;
+
+  return Math.round((stageWeight + valueScore + probabilityScore + closeScore + inactivityScore) * 10) / 10;
+}
+
+function explainPriority(deal) {
+  const reasons = [];
+  if (deal.amount > 0) reasons.push(`${money(deal.amount)} in potential revenue`);
+  if (["Negotiation", "Proposal"].includes(deal.stage)) reasons.push(`${deal.stage.toLowerCase()}-stage momentum`);
+  if (deal.daysToClose != null && deal.daysToClose >= 0 && deal.daysToClose <= 30) {
+    reasons.push(`a close date inside ${deal.daysToClose} days`);
+  }
+  if (deal.daysToClose != null && deal.daysToClose < 0) reasons.push("an overdue close date");
+  if (deal.daysSinceActivity != null && deal.daysSinceActivity >= 7) {
+    reasons.push(`${deal.daysSinceActivity} days without recorded activity`);
+  }
+  return reasons.length ? reasons.join(", ") : "its combination of value, stage, and execution risk";
+}
+
+function buildDealPriorityAnswer({ deals, orgName, isDemo }) {
+  const ranked = deals
+    .map(normalizeDeal)
+    .filter((deal) => !["Closed Won", "Closed Lost"].includes(deal.stage))
+    .map((deal) => ({ ...deal, priorityScore: scoreDeal(deal) }))
+    .sort((a, b) => b.priorityScore - a.priorityScore || b.amount - a.amount)
+    .slice(0, 3);
+
+  if (!ranked.length) {
+    return `I cannot rank deals for ${orgName} yet because no open deal records are available. Connect or add deal-level data including amount, stage, probability, close date, owner, last activity, and next step.`;
+  }
+
+  const totalValue = ranked.reduce((sum, deal) => sum + deal.amount, 0);
+  const weightedValue = ranked.reduce(
+    (sum, deal) => sum + deal.amount * (deal.probability / 100),
+    0
+  );
+
+  const detail = ranked
+    .map(
+      (deal, index) => `${index + 1}. ${deal.name} — ${money(deal.amount)} | ${deal.stage} | ${deal.probability}% probability
+Account: ${deal.accountName}
+Owner: ${deal.owner}
+Why it matters: ${explainPriority(deal)}.
+Risk: ${deal.risk}
+Next action: ${deal.nextStep}`
+    )
+    .join("\n\n");
+
+  return `${isDemo ? "Demo analysis — " : ""}Focus leadership attention on these three deals first:
+
+${detail}
+
+Leadership takeaway: These deals represent ${money(totalValue)} in total pipeline and approximately ${money(weightedValue)} in probability-weighted value. Review their next steps, owners, and decision dates in the next pipeline meeting.${
+    isDemo
+      ? " This recommendation was generated from the Atlas sample revenue dataset and demonstrates how the same ranking will use connected workspace data."
+      : ""
+  }`;
+}
 
 function buildInsights(kpis = {}) {
   const revenue30 = safeNum(kpis.revenue30 ?? 0);
@@ -184,6 +412,53 @@ router.post("/analyze", requireAuth, async (req, res) => {
     const question = String(req.body?.question || "").trim();
     const metrics = req.body?.metrics || {};
     const context = req.body?.context || {};
+
+    if (isDealPriorityQuestion(question)) {
+      const workspaceMode = String(context?.workspaceMode || "live").toLowerCase();
+      const isDemo = workspaceMode === "demo";
+
+      let deals = [];
+
+      try {
+        deals = await Deal.find({
+          orgId,
+          status: { $nin: ["archived", "closed_lost", "lost"] },
+        })
+          .sort({ amount: -1, updatedAt: -1 })
+          .limit(50)
+          .lean();
+      } catch (dealError) {
+        console.error("DEAL PRIORITY LOOKUP ERROR:", dealError);
+      }
+
+      if (isDemo && deals.length < 3) {
+        deals = DEMO_DEALS;
+      }
+
+      const result = buildDealPriorityAnswer({
+        deals,
+        orgName: org.name || context?.orgName || "this workspace",
+        isDemo,
+      });
+
+      org.usage = org.usage || {};
+      org.usage.aiAnalyses = safeNum(org.usage.aiAnalyses) + 1;
+      await org.save();
+
+      return res.json({
+        ok: true,
+        result,
+        usage: org.usage,
+        source: "atlas-deal-priority-engine",
+        intelligence: {
+          internal: true,
+          external: false,
+          dealRanking: true,
+          dealsEvaluated: deals.length,
+          workspaceMode,
+        },
+      });
+    }
 
     const externalCompanyIntelligence =
       context?.externalCompanyIntelligence || null;
