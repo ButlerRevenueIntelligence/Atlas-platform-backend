@@ -3554,47 +3554,56 @@ router.post(
       /*
        * Pull companies, deals and deal pipeline metadata.
        */
-      const [
-        hubSpotCompanies,
-        hubSpotDeals,
-        hubSpotPipelines,
-      ] = await Promise.all([
-        hubSpotGetAllObjects(
-          connection,
-          "companies",
-          [
-            "name",
-            "domain",
-            "website",
-            "industry",
-            "phone",
-            "city",
-            "state",
-            "country",
-            "annualrevenue",
-            "numberofemployees",
-            "lifecyclestage",
-            "hs_lastmodifieddate",
-          ]
-        ),
+      /*
+ * Refresh/validate the HubSpot token once before
+ * starting the CRM requests.
+ *
+ * Run these sequentially so multiple requests do not
+ * try to save the same IntegrationConnection document
+ * at the same time during token refresh.
+ */
+await ensureHubSpotAccessToken(connection);
 
-        hubSpotGetAllObjects(
-          connection,
-          "deals",
-          [
-            "dealname",
-            "amount",
-            "dealstage",
-            "pipeline",
-            "closedate",
-            "createdate",
-            "hs_lastmodifieddate",
-          ],
-          ["companies"]
-        ),
+const hubSpotCompanies =
+  await hubSpotGetAllObjects(
+    connection,
+    "companies",
+    [
+      "name",
+      "domain",
+      "website",
+      "industry",
+      "phone",
+      "city",
+      "state",
+      "country",
+      "annualrevenue",
+      "numberofemployees",
+      "lifecyclestage",
+      "hs_lastmodifieddate",
+    ]
+  );
 
-        hubSpotGetDealPipelines(connection),
-      ]);
+const hubSpotDeals =
+  await hubSpotGetAllObjects(
+    connection,
+    "deals",
+    [
+      "dealname",
+      "amount",
+      "dealstage",
+      "pipeline",
+      "closedate",
+      "createdate",
+      "hs_lastmodifieddate",
+    ],
+    ["companies"]
+  );
+
+const hubSpotPipelines =
+  await hubSpotGetDealPipelines(
+    connection
+  );
 
       const stageMap =
         buildHubSpotStageMap(
