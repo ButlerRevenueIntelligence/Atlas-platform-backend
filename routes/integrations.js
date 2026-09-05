@@ -1705,6 +1705,7 @@ router.post("/disconnect", requireAuth, async (req, res) => {
     }
 
     const org = await ensureOrg(orgId);
+
     if (!org) {
       return res.status(404).json({
         ok: false,
@@ -1713,6 +1714,7 @@ router.post("/disconnect", requireAuth, async (req, res) => {
     }
 
     const exists = getCatalogItem(id);
+
     if (!exists) {
       return res.status(400).json({
         ok: false,
@@ -1720,28 +1722,150 @@ router.post("/disconnect", requireAuth, async (req, res) => {
       });
     }
 
-    let connection = await IntegrationConnection.findOne({ orgId, provider: id });
+    /*
+     * Include hidden OAuth fields because HubSpot
+     * requires an active OAuth access token in order
+     * to uninstall the app from the customer's portal.
+     */
+    let connection =
+      await IntegrationConnection.findOne({
+        orgId,
+        provider: id,
+      }).select("+accessToken +refreshToken");
 
     if (!connection) {
-      connection = new IntegrationConnection({ orgId, provider: id });
+      connection = new IntegrationConnection({
+        orgId,
+        provider: id,
+      });
     }
 
-    if (typeof connection.markDisconnected === "function") {
+    /*
+     * --------------------------------
+     * HUBSPOT UNINSTALL
+     * --------------------------------
+     *
+     * HubSpot certification requires the public app
+     * uninstall endpoint rather than only clearing
+     * Atlas's local token storage.
+     */
+    if (
+      id === "hubspot" &&
+      connection.status === "connected"
+    ) {
+      try {
+        /*
+         * Make sure we have a current access token.
+         * This can refresh the token first if needed.
+         */
+        const accessToken =
+          await ensureHubSpotAccessToken(
+            connection
+          );
+
+        const uninstallResponse = await fetch(
+          "https://api.hubspot.com/appinstalls/v3/external-install",
+          {
+            method: "DELETE",
+            headers: {
+              Accept: "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        );
+
+        /*
+         * HubSpot may return an empty body on success,
+         * so don't assume JSON is always present.
+         */
+        let uninstallData = {};
+
+        const responseText =
+          await uninstallResponse.text();
+
+        if (responseText) {
+          try {
+            uninstallData =
+              JSON.parse(responseText);
+          } catch {
+            uninstallData = {
+              message: responseText,
+            };
+          }
+        }
+
+        if (!uninstallResponse.ok) {
+          throw new Error(
+            uninstallData?.message ||
+              uninstallData?.error_description ||
+              uninstallData?.error ||
+              `HubSpot uninstall failed with status ${uninstallResponse.status}`
+          );
+        }
+      } catch (hubSpotErr) {
+        console.error(
+          "HubSpot uninstall error:",
+          hubSpotErr
+        );
+
+        /*
+         * Do NOT erase the local token if HubSpot
+         * uninstall failed.
+         *
+         * Keeping the token lets us retry instead of
+         * leaving Atlas disconnected locally while
+         * the app is still installed in HubSpot.
+         */
+        connection.lastError =
+          String(
+            hubSpotErr?.message ||
+              "HubSpot uninstall failed"
+          );
+
+        await connection.save();
+
+        return res.status(502).json({
+          ok: false,
+          message:
+            "HubSpot could not be fully disconnected. The HubSpot installation is still active.",
+          error:
+            hubSpotErr?.message ||
+            "HubSpot uninstall failed",
+        });
+      }
+    }
+
+    /*
+     * --------------------------------
+     * LOCAL DISCONNECT
+     * --------------------------------
+     *
+     * Only clear Atlas's stored credentials after
+     * HubSpot uninstall succeeds.
+     */
+    if (
+      typeof connection.markDisconnected ===
+      "function"
+    ) {
       connection.markDisconnected();
     } else {
       connection.status = "disconnected";
       connection.mode = "demo";
       connection.connectedAt = null;
-      connection.disconnectedAt = new Date();
+      connection.disconnectedAt =
+        new Date();
       connection.lastSyncAt = null;
-      connection.lastSyncStatus = "never";
+      connection.lastSyncStatus =
+        "never";
       connection.lastError = null;
       connection.accessToken = null;
       connection.refreshToken = null;
       connection.tokenType = null;
       connection.tokenExpiresAt = null;
-      connection.externalAccountId = null;
-      connection.externalAccountName = null;
+      connection.externalAccountId =
+        null;
+      connection.externalAccountName =
+        null;
       connection.scopes = [];
       connection.syncCursor = null;
       connection.settings = {};
@@ -1750,24 +1874,34 @@ router.post("/disconnect", requireAuth, async (req, res) => {
 
     await connection.save();
 
-    await updateOrgIntegrationSummary(orgId, id, {
-      connected: false,
-      connectedAt: null,
-      lastSync: null,
-      mode: "demo",
-    });
+    await updateOrgIntegrationSummary(
+      orgId,
+      id,
+      {
+        connected: false,
+        connectedAt: null,
+        lastSync: null,
+        mode: "demo",
+      }
+    );
 
     return res.json({
       ok: true,
-      message: `${exists.name} disconnected`,
-      integrations: await formatIntegrations(orgId),
+      message:
+        `${exists.name} disconnected`,
+      integrations:
+        await formatIntegrations(orgId),
     });
   } catch (err) {
-    console.error("DISCONNECT integration error:", err);
+    console.error(
+      "DISCONNECT integration error:",
+      err
+    );
 
     return res.status(500).json({
       ok: false,
-      message: "Failed to disconnect integration",
+      message:
+        "Failed to disconnect integration",
       error: err.message,
     });
   }
