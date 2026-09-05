@@ -56,6 +56,12 @@ const AccountSchema = new Schema(
       index: true,
     },
 
+    phone: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     status: {
       type: String,
       enum: ["Active", "Paused", "Inactive"],
@@ -74,12 +80,33 @@ const AccountSchema = new Schema(
       default: null,
       index: true,
     },
+
+    // External integration identity
+    externalSource: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    externalId: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    // Raw provider record for debugging / future intelligence
+    sourcePayload: {
+      type: Schema.Types.Mixed,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
 /**
- * Keep workspaceId aligned with orgId during transition
+ * Keep workspaceId aligned with orgId during transition.
  */
 AccountSchema.pre("save", function (next) {
   if (!this.workspaceId && this.orgId) {
@@ -91,7 +118,9 @@ AccountSchema.pre("save", function (next) {
       const normalized = this.website.startsWith("http")
         ? this.website
         : `https://${this.website}`;
+
       const url = new URL(normalized);
+
       this.domain = url.hostname.replace(/^www\./, "");
     } catch {
       this.domain = "";
@@ -102,18 +131,58 @@ AccountSchema.pre("save", function (next) {
 });
 
 /**
- * Unique account name per org/workspace
+ * Unique account name per org/workspace.
  */
-AccountSchema.index({ orgId: 1, name: 1 }, { unique: true });
+AccountSchema.index(
+  { orgId: 1, name: 1 },
+  { unique: true }
+);
 
 /**
- * Helpful compound indexes for tenant filtering
+ * Helpful compound indexes for tenant filtering.
  */
-AccountSchema.index({ orgId: 1, status: 1, createdAt: -1 });
-AccountSchema.index({ orgId: 1, industry: 1 });
-AccountSchema.index({ orgId: 1, archivedAt: 1 });
+AccountSchema.index({
+  orgId: 1,
+  status: 1,
+  createdAt: -1,
+});
+
+AccountSchema.index({
+  orgId: 1,
+  industry: 1,
+});
+
+AccountSchema.index({
+  orgId: 1,
+  archivedAt: 1,
+});
+
+/**
+ * Prevent duplicate records from the same external provider.
+ */
+AccountSchema.index(
+  {
+    orgId: 1,
+    externalSource: 1,
+    externalId: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      externalSource: {
+        $type: "string",
+        $ne: "",
+      },
+      externalId: {
+        $type: "string",
+        $ne: "",
+      },
+    },
+  }
+);
 
 const Account =
-  mongoose.models.Account || mongoose.model("Account", AccountSchema);
+  mongoose.models.Account ||
+  mongoose.model("Account", AccountSchema);
 
 export default Account;
