@@ -192,9 +192,48 @@ app.use(
   pipedriveRoutes
 );
 
+/**
+ * OAuth callbacks need to be accessible without normal
+ * Atlas workspace headers because external providers
+ * redirect directly back to these URLs.
+ *
+ * The integration callback itself restores the org/workspace
+ * using the OAuth state payload.
+ */
+const integrationOAuthCallbacks = new Set([
+  "/hubspot/callback",
+  "/zoho_crm/callback",
+  "/google_ads/callback",
+  "/ga4/callback",
+  "/meta_ads/callback",
+  "/stripe/callback",
+  "/shopify/callback",
+  "/salesforce/callback",
+  "/linkedin_ads/callback",
+  "/pipedrive/callback",
+]);
+
+const coreIntegrationPlanGate = requirePlan("CORE");
+
+function integrationPlanGate(req, res, next) {
+  const isOAuthCallback =
+    req.method === "GET" &&
+    integrationOAuthCallbacks.has(req.path);
+
+  if (isOAuthCallback) {
+    return next();
+  }
+
+  return coreIntegrationPlanGate(
+    req,
+    res,
+    next
+  );
+}
+
 app.use(
   "/api/integrations",
-  requirePlan("CORE"),
+  integrationPlanGate,
   integrationsRoute
 );
 
@@ -331,7 +370,7 @@ app.use(
 );
 
 /**
- * ENTERPRISE PLAN ROUTES
+ * ENTERPRISE / ADVANCED ROUTES
  */
 app.use(
   "/api/atlas",
@@ -397,6 +436,7 @@ async function start() {
       console.error(
         "Missing MONGO_URI or MONGODB_URI."
       );
+
       process.exit(1);
     }
 
@@ -429,6 +469,7 @@ async function start() {
 
           try {
             startIntegrationAutoSync();
+
             console.log(
               "Integration auto-sync started"
             );
@@ -456,13 +497,25 @@ start();
 /**
  * Process safety
  */
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled rejection:", err);
-});
+process.on(
+  "unhandledRejection",
+  (err) => {
+    console.error(
+      "Unhandled rejection:",
+      err
+    );
+  }
+);
 
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught exception:", err);
-});
+process.on(
+  "uncaughtException",
+  (err) => {
+    console.error(
+      "Uncaught exception:",
+      err
+    );
+  }
+);
 
 async function shutdown(signal) {
   try {
@@ -471,23 +524,29 @@ async function shutdown(signal) {
     );
 
     if (server) {
-      await new Promise((resolve, reject) => {
-        server.close((err) => {
-          if (err) {
-            reject(err);
-            return;
-          }
+      await new Promise(
+        (resolve, reject) => {
+          server.close((err) => {
+            if (err) {
+              reject(err);
+              return;
+            }
 
-          resolve();
-        });
-      });
+            resolve();
+          });
+        }
+      );
 
-      console.log("HTTP server closed");
+      console.log(
+        "HTTP server closed"
+      );
     }
 
     await mongoose.connection.close();
 
-    console.log("MongoDB connection closed");
+    console.log(
+      "MongoDB connection closed"
+    );
 
     process.exit(0);
   } catch (err) {
@@ -500,10 +559,12 @@ async function shutdown(signal) {
   }
 }
 
-process.on("SIGTERM", () =>
-  shutdown("SIGTERM")
+process.on(
+  "SIGTERM",
+  () => shutdown("SIGTERM")
 );
 
-process.on("SIGINT", () =>
-  shutdown("SIGINT")
+process.on(
+  "SIGINT",
+  () => shutdown("SIGINT")
 );
