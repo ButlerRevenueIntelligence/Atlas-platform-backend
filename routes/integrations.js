@@ -115,24 +115,13 @@ function buildHubSpotAuthUrl(orgId) {
     client_id: clientId,
     redirect_uri: redirectUri,
     scope: scopes,
-    state: safeStateString({ orgId: String(orgId), provider: "hubspot" }),
+    state: safeStateString({
+      orgId: String(orgId),
+      provider: "hubspot",
+    }),
   });
 
   return `https://app.hubspot.com/oauth/authorize?${params.toString()}`;
-}
-
-async function getHubSpotAccountInfo(accessToken) {
-  const res = await fetch(
-    `https://api.hubapi.com/oauth/v1/access-tokens/${encodeURIComponent(accessToken)}`
-  );
-
-  const data = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    throw new Error(data?.message || "Failed to fetch HubSpot account info");
-  }
-
-  return data;
 }
 
 async function exchangeHubSpotCodeForTokens(code) {
@@ -152,16 +141,70 @@ async function exchangeHubSpotCodeForTokens(code) {
     code,
   });
 
-  const res = await fetch("https://api.hubapi.com/oauth/v1/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  const res = await fetch(
+    "https://api.hubapi.com/oauth/2026-03/token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    }
+  );
 
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(data?.message || "Failed to exchange HubSpot OAuth code");
+    throw new Error(
+      data?.error_description ||
+        data?.message ||
+        data?.error ||
+        "Failed to exchange HubSpot OAuth code"
+    );
+  }
+
+  return data;
+}
+
+async function refreshHubSpotAccessToken(refreshToken) {
+  const clientId = String(process.env.HUBSPOT_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.HUBSPOT_CLIENT_SECRET || "").trim();
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error("HubSpot refresh token configuration is incomplete");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken,
+  });
+
+  const res = await fetch(
+    "https://api.hubapi.com/oauth/2026-03/token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      data?.error_description ||
+        data?.message ||
+        data?.error ||
+        "Failed to refresh HubSpot access token"
+    );
+  }
+
+  if (!data?.access_token) {
+    throw new Error("HubSpot refresh did not return an access token");
   }
 
   return data;
