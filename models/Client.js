@@ -95,13 +95,34 @@ const ClientSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+
+    // External integration identity
+    externalSource: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    externalId: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    // Raw provider record for debugging / future intelligence
+    sourcePayload: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
 /**
- * Keep workspaceId aligned with orgId during transition
- * Also derive domain from website when possible
+ * Keep workspaceId aligned with orgId during transition.
+ * Also derive domain from website when possible.
  */
 ClientSchema.pre("save", function (next) {
   if (!this.workspaceId && this.orgId) {
@@ -113,7 +134,9 @@ ClientSchema.pre("save", function (next) {
       const normalized = this.website.startsWith("http")
         ? this.website
         : `https://${this.website}`;
+
       const url = new URL(normalized);
+
       this.domain = url.hostname.replace(/^www\./, "");
     } catch {
       this.domain = "";
@@ -133,19 +156,50 @@ ClientSchema.index({ orgId: 1, domain: 1 });
 ClientSchema.index({ orgId: 1, archivedAt: 1 });
 
 /**
- * Only enforce unique primary contact email when non-empty
+ * Only enforce unique primary contact email when non-empty.
  */
 ClientSchema.index(
   { orgId: 1, primaryContactEmail: 1 },
   {
     unique: true,
     partialFilterExpression: {
-      primaryContactEmail: { $type: "string", $ne: "" },
+      primaryContactEmail: {
+        $type: "string",
+        $ne: "",
+      },
+    },
+  }
+);
+
+/**
+ * Prevent duplicate records from the same external provider.
+ *
+ * Example:
+ * orgId + hubspot + HubSpot company ID
+ */
+ClientSchema.index(
+  {
+    orgId: 1,
+    externalSource: 1,
+    externalId: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      externalSource: {
+        $type: "string",
+        $ne: "",
+      },
+      externalId: {
+        $type: "string",
+        $ne: "",
+      },
     },
   }
 );
 
 const Client =
-  mongoose.models.Client || mongoose.model("Client", ClientSchema);
+  mongoose.models.Client ||
+  mongoose.model("Client", ClientSchema);
 
 export default Client;
