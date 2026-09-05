@@ -6,6 +6,7 @@ import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
 import { requireAuth } from "../middleware/auth.js";
 import { syncStripeForOrg } from "../services/stripeSync.js";
 import Account from "../models/Account.js";
+import Client from "../models/Client.js";
 import Deal from "../models/Deal.js";
 
 const router = express.Router();
@@ -210,6 +211,344 @@ async function refreshHubSpotAccessToken(refreshToken) {
   return data;
 }
 
+/* -------------------------------- */
+/* HubSpot CRM sync helpers         */
+/* -------------------------------- */
+
+async function ensureHubSpotAccessToken(connection, forceRefresh = false) {
+  if (!connection) {
+    throw new Error("Missing HubSpot connection");
+  }
+
+  const expiresAt = connection.tokenExpiresAt
+    ? new Date(connection.tokenExpiresAt).getTime()
+    : 0;
+
+  const refreshEarlyMs = 2 * 60 * 1000;
+
+  const tokenStillValid =
+    connection.accessToken &&
+    expiresAt &&
+    expiresAt > Date.now() + refreshEarlyMs;
+
+  if (!forceRefresh && tokenStillValid) {
+    return connection.accessToken;
+  }
+
+  if (!forceRefresh && connection.accessToken && !expiresAt) {
+    return connection.accessToken;
+  }
+
+  if (!connection.refreshToken) {
+    if (connection.accessToken && !forceRefresh) {
+      return connection.accessToken;
+    }
+
+    throw new Error(
+      "HubSpot access token expired and no refresh token is available"
+    );
+  }
+
+  const tokenData = await refreshHubSpotAccessToken(
+    connection.refreshToken
+  );
+
+  connection.accessToken = tokenData.access_token;
+
+  // Preserve the existing refresh token unless HubSpot rotates it.
+  if (tokenData.refresh_token) {
+    connection.refreshToken = tokenData.refresh_token;
+  }
+
+  connection.tokenType =
+    tokenData.token_type ||
+    connection.tokenType ||
+    "bearer";
+
+  const expiresIn =
+    Number(tokenData.expires_in || 0) || 0;
+
+  connection.tokenExpiresAt = expiresIn
+    ? new Date(Date.now() + expiresIn * 1000)
+    : null;
+
+  await connection.save();
+
+  return connection.accessToken;
+}
+
+async function hubSpotApiRequest(
+  connection,
+  path,
+  options = {},
+  retryOnUnauthorized = true
+) {
+  let accessToken = await ensureHubSpotAccessToken(
+    connection
+  );
+
+  const makeRequest = async (token) => {
+    return fetch(`https://api.hubapi.com${path}`, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...(options.body
+          ? { "Content-Type": "application/json" }
+          : {}),
+        ...(options.headers || {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  };
+
+  let response = await makeRequest(accessToken);
+
+  /*
+   * A token can be invalidated before our stored expiry.
+   * Refresh once and retry when HubSpot returns 401.
+   */
+  if (
+    response.status === 401 &&
+    retryOnUnauthorized &&
+    connection.refreshToken
+  ) {
+    accessToken = await ensureHubSpotAccessToken(
+      connection,
+      true
+    );
+
+    response = await makeRequest(accessToken);
+  }
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message =
+      data?.message ||
+      data?.error_description ||
+      data?.error ||
+      `HubSpot API request failed with status ${response.status}`;
+
+    throw new Error(message);
+  }
+
+  return data;
+}
+
+async function hubSpotGetAllObjects(
+  connection,
+  objectType,
+  properties = [],
+  associations = []
+) {
+  const allRecords = [];
+
+  let after = null;
+
+  do {
+    const params = new URLSearchParams();
+
+    params.set("limit", "100");
+
+    if (properties.length) {
+      params.set("properties", properties.join(","));
+    }
+
+    if (associations.length) {
+      params.set(
+        "associations",
+        associations.join(",")
+      );
+    }
+
+    if (after) {
+      params.set("after", String(after));
+    }
+
+    const data = await hubSpotApiRequest(
+      connection,
+      `/crm/objects/2026-03/${objectType}?${params.toString()}`
+    );
+
+    const records = Array.isArray(data?.results)
+      ? data.results
+      : [];
+
+    allRecords.push(...records);
+
+    after = data?.paging?.next?.after || null;
+  } while (after);
+
+  return allRecords;
+}
+
+async function hubSpotGetDealPipelines(connection) {
+  const data = await hubSpotApiRequest(
+    connection,
+    "/crm/pipelines/2026-03/deals"
+  );
+
+  return Array.isArray(data?.results)
+    ? data.results
+    : [];
+}
+
+function buildHubSpotStageMap(pipelines = []) {
+  const map = new Map();
+
+  for (const pipeline of pipelines) {
+    const stages = Array.isArray(pipeline?.stages)
+      ? pipeline.stages
+      : [];
+
+    for (const stage of stages) {
+      if (!stage?.id) continue;
+
+      const probability = Number(
+        stage?.metadata?.probability
+      );
+
+      map.set(String(stage.id), {
+        id: String(stage.id),
+        label: String(stage?.label || ""),
+        pipelineId: String(pipeline?.id || ""),
+        pipelineLabel: String(
+          pipeline?.label || ""
+        ),
+        probability: Number.isFinite(probability)
+          ? probability
+          : null,
+      });
+    }
+  }
+
+  return map;
+}
+
+function normalizeHubSpotStage(
+  rawStageId,
+  stageMap
+) {
+  const stageInfo = stageMap.get(
+    String(rawStageId || "")
+  );
+
+  const stageLabel = String(
+    stageInfo?.label ||
+      rawStageId ||
+      ""
+  ).toLowerCase();
+
+  if (
+    stageLabel.includes("closed won") ||
+    stageLabel.includes("closedwon") ||
+    stageLabel.includes("won")
+  ) {
+    return "Closed Won";
+  }
+
+  if (
+    stageLabel.includes("closed lost") ||
+    stageLabel.includes("closedlost") ||
+    stageLabel.includes("lost")
+  ) {
+    return "Closed Lost";
+  }
+
+  if (
+    stageLabel.includes("negotiat") ||
+    stageLabel.includes("contract") ||
+    stageLabel.includes("decision") ||
+    stageLabel.includes("review")
+  ) {
+    return "Negotiation";
+  }
+
+  if (
+    stageLabel.includes("proposal") ||
+    stageLabel.includes("quote") ||
+    stageLabel.includes("presentation")
+  ) {
+    return "Proposal";
+  }
+
+  if (
+    stageLabel.includes("follow") ||
+    stageLabel.includes("nurture")
+  ) {
+    return "Follow-Up";
+  }
+
+  return "Discovery";
+}
+
+function getHubSpotDealProbability(
+  rawStageId,
+  stageMap,
+  normalizedStage
+) {
+  const stageInfo = stageMap.get(
+    String(rawStageId || "")
+  );
+
+  if (
+    stageInfo &&
+    Number.isFinite(stageInfo.probability)
+  ) {
+    return Math.min(
+      1,
+      Math.max(0, stageInfo.probability)
+    );
+  }
+
+  switch (normalizedStage) {
+    case "Closed Won":
+      return 1;
+
+    case "Closed Lost":
+      return 0;
+
+    case "Negotiation":
+      return 0.75;
+
+    case "Proposal":
+      return 0.5;
+
+    case "Follow-Up":
+      return 0.35;
+
+    default:
+      return 0.2;
+  }
+}
+
+function safeHubSpotNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function safeHubSpotDate(value) {
+  if (!value) return null;
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? null
+    : date;
+}
+
+function normalizeHubSpotDomain(value) {
+  let domain = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  domain = domain
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split("/")[0];
+
+  return domain;
+}
 /* -------------------------------- */
 /* Zoho CRM OAuth helpers           */
 /* -------------------------------- */
@@ -3170,51 +3509,601 @@ router.get("/linkedin_ads/callback", async (req, res) => {
 /* MANUAL SYNC ROUTES               */
 /* -------------------------------- */
 
-router.post("/hubspot/sync", requireAuth, async (req, res) => {
-  try {
-    const orgId = getOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+router.post(
+  "/hubspot/sync",
+  requireAuth,
+  async (req, res) => {
+    let connection = null;
 
-    const connection = await IntegrationConnection.findOne({
-      orgId,
-      provider: "hubspot",
-      status: "connected",
-    }).select("+accessToken +refreshToken");
+    try {
+      const orgId = getOrgId(req);
 
-    if (!connection) {
-      return res.status(404).json({
+      if (!orgId) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing org context",
+        });
+      }
+
+      connection =
+        await IntegrationConnection.findOne({
+          orgId,
+          provider: "hubspot",
+          status: "connected",
+        }).select("+accessToken +refreshToken");
+
+      if (!connection) {
+        return res.status(404).json({
+          ok: false,
+          message:
+            "HubSpot is not connected for this workspace",
+        });
+      }
+
+      if (
+        !connection.accessToken &&
+        !connection.refreshToken
+      ) {
+        return res.status(401).json({
+          ok: false,
+          message:
+            "HubSpot connection does not have valid OAuth credentials",
+        });
+      }
+
+      /*
+       * Pull companies, deals and deal pipeline metadata.
+       */
+      const [
+        hubSpotCompanies,
+        hubSpotDeals,
+        hubSpotPipelines,
+      ] = await Promise.all([
+        hubSpotGetAllObjects(
+          connection,
+          "companies",
+          [
+            "name",
+            "domain",
+            "website",
+            "industry",
+            "phone",
+            "city",
+            "state",
+            "country",
+            "annualrevenue",
+            "numberofemployees",
+            "lifecyclestage",
+            "hs_lastmodifieddate",
+          ]
+        ),
+
+        hubSpotGetAllObjects(
+          connection,
+          "deals",
+          [
+            "dealname",
+            "amount",
+            "dealstage",
+            "pipeline",
+            "closedate",
+            "createdate",
+            "hs_lastmodifieddate",
+          ],
+          ["companies"]
+        ),
+
+        hubSpotGetDealPipelines(connection),
+      ]);
+
+      const stageMap =
+        buildHubSpotStageMap(
+          hubSpotPipelines
+        );
+
+      /*
+       * Maps HubSpot company ID -> Atlas Client.
+       * Deals must reference Client._id.
+       */
+      const clientMap = new Map();
+
+      let companiesFetched =
+        hubSpotCompanies.length;
+
+      let clientsUpserted = 0;
+      let accountsUpserted = 0;
+      let dealsFetched =
+        hubSpotDeals.length;
+      let dealsUpserted = 0;
+      let unassignedDeals = 0;
+
+      /*
+       * --------------------------------
+       * HUBSPOT COMPANIES
+       * --------------------------------
+       */
+      for (const company of hubSpotCompanies) {
+        const externalId = company?.id
+          ? String(company.id)
+          : "";
+
+        if (!externalId) continue;
+
+        const properties =
+          company?.properties || {};
+
+        const companyName =
+          String(
+            properties?.name || ""
+          ).trim() ||
+          `HubSpot Company ${externalId}`;
+
+        const domain =
+          normalizeHubSpotDomain(
+            properties?.domain
+          );
+
+        const website =
+          String(
+            properties?.website || ""
+          ).trim() ||
+          (domain
+            ? `https://${domain}`
+            : "");
+
+        /*
+         * Client is the canonical company reference
+         * required by Deal.clientId.
+         */
+        const atlasClient =
+          await Client.findOneAndUpdate(
+            {
+              orgId,
+              externalSource: "hubspot",
+              externalId,
+            },
+            {
+              $set: {
+                orgId,
+                workspaceId: orgId,
+                name: companyName,
+                website,
+                domain,
+                industry:
+                  properties?.industry ||
+                  "",
+                primaryContactPhone:
+                  properties?.phone ||
+                  "",
+                status: "active",
+                archivedAt: null,
+                externalSource:
+                  "hubspot",
+                externalId,
+                sourcePayload:
+                  company,
+              },
+            },
+            {
+              upsert: true,
+              new: true,
+              setDefaultsOnInsert: true,
+              runValidators: true,
+            }
+          );
+
+        clientMap.set(
+          externalId,
+          atlasClient
+        );
+
+        clientsUpserted += 1;
+
+        /*
+         * Account powers Atlas account-level
+         * intelligence and account views.
+         *
+         * Account has a unique orgId + name index,
+         * so first try HubSpot identity, then safely
+         * reuse a same-name account if one already
+         * exists in the workspace.
+         */
+        let atlasAccount =
+          await Account.findOne({
+            orgId,
+            externalSource:
+              "hubspot",
+            externalId,
+          });
+
+        if (!atlasAccount) {
+          atlasAccount =
+            await Account.findOne({
+              orgId,
+              name: companyName,
+            });
+        }
+
+        if (!atlasAccount) {
+          atlasAccount = new Account({
+            orgId,
+            workspaceId: orgId,
+            name: companyName,
+            website,
+            domain,
+            industry:
+              properties?.industry ||
+              "",
+            phone:
+              properties?.phone ||
+              "",
+            status: "Active",
+            archivedAt: null,
+            externalSource:
+              "hubspot",
+            externalId,
+            sourcePayload: company,
+          });
+        } else {
+          atlasAccount.workspaceId =
+            atlasAccount.workspaceId ||
+            orgId;
+
+          atlasAccount.name =
+            companyName;
+
+          atlasAccount.website =
+            website;
+
+          atlasAccount.domain =
+            domain;
+
+          atlasAccount.industry =
+            properties?.industry ||
+            "";
+
+          atlasAccount.phone =
+            properties?.phone ||
+            "";
+
+          atlasAccount.status =
+            "Active";
+
+          atlasAccount.archivedAt =
+            null;
+
+          /*
+           * Only claim the external identity
+           * if this account is not already owned
+           * by another provider.
+           */
+          if (
+            !atlasAccount.externalSource ||
+            atlasAccount.externalSource ===
+              "hubspot"
+          ) {
+            atlasAccount.externalSource =
+              "hubspot";
+
+            atlasAccount.externalId =
+              externalId;
+          }
+
+          atlasAccount.sourcePayload =
+            company;
+        }
+
+        await atlasAccount.save();
+
+        accountsUpserted += 1;
+      }
+
+      /*
+       * Some HubSpot deals may not be associated
+       * with a company.
+       *
+       * Deal.clientId is required in Atlas, so use
+       * one explicit "HubSpot Unassigned" Client
+       * instead of dropping those deals.
+       */
+      let unassignedClient = null;
+
+      async function getUnassignedClient() {
+        if (unassignedClient) {
+          return unassignedClient;
+        }
+
+        unassignedClient =
+          await Client.findOneAndUpdate(
+            {
+              orgId,
+              externalSource:
+                "hubspot",
+              externalId:
+                "__unassigned__",
+            },
+            {
+              $set: {
+                orgId,
+                workspaceId: orgId,
+                name:
+                  "HubSpot Unassigned",
+                status: "prospect",
+                externalSource:
+                  "hubspot",
+                externalId:
+                  "__unassigned__",
+                notes:
+                  "HubSpot deals that do not currently have an associated company.",
+              },
+            },
+            {
+              upsert: true,
+              new: true,
+              setDefaultsOnInsert: true,
+              runValidators: true,
+            }
+          );
+
+        return unassignedClient;
+      }
+
+      /*
+       * --------------------------------
+       * HUBSPOT DEALS
+       * --------------------------------
+       */
+      for (const deal of hubSpotDeals) {
+        const externalId = deal?.id
+          ? String(deal.id)
+          : "";
+
+        if (!externalId) continue;
+
+        const properties =
+          deal?.properties || {};
+
+        const associatedCompanies =
+          deal?.associations
+            ?.companies?.results;
+
+        const associatedCompanyId =
+          Array.isArray(
+            associatedCompanies
+          ) &&
+          associatedCompanies.length
+            ? String(
+                associatedCompanies[0]
+                  ?.id || ""
+              )
+            : "";
+
+        let atlasClient =
+          associatedCompanyId
+            ? clientMap.get(
+                associatedCompanyId
+              )
+            : null;
+
+        /*
+         * Association may reference a company
+         * we did not have in the in-memory map.
+         */
+        if (
+          !atlasClient &&
+          associatedCompanyId
+        ) {
+          atlasClient =
+            await Client.findOne({
+              orgId,
+              externalSource:
+                "hubspot",
+              externalId:
+                associatedCompanyId,
+            });
+        }
+
+        if (!atlasClient) {
+          atlasClient =
+            await getUnassignedClient();
+
+          unassignedDeals += 1;
+        }
+
+        const dealName =
+          String(
+            properties?.dealname ||
+              ""
+          ).trim() ||
+          `HubSpot Deal ${externalId}`;
+
+        const rawStage =
+          properties?.dealstage ||
+          "";
+
+        const normalizedStage =
+          normalizeHubSpotStage(
+            rawStage,
+            stageMap
+          );
+
+        const probability =
+          getHubSpotDealProbability(
+            rawStage,
+            stageMap,
+            normalizedStage
+          );
+
+        const closeDate =
+          safeHubSpotDate(
+            properties?.closedate
+          );
+
+        const isClosed =
+          normalizedStage ===
+            "Closed Won" ||
+          normalizedStage ===
+            "Closed Lost";
+
+        await Deal.findOneAndUpdate(
+          {
+            orgId,
+            externalSource:
+              "hubspot",
+            externalId,
+          },
+          {
+            $set: {
+              orgId,
+              workspaceId: orgId,
+              clientId:
+                atlasClient._id,
+              name: dealName,
+              amount:
+                safeHubSpotNumber(
+                  properties?.amount
+                ),
+              stage:
+                normalizedStage,
+              probability,
+              closeDate,
+              closedAt: isClosed
+                ? closeDate ||
+                  safeHubSpotDate(
+                    properties?.hs_lastmodifieddate
+                  ) ||
+                  new Date()
+                : null,
+              archivedAt: null,
+              externalSource:
+                "hubspot",
+              externalId,
+              sourcePayload:
+                deal,
+            },
+          },
+          {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true,
+            runValidators: true,
+          }
+        );
+
+        dealsUpserted += 1;
+      }
+
+      const syncedAt = new Date();
+
+      connection.status =
+        "connected";
+
+      connection.mode =
+        "live";
+
+      connection.lastSyncAt =
+        syncedAt;
+
+      connection.lastSyncStatus =
+        "success";
+
+      connection.lastError =
+        null;
+
+      connection.syncCursor =
+        syncedAt.toISOString();
+
+      connection.metadata = {
+        ...(connection.metadata || {}),
+
+        lastHubSpotSync: {
+          companiesFetched,
+          clientsUpserted,
+          accountsUpserted,
+          dealsFetched,
+          dealsUpserted,
+          unassignedDeals,
+          pipelinesFetched:
+            hubSpotPipelines.length,
+          syncedAt,
+        },
+      };
+
+      await connection.save();
+
+      await updateOrgIntegrationSummary(
+        orgId,
+        "hubspot",
+        {
+          connected: true,
+          lastSync: syncedAt,
+          mode: "live",
+        }
+      );
+
+      return res.json({
+        ok: true,
+        message:
+          "HubSpot sync completed",
+        provider: "hubspot",
+        mode: "live",
+
+        sync: {
+          companiesFetched,
+          clientsUpserted,
+          accountsUpserted,
+          dealsFetched,
+          dealsUpserted,
+          unassignedDeals,
+          pipelinesFetched:
+            hubSpotPipelines.length,
+          syncedAt,
+        },
+      });
+    } catch (err) {
+      console.error(
+        "HubSpot sync error:",
+        err
+      );
+
+      /*
+       * Record the failed sync so Atlas does not
+       * incorrectly continue showing success.
+       */
+      if (connection) {
+        try {
+          connection.lastSyncAt =
+            new Date();
+
+          connection.lastSyncStatus =
+            "error";
+
+          connection.lastError =
+            String(
+              err?.message ||
+                "HubSpot sync failed"
+            );
+
+          await connection.save();
+        } catch (saveErr) {
+          console.error(
+            "Failed to record HubSpot sync error:",
+            saveErr
+          );
+        }
+      }
+
+      return res.status(500).json({
         ok: false,
-        message: "HubSpot is not connected for this workspace",
+        message:
+          "Failed to sync HubSpot",
+        error:
+          err?.message ||
+          "Unknown HubSpot sync error",
       });
     }
-
-    connection.status = "connected";
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
-    connection.lastError = null;
-    await connection.save();
-
-    await updateOrgIntegrationSummary(orgId, "hubspot", {
-      connected: true,
-      lastSync: new Date(),
-      mode: connection.mode || "live",
-    });
-
-    return res.json({
-      ok: true,
-      message: "HubSpot sync completed",
-      provider: "hubspot",
-      mode: connection.mode || "live",
-    });
-  } catch (err) {
-    console.error("HubSpot sync error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Failed to sync HubSpot",
-      error: err.message,
-    });
   }
-});
+);
 
 router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
   try {
