@@ -7,22 +7,27 @@ const activitySchema = new mongoose.Schema(
       type: String,
       default: "note",
       trim: true,
-    }, // note/call/email/meeting/task/stage_move/system
+    },
+
+    // note/call/email/meeting/task/stage_move/system
     note: {
       type: String,
       default: "",
       trim: true,
     },
+
     nextAction: {
       type: String,
       default: "",
       trim: true,
     },
+
     createdAt: {
       type: Date,
       default: Date.now,
       index: true,
     },
+
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -59,6 +64,7 @@ const dealSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Must reference a Client document
     clientId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Client",
@@ -136,7 +142,7 @@ const dealSchema = new mongoose.Schema(
       default: [],
     },
 
-    // Outcome / win-loss / reactivation intel
+    // Outcome / win-loss / reactivation intelligence
     closedAt: {
       type: Date,
       default: null,
@@ -167,31 +173,111 @@ const dealSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+
+    // External integration identity
+    externalSource: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    externalId: {
+      type: String,
+      default: "",
+      trim: true,
+      index: true,
+    },
+
+    // Raw provider record for debugging / future intelligence
+    sourcePayload: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
 /**
- * Keep workspaceId aligned with orgId during transition
+ * Keep workspaceId aligned with orgId during transition.
  */
 dealSchema.pre("save", function (next) {
   if (!this.workspaceId && this.orgId) {
     this.workspaceId = this.orgId;
   }
+
   next();
 });
 
 /**
- * Helpful compound indexes
+ * Helpful compound indexes.
  */
-dealSchema.index({ orgId: 1, stage: 1, createdAt: -1 });
-dealSchema.index({ orgId: 1, clientId: 1, createdAt: -1 });
-dealSchema.index({ orgId: 1, nextActionDueAt: 1 });
-dealSchema.index({ orgId: 1, reactivationAt: 1 });
-dealSchema.index({ orgId: 1, closedAt: 1 });
-dealSchema.index({ orgId: 1, archivedAt: 1 });
-dealSchema.index({ orgId: 1, competitor: 1 });
+dealSchema.index({
+  orgId: 1,
+  stage: 1,
+  createdAt: -1,
+});
 
-const Deal = mongoose.models.Deal || mongoose.model("Deal", dealSchema);
+dealSchema.index({
+  orgId: 1,
+  clientId: 1,
+  createdAt: -1,
+});
+
+dealSchema.index({
+  orgId: 1,
+  nextActionDueAt: 1,
+});
+
+dealSchema.index({
+  orgId: 1,
+  reactivationAt: 1,
+});
+
+dealSchema.index({
+  orgId: 1,
+  closedAt: 1,
+});
+
+dealSchema.index({
+  orgId: 1,
+  archivedAt: 1,
+});
+
+dealSchema.index({
+  orgId: 1,
+  competitor: 1,
+});
+
+/**
+ * Prevent duplicate deals from the same external provider.
+ *
+ * Example:
+ * orgId + hubspot + HubSpot deal ID
+ */
+dealSchema.index(
+  {
+    orgId: 1,
+    externalSource: 1,
+    externalId: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      externalSource: {
+        $type: "string",
+        $ne: "",
+      },
+      externalId: {
+        $type: "string",
+        $ne: "",
+      },
+    },
+  }
+);
+
+const Deal =
+  mongoose.models.Deal ||
+  mongoose.model("Deal", dealSchema);
 
 export default Deal;
