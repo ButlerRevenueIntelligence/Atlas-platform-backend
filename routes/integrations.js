@@ -191,10 +191,11 @@ function buildZohoAuthUrl(orgId) {
   if (!clientId || !redirectUri || !orgId) return null;
 
   const scope = [
-    "ZohoCRM.modules.ALL",
-    "ZohoCRM.settings.ALL",
-    "ZohoCRM.users.ALL",
-  ].join(",");
+  "ZohoCRM.modules.ALL",
+  "ZohoCRM.settings.ALL",
+  "ZohoCRM.users.ALL",
+  "ZohoCRM.org.READ",
+].join(",");
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -2339,7 +2340,12 @@ router.get("/zoho_crm/callback", async (req, res) => {
       refreshToken,
       tokenType: "Bearer",
       tokenExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
-      scopes: ["ZohoCRM.modules.ALL", "ZohoCRM.settings.ALL", "ZohoCRM.users.ALL"],
+      scopes: [
+  "ZohoCRM.modules.ALL",
+  "ZohoCRM.settings.ALL",
+  "ZohoCRM.users.ALL",
+  "ZohoCRM.org.READ",
+],
       metadata: {
         orgInfo,
       },
