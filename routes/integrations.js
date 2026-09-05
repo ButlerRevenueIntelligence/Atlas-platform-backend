@@ -2267,9 +2267,13 @@ router.post("/meta_ads/select-account", requireAuth, async (req, res) => {
 router.get("/hubspot/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
-    if (!code || !state) return res.status(400).send("Missing code or state");
+
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
 
     let parsedState = null;
+
     try {
       parsedState = JSON.parse(state);
     } catch {
@@ -2277,22 +2281,37 @@ router.get("/hubspot/callback", async (req, res) => {
     }
 
     const { orgId } = parsedState || {};
-    if (!orgId) return res.status(400).send("Missing orgId in state");
+
+    if (!orgId) {
+      return res.status(400).send("Missing orgId in state");
+    }
 
     const org = await ensureOrg(orgId);
-    if (!org) return res.status(404).send("Workspace not found");
+
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
 
     const tokenData = await exchangeHubSpotCodeForTokens(code);
+
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
-    const scopes = Array.isArray(tokenData?.scopes) ? tokenData.scopes : [];
+    const hubId = tokenData?.hub_id
+      ? String(tokenData.hub_id)
+      : null;
 
-    if (!accessToken) throw new Error("HubSpot did not return an access token");
+    const scopes = Array.isArray(tokenData?.scopes)
+      ? tokenData.scopes
+      : [];
 
-    const accountData = await getHubSpotAccountInfo(accessToken);
-    const accountId = accountData?.hub_id ? String(accountData.hub_id) : null;
-    const accountName = accountId ? `HubSpot Account ${accountId}` : "HubSpot";
+    if (!accessToken) {
+      throw new Error("HubSpot did not return an access token");
+    }
+
+    if (!hubId) {
+      throw new Error("HubSpot did not return a hub ID");
+    }
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -2300,42 +2319,69 @@ router.get("/hubspot/callback", async (req, res) => {
     }).select("+accessToken +refreshToken");
 
     if (!connection) {
-      connection = new IntegrationConnection({ orgId, provider: "hubspot" });
+      connection = new IntegrationConnection({
+        orgId,
+        provider: "hubspot",
+      });
     }
 
     connection.status = "connected";
     connection.mode = "live";
     connection.connectedAt = new Date();
     connection.disconnectedAt = null;
+
     connection.accessToken = accessToken;
-    connection.refreshToken = refreshToken;
-    connection.tokenType = tokenData?.token_type || null;
-    connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
-    connection.externalAccountId = accountId;
-    connection.externalAccountName = accountName;
+
+    // Preserve the existing refresh token if HubSpot
+    // doesn't return a new one during a reconnect.
+    connection.refreshToken =
+      refreshToken || connection.refreshToken || null;
+
+    connection.tokenType =
+      tokenData?.token_type || "bearer";
+
+    connection.tokenExpiresAt = expiresIn
+      ? new Date(Date.now() + expiresIn * 1000)
+      : null;
+
+    connection.externalAccountId = hubId;
+    connection.externalAccountName =
+      `HubSpot Account ${hubId}`;
+
     connection.scopes = scopes;
+
     connection.lastSyncAt = new Date();
     connection.lastSyncStatus = "success";
     connection.lastError = null;
+
     connection.metadata = {
       ...(connection.metadata || {}),
-      hubId: accountId,
+      hubId,
       scopes,
     };
 
     await connection.save();
 
-    await updateOrgIntegrationSummary(orgId, "hubspot", {
-      connected: true,
-      connectedAt: new Date(),
-      lastSync: new Date(),
-      mode: "live",
-    });
+    await updateOrgIntegrationSummary(
+      orgId,
+      "hubspot",
+      {
+        connected: true,
+        connectedAt: new Date(),
+        lastSync: new Date(),
+        mode: "live",
+      }
+    );
 
-    return res.redirect(`${getFrontendUrl()}/integrations?connected=hubspot&mode=live`);
+    return res.redirect(
+      `${getFrontendUrl()}/integrations?connected=hubspot&mode=live`
+    );
   } catch (err) {
     console.error("HubSpot callback error:", err);
-    return res.redirect(formatOauthErrorRedirect("hubspot"));
+
+    return res.redirect(
+      formatOauthErrorRedirect("hubspot")
+    );
   }
 });
 
