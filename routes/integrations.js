@@ -2087,6 +2087,86 @@ router.post("/disconnect", requireAuth, async (req, res) => {
       }
     }
 
+        /*
+     * --------------------------------
+     * SALESFORCE TOKEN REVOCATION
+     * --------------------------------
+     *
+     * Revoke Salesforce access remotely before
+     * clearing Atlas's local token storage.
+     */
+    if (
+      id === "salesforce" &&
+      connection.status === "connected"
+    ) {
+      try {
+        const tokenToRevoke =
+          connection.refreshToken ||
+          connection.accessToken;
+
+        if (tokenToRevoke) {
+          const instanceUrl =
+            normalizeSalesforceInstanceUrl(
+              connection?.metadata?.instanceUrl || ""
+            );
+
+          if (!instanceUrl) {
+            throw new Error(
+              "Salesforce instance URL is missing"
+            );
+          }
+
+          const revokeBody =
+            new URLSearchParams({
+              token: tokenToRevoke,
+            });
+
+          const revokeResponse = await fetch(
+            `${instanceUrl}/services/oauth2/revoke`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: revokeBody,
+            }
+          );
+
+          if (!revokeResponse.ok) {
+            const revokeText =
+              await revokeResponse.text();
+
+            throw new Error(
+              revokeText ||
+                `Salesforce token revocation failed with status ${revokeResponse.status}`
+            );
+          }
+        }
+      } catch (salesforceErr) {
+        console.error(
+          "Salesforce token revocation error:",
+          salesforceErr
+        );
+
+        connection.lastError =
+          String(
+            salesforceErr?.message ||
+              "Salesforce token revocation failed"
+          );
+
+        await connection.save();
+
+        return res.status(502).json({
+          ok: false,
+          message:
+            "Salesforce could not be fully disconnected. Salesforce authorization is still active.",
+          error:
+            salesforceErr?.message ||
+            "Salesforce token revocation failed",
+        });
+      }
+    }
     /*
      * --------------------------------
      * LOCAL DISCONNECT
