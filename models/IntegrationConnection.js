@@ -1,5 +1,11 @@
 // backend/models/IntegrationConnection.js
+
 import mongoose from "mongoose";
+
+import {
+  encryptIntegrationToken,
+  decryptIntegrationToken,
+} from "../utils/tokenCrypto.js";
 
 const IntegrationConnectionSchema = new mongoose.Schema(
   {
@@ -31,7 +37,12 @@ const IntegrationConnectionSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["connected", "disconnected", "error", "syncing"],
+      enum: [
+        "connected",
+        "disconnected",
+        "error",
+        "syncing",
+      ],
       default: "disconnected",
       index: true,
     },
@@ -54,16 +65,40 @@ const IntegrationConnectionSchema = new mongoose.Schema(
       default: null,
     },
 
+    /*
+     * OAuth tokens are encrypted before MongoDB storage
+     * and decrypted automatically when accessed through
+     * a Mongoose document.
+     *
+     * select: false prevents normal queries from
+     * returning the fields unless explicitly requested.
+     */
     accessToken: {
       type: String,
       default: null,
       select: false,
+
+      set(value) {
+        return encryptIntegrationToken(value);
+      },
+
+      get(value) {
+        return decryptIntegrationToken(value);
+      },
     },
 
     refreshToken: {
       type: String,
       default: null,
       select: false,
+
+      set(value) {
+        return encryptIntegrationToken(value);
+      },
+
+      get(value) {
+        return decryptIntegrationToken(value);
+      },
     },
 
     tokenType: {
@@ -99,7 +134,12 @@ const IntegrationConnectionSchema = new mongoose.Schema(
 
     lastSyncStatus: {
       type: String,
-      enum: ["never", "success", "failed", "running"],
+      enum: [
+        "never",
+        "success",
+        "failed",
+        "running",
+      ],
       default: "never",
       index: true,
     },
@@ -124,97 +164,178 @@ const IntegrationConnectionSchema = new mongoose.Schema(
       default: {},
     },
   },
-  { timestamps: true }
-);
+  {
+    timestamps: true,
 
-IntegrationConnectionSchema.index(
-  { orgId: 1, provider: 1 },
-  { unique: true }
-);
+    /*
+     * Keep getters enabled when a document is converted
+     * to an object internally.
+     *
+     * Token fields remain select:false, so they are not
+     * exposed through ordinary API responses.
+     */
+    toObject: {
+      getters: true,
+    },
 
-IntegrationConnectionSchema.methods.markConnected = function ({
-  mode = "live",
-  externalAccountId = null,
-  externalAccountName = null,
-  accessToken = null,
-  refreshToken = null,
-  tokenType = null,
-  tokenExpiresAt = null,
-  scopes = [],
-  metadata = {},
-} = {}) {
-  this.status = "connected";
-  this.mode = mode;
-  this.externalAccountId = externalAccountId;
-  this.externalAccountName = externalAccountName;
-  this.accessToken = accessToken;
-  this.refreshToken = refreshToken;
-  this.tokenType = tokenType;
-  this.tokenExpiresAt = tokenExpiresAt;
-  this.scopes = Array.isArray(scopes) ? scopes : [];
-  this.connectedAt = new Date();
-  this.disconnectedAt = null;
-  this.lastSyncAt = new Date();
-  this.lastSyncStatus = "success";
-  this.lastError = null;
-  this.metadata = {
-    ...(this.metadata || {}),
-    ...(metadata || {}),
-  };
-  return this;
-};
-
-IntegrationConnectionSchema.methods.markDisconnected = function () {
-  this.status = "disconnected";
-  this.mode = "demo";
-  this.accessToken = null;
-  this.refreshToken = null;
-  this.tokenType = null;
-  this.tokenExpiresAt = null;
-  this.externalAccountId = null;
-  this.externalAccountName = null;
-  this.scopes = [];
-  this.disconnectedAt = new Date();
-  this.lastSyncStatus = "never";
-  this.lastSyncAt = null;
-  this.lastError = null;
-  this.syncCursor = null;
-  this.settings = {};
-  this.metadata = {};
-  return this;
-};
-
-IntegrationConnectionSchema.methods.markSyncRunning = function () {
-  this.status = "syncing";
-  this.lastSyncStatus = "running";
-  this.lastError = null;
-  return this;
-};
-
-IntegrationConnectionSchema.methods.markSyncSuccess = function ({
-  syncCursor = null,
-  metadata = {},
-} = {}) {
-  this.status = "connected";
-  this.lastSyncAt = new Date();
-  this.lastSyncStatus = "success";
-  this.lastError = null;
-  if (syncCursor !== null) {
-    this.syncCursor = syncCursor;
+    toJSON: {
+      getters: true,
+    },
   }
-  this.metadata = {
-    ...(this.metadata || {}),
-    ...(metadata || {}),
-  };
-  return this;
-};
+);
 
-IntegrationConnectionSchema.methods.markSyncFailed = function (errorMessage) {
-  this.status = "error";
-  this.lastSyncStatus = "failed";
-  this.lastError = errorMessage || "Unknown sync error";
-  return this;
-};
+/*
+ * One connection per provider per Atlas workspace.
+ */
+IntegrationConnectionSchema.index(
+  {
+    orgId: 1,
+    provider: 1,
+  },
+  {
+    unique: true,
+  }
+);
+
+/* -------------------------------- */
+/* Connection lifecycle helpers     */
+/* -------------------------------- */
+
+IntegrationConnectionSchema.methods.markConnected =
+  function ({
+    mode = "live",
+    externalAccountId = null,
+    externalAccountName = null,
+    accessToken = null,
+    refreshToken = null,
+    tokenType = null,
+    tokenExpiresAt = null,
+    scopes = [],
+    metadata = {},
+  } = {}) {
+    this.status = "connected";
+    this.mode = mode;
+
+    this.externalAccountId =
+      externalAccountId;
+
+    this.externalAccountName =
+      externalAccountName;
+
+    /*
+     * Mongoose setters automatically encrypt these.
+     */
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
+
+    this.tokenType = tokenType;
+
+    this.tokenExpiresAt =
+      tokenExpiresAt;
+
+    this.scopes = Array.isArray(scopes)
+      ? scopes
+      : [];
+
+    this.connectedAt = new Date();
+    this.disconnectedAt = null;
+
+    this.lastSyncAt = new Date();
+    this.lastSyncStatus = "success";
+    this.lastError = null;
+
+    this.metadata = {
+      ...(this.metadata || {}),
+      ...(metadata || {}),
+    };
+
+    return this;
+  };
+
+/* -------------------------------- */
+/* Disconnect helper                */
+/* -------------------------------- */
+
+IntegrationConnectionSchema.methods.markDisconnected =
+  function () {
+    this.status = "disconnected";
+    this.mode = "demo";
+
+    /*
+     * Removing the tokens does not require encryption.
+     */
+    this.accessToken = null;
+    this.refreshToken = null;
+
+    this.tokenType = null;
+    this.tokenExpiresAt = null;
+
+    this.externalAccountId = null;
+    this.externalAccountName = null;
+
+    this.scopes = [];
+
+    this.disconnectedAt =
+      new Date();
+
+    this.lastSyncStatus = "never";
+    this.lastSyncAt = null;
+    this.lastError = null;
+
+    this.syncCursor = null;
+    this.settings = {};
+    this.metadata = {};
+
+    return this;
+  };
+
+/* -------------------------------- */
+/* Sync lifecycle helpers           */
+/* -------------------------------- */
+
+IntegrationConnectionSchema.methods.markSyncRunning =
+  function () {
+    this.status = "syncing";
+    this.lastSyncStatus = "running";
+    this.lastError = null;
+
+    return this;
+  };
+
+IntegrationConnectionSchema.methods.markSyncSuccess =
+  function ({
+    syncCursor = null,
+    metadata = {},
+  } = {}) {
+    this.status = "connected";
+
+    this.lastSyncAt = new Date();
+    this.lastSyncStatus = "success";
+    this.lastError = null;
+
+    if (syncCursor !== null) {
+      this.syncCursor = syncCursor;
+    }
+
+    this.metadata = {
+      ...(this.metadata || {}),
+      ...(metadata || {}),
+    };
+
+    return this;
+  };
+
+IntegrationConnectionSchema.methods.markSyncFailed =
+  function (errorMessage) {
+    this.status = "error";
+    this.lastSyncStatus = "failed";
+
+    this.lastError =
+      errorMessage ||
+      "Unknown sync error";
+
+    return this;
+  };
 
 const IntegrationConnection =
   mongoose.models.IntegrationConnection ||
