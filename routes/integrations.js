@@ -1,5 +1,6 @@
 import express from "express";
 import Stripe from "stripe";
+import crypto from "crypto";
 import Organization from "../models/Organization.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
@@ -69,10 +70,197 @@ function getFrontendUrl() {
     .replace(/\/+$/, "");
 }
 
-function safeStateString(payload) {
-  return JSON.stringify(payload);
+const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
+
+function getOauthStateSecret() {
+  const secret = String(
+    process.env.OAUTH_STATE_SECRET || ""
+  ).trim();
+
+  if (!secret) {
+    throw new Error(
+      "OAUTH_STATE_SECRET is not configured"
+    );
+  }
+
+  return secret;
 }
 
+function base64UrlEncode(value) {
+  return Buffer.from(value, "utf8").toString(
+    "base64url"
+  );
+}
+
+function base64UrlDecode(value) {
+  return Buffer.from(
+    value,
+    "base64url"
+  ).toString("utf8");
+}
+
+function signOauthState(encodedPayload) {
+  return crypto
+    .createHmac(
+      "sha256",
+      getOauthStateSecret()
+    )
+    .update(encodedPayload)
+    .digest("base64url");
+}
+
+function safeStateString(payload) {
+  const now = Date.now();
+
+  const statePayload = {
+    ...payload,
+    iat: now,
+    exp: now + OAUTH_STATE_MAX_AGE_MS,
+    nonce: crypto.randomBytes(24).toString(
+      "base64url"
+    ),
+  };
+
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(statePayload)
+  );
+
+  const signature =
+    signOauthState(encodedPayload);
+
+  return `${encodedPayload}.${signature}`;
+}
+
+function parseOauthState(
+  state,
+  expectedProvider = null
+) {
+  if (
+    typeof state !== "string" ||
+    !state.includes(".")
+  ) {
+    throw new Error("Invalid OAuth state");
+  }
+
+  const parts = state.split(".");
+
+  if (parts.length !== 2) {
+    throw new Error("Invalid OAuth state");
+  }
+
+  const [
+    encodedPayload,
+    suppliedSignature,
+  ] = parts;
+
+  if (
+    !encodedPayload ||
+    !suppliedSignature
+  ) {
+    throw new Error("Invalid OAuth state");
+  }
+
+  const expectedSignature =
+    signOauthState(encodedPayload);
+
+  const suppliedBuffer = Buffer.from(
+    suppliedSignature,
+    "utf8"
+  );
+
+  const expectedBuffer = Buffer.from(
+    expectedSignature,
+    "utf8"
+  );
+
+  if (
+    suppliedBuffer.length !==
+    expectedBuffer.length
+  ) {
+    throw new Error(
+      "Invalid OAuth state signature"
+    );
+  }
+
+  if (
+    !crypto.timingSafeEqual(
+      suppliedBuffer,
+      expectedBuffer
+    )
+  ) {
+    throw new Error(
+      "Invalid OAuth state signature"
+    );
+  }
+
+  let payload;
+
+  try {
+    payload = JSON.parse(
+      base64UrlDecode(encodedPayload)
+    );
+  } catch {
+    throw new Error(
+      "Invalid OAuth state payload"
+    );
+  }
+
+  if (!payload?.orgId) {
+    throw new Error(
+      "OAuth state is missing orgId"
+    );
+  }
+
+  if (!payload?.provider) {
+    throw new Error(
+      "OAuth state is missing provider"
+    );
+  }
+
+  const expiresAt = Number(
+    payload?.exp || 0
+  );
+
+  const issuedAt = Number(
+    payload?.iat || 0
+  );
+
+  if (
+    !Number.isFinite(expiresAt) ||
+    !Number.isFinite(issuedAt)
+  ) {
+    throw new Error(
+      "OAuth state timestamps are invalid"
+    );
+  }
+
+  if (Date.now() > expiresAt) {
+    throw new Error(
+      "OAuth state has expired"
+    );
+  }
+
+  if (
+    issuedAt >
+    Date.now() + 60 * 1000
+  ) {
+    throw new Error(
+      "OAuth state issue time is invalid"
+    );
+  }
+
+  if (
+    expectedProvider &&
+    payload.provider !==
+      expectedProvider
+  ) {
+    throw new Error(
+      "OAuth state provider mismatch"
+    );
+  }
+
+  return payload;
+}
 function normalizeShopDomain(shopDomain) {
   return String(shopDomain || "")
     .trim()
@@ -2745,15 +2933,25 @@ router.get("/hubspot/callback", async (req, res) => {
       return res.status(400).send("Missing code or state");
     }
 
-    let parsedState = null;
+    let parsedState;
 
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "hubspot"
+      );
+    } catch (err) {
+      console.error(
+        "HubSpot OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
 
     if (!orgId) {
       return res.status(400).send("Missing orgId in state");
@@ -2864,13 +3062,25 @@ router.get("/zoho_crm/callback", async (req, res) => {
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "zoho_crm"
+      );
+    } catch (err) {
+      console.error(
+        "Zoho CRM OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
+
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
@@ -2935,13 +3145,25 @@ router.get("/pipedrive/callback", async (req, res) => {
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "pipedrive"
+      );
+    } catch (err) {
+      console.error(
+        "Pipedrive OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
+
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
@@ -3001,13 +3223,25 @@ router.get("/google_ads/callback", async (req, res) => {
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "google_ads"
+      );
+    } catch (err) {
+      console.error(
+        "Google Ads OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
+
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
@@ -3092,13 +3326,25 @@ router.get("/stripe/callback", async (req, res) => {
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "stripe"
+      );
+    } catch (err) {
+      console.error(
+        "Stripe OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
+
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
@@ -3180,13 +3426,25 @@ router.get("/ga4/callback", async (req, res) => {
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "ga4"
+      );
+    } catch (err) {
+      console.error(
+        "GA4 OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
+
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
@@ -3290,13 +3548,25 @@ router.get("/meta_ads/callback", async (req, res) => {
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "meta_ads"
+      );
+    } catch (err) {
+      console.error(
+        "Meta Ads OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
+
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
@@ -3378,13 +3648,27 @@ router.get("/shopify/callback", async (req, res) => {
     }
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "shopify"
+      );
+    } catch (err) {
+      console.error(
+        "Shopify OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId, shopDomain } = parsedState || {};
+    const {
+      orgId,
+      shopDomain,
+    } = parsedState;
 
     if (!orgId || !shopDomain) {
       return res.status(400).send("Missing orgId or shopDomain in state");
@@ -3472,13 +3756,24 @@ router.get("/salesforce/callback", async (req, res) => {
     }
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "salesforce"
+      );
+    } catch (err) {
+      console.error(
+        "Salesforce OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
 
     if (!orgId) {
       return res.status(400).send("Missing orgId in state");
@@ -3565,13 +3860,24 @@ router.get("/linkedin_ads/callback", async (req, res) => {
     }
 
     let parsedState;
+
     try {
-      parsedState = JSON.parse(state);
-    } catch {
-      return res.status(400).send("Invalid state");
+      parsedState = parseOauthState(
+        state,
+        "linkedin_ads"
+      );
+    } catch (err) {
+      console.error(
+        "LinkedIn Ads OAuth state error:",
+        err
+      );
+
+      return res.status(400).send(
+        "Invalid or expired OAuth state"
+      );
     }
 
-    const { orgId } = parsedState || {};
+    const { orgId } = parsedState;
 
     if (!orgId) {
       return res.status(400).send("Missing orgId in state");
