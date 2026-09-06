@@ -5340,18 +5340,25 @@ router.post("/salesforce/sync", requireAuth, async (req, res) => {
       }
 
       connection.accessToken = accessToken;
-      connection.tokenType =
-        refreshedTokenData.token_type ||
-        connection.tokenType ||
-        "Bearer";
 
-      connection.metadata = {
-        ...(connection.metadata || {}),
-        instanceUrl,
-        tokenRefreshedAt: new Date(),
-      };
+// Preserve the existing refresh token unless Salesforce rotates it.
+if (refreshedTokenData.refresh_token) {
+  connection.refreshToken =
+    refreshedTokenData.refresh_token;
+}
 
-      await connection.save();
+connection.tokenType =
+  refreshedTokenData.token_type ||
+  connection.tokenType ||
+  "Bearer";
+
+connection.metadata = {
+  ...(connection.metadata || {}),
+  instanceUrl,
+  tokenRefreshedAt: new Date(),
+};
+
+await connection.save();
 
       [salesforceAccounts, salesforceOpportunities] =
         await fetchSalesforceRecords();
