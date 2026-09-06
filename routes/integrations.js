@@ -3840,7 +3840,10 @@ router.get("/salesforce/callback", async (req, res) => {
       );
     }
 
-    const { orgId } = parsedState;
+    const {
+  orgId,
+  codeVerifier,
+} = parsedState;
 
     if (!orgId) {
       return res.status(400).send("Missing orgId in state");
