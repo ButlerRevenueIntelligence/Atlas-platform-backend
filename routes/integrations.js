@@ -1334,63 +1334,127 @@ function buildSalesforceRedirectUri() {
 }
 
 function buildSalesforceAuthUrl(orgId) {
-  const clientId = String(process.env.SALESFORCE_CLIENT_ID || "").trim();
-  const redirectUri = buildSalesforceRedirectUri();
+  const clientId = String(
+    process.env.SALESFORCE_CLIENT_ID || ""
+  ).trim();
+
+  const redirectUri =
+    buildSalesforceRedirectUri();
+
   const loginUrl = String(
-    process.env.SALESFORCE_LOGIN_URL || "https://login.salesforce.com"
+    process.env.SALESFORCE_LOGIN_URL ||
+      "https://login.salesforce.com"
   )
     .trim()
     .replace(/\/+$/, "");
 
-  if (!clientId || !redirectUri || !orgId) return null;
-
-  const params = new URLSearchParams({
-  response_type: "code",
-  client_id: clientId,
-  redirect_uri: redirectUri,
-  scope: "api refresh_token offline_access",
-  state: safeStateString({
-    orgId: String(orgId),
-    provider: "salesforce",
-  }),
-});
-
-  return `${loginUrl}/services/oauth2/authorize?${params.toString()}`;
-}
-
-async function exchangeSalesforceCodeForTokens(code) {
-  const clientId = String(process.env.SALESFORCE_CLIENT_ID || "").trim();
-  const clientSecret = String(process.env.SALESFORCE_CLIENT_SECRET || "").trim();
-  const redirectUri = buildSalesforceRedirectUri();
-  const loginUrl = String(
-    process.env.SALESFORCE_LOGIN_URL || "https://login.salesforce.com"
-  )
-    .trim()
-    .replace(/\/+$/, "");
-
-  if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error("Salesforce OAuth is not fully configured");
+  if (
+    !clientId ||
+    !redirectUri ||
+    !orgId
+  ) {
+    return null;
   }
 
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    client_id: clientId,
-    client_secret: clientSecret,
-    redirect_uri: redirectUri,
-    code,
-  });
+  const codeVerifier =
+    crypto
+      .randomBytes(64)
+      .toString("base64url");
 
-  const res = await fetch(`${loginUrl}/services/oauth2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  const codeChallenge =
+    crypto
+      .createHash("sha256")
+      .update(codeVerifier)
+      .digest("base64url");
 
-  const data = await res.json().catch(() => ({}));
+  const state =
+    safeStateString({
+      orgId: String(orgId),
+      provider: "salesforce",
+      codeVerifier,
+    });
+
+  const params =
+    new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope:
+        "api refresh_token offline_access",
+      state,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+    });
+
+  return (
+    `${loginUrl}/services/oauth2/authorize?` +
+    params.toString()
+  );
+}
+
+async function exchangeSalesforceCodeForTokens(
+  code,
+  codeVerifier
+) {
+  const clientId = String(
+    process.env.SALESFORCE_CLIENT_ID || ""
+  ).trim();
+
+  const clientSecret = String(
+    process.env.SALESFORCE_CLIENT_SECRET || ""
+  ).trim();
+
+  const redirectUri =
+    buildSalesforceRedirectUri();
+
+  const loginUrl = String(
+    process.env.SALESFORCE_LOGIN_URL ||
+      "https://login.salesforce.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (
+    !clientId ||
+    !clientSecret ||
+    !redirectUri ||
+    !codeVerifier
+  ) {
+    throw new Error(
+      "Salesforce OAuth is not fully configured"
+    );
+  }
+
+  const body =
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+      code,
+      code_verifier: codeVerifier,
+    });
+
+  const res = await fetch(
+    `${loginUrl}/services/oauth2/token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded",
+      },
+      body,
+    }
+  );
+
+  const data =
+    await res.json().catch(() => ({}));
 
   if (!res.ok) {
     throw new Error(
-      data?.error_description || data?.error || "Salesforce token exchange failed"
+      data?.error_description ||
+        data?.error ||
+        "Salesforce token exchange failed"
     );
   }
 
@@ -3162,7 +3226,10 @@ router.get("/pipedrive/callback", async (req, res) => {
       );
     }
 
-    const { orgId } = parsedState;
+    const {
+  orgId,
+  codeVerifier,
+} = parsedState;
 
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
@@ -3784,7 +3851,17 @@ router.get("/salesforce/callback", async (req, res) => {
       return res.status(404).send("Workspace not found");
     }
 
-    const tokenData = await exchangeSalesforceCodeForTokens(code);
+    if (!codeVerifier) {
+  throw new Error(
+    "Missing Salesforce PKCE code verifier"
+  );
+}
+
+const tokenData =
+  await exchangeSalesforceCodeForTokens(
+    code,
+    codeVerifier
+  );
 
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
