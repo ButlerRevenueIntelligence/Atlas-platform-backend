@@ -821,7 +821,10 @@ async function exchangeZohoCodeForTokens(
   return data;
 }
 
-async function refreshZohoAccessToken(refreshToken) {
+async function refreshZohoAccessToken(
+  refreshToken,
+  accountsServer = null
+) {
   const clientId = String(
     process.env.ZOHO_CLIENT_ID || ""
   ).trim();
@@ -830,8 +833,12 @@ async function refreshZohoAccessToken(refreshToken) {
     process.env.ZOHO_CLIENT_SECRET || ""
   ).trim();
 
-  const accountsBase =
-    getZohoAccountsBase();
+  const accountsBase = String(
+  accountsServer ||
+    getZohoAccountsBase()
+)
+  .trim()
+  .replace(/\/+$/, "");
 
   if (
     !clientId ||
@@ -934,9 +941,10 @@ async function ensureZohoAccessToken(
   }
 
   const tokenData =
-    await refreshZohoAccessToken(
-      connection.refreshToken
-    );
+  await refreshZohoAccessToken(
+    connection.refreshToken,
+    connection?.metadata?.accountsServer
+  );
 
   connection.accessToken =
     tokenData.access_token;
