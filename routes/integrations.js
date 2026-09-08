@@ -5390,43 +5390,114 @@ const response = await fetch(
       zohoGetAll("Deals"),
     ]);
 
-    let accountsUpserted = 0;
-    let dealsUpserted = 0;
+    let clientsUpserted = 0;
+let accountsUpserted = 0;
+let dealsUpserted = 0;
+
+const clientsByZohoAccountId =
+  new Map();
 
     for (const acc of zohoAccounts) {
-      const zohoAccountId = acc?.id ? String(acc.id) : null;
-      const name = acc?.Account_Name || acc?.name || "Unnamed Account";
+  const zohoAccountId =
+    acc?.id
+      ? String(acc.id)
+      : null;
 
-      if (!zohoAccountId || !name) continue;
+  const name =
+    acc?.Account_Name ||
+    acc?.name ||
+    "Unnamed Account";
 
-      await Account.findOneAndUpdate(
-        {
+  if (!zohoAccountId || !name) {
+    continue;
+  }
+
+  const website =
+    acc?.Website || "";
+
+  const domain =
+    normalizeHubSpotDomain(
+      website
+    );
+
+  /*
+   * Zoho Account -> Atlas Client
+   */
+  const client =
+    await Client.findOneAndUpdate(
+      {
+        orgId,
+        externalSource: "zoho_crm",
+        externalId: zohoAccountId,
+      },
+      {
+        $set: {
           orgId,
-          externalSource: "zoho_crm",
-          externalId: zohoAccountId,
+          name,
+          website,
+          domain,
+          industry:
+            acc?.Industry || "",
+          primaryContactPhone:
+            acc?.Phone || "",
+          status: "active",
+          externalSource:
+            "zoho_crm",
+          externalId:
+            zohoAccountId,
+          sourcePayload: acc,
         },
-        {
-          $set: {
-            orgId,
-            name,
-            website: acc?.Website || "",
-            industry: acc?.Industry || "",
-            phone: acc?.Phone || "",
-            status: "Active",
-            externalSource: "zoho_crm",
-            externalId: zohoAccountId,
-            sourcePayload: acc,
-          },
-        },
-        {
-          upsert: true,
-          new: true,
-        }
-      );
+      },
+      {
+        upsert: true,
+        new: true,
+      }
+    );
 
-      accountsUpserted += 1;
+  clientsByZohoAccountId.set(
+    zohoAccountId,
+    client
+  );
+
+  clientsUpserted += 1;
+
+  /*
+   * Zoho Account -> Atlas Account
+   */
+  await Account.findOneAndUpdate(
+    {
+      orgId,
+      externalSource:
+        "zoho_crm",
+      externalId:
+        zohoAccountId,
+    },
+    {
+      $set: {
+        orgId,
+        name,
+        website,
+        domain,
+        industry:
+          acc?.Industry || "",
+        phone:
+          acc?.Phone || "",
+        status: "Active",
+        externalSource:
+          "zoho_crm",
+        externalId:
+          zohoAccountId,
+        sourcePayload: acc,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
     }
+  );
 
+  accountsUpserted += 1;
+}
     for (const deal of zohoDeals) {
       const zohoDealId = deal?.id ? String(deal.id) : null;
       const dealName = deal?.Deal_Name || deal?.name || "Unnamed Deal";
@@ -5436,15 +5507,44 @@ const response = await fetch(
       const accountRef =
         deal?.Account_Name?.id ? String(deal.Account_Name.id) : null;
 
-      let matchedAccount = null;
+      let matchedClient =
+  accountRef
+    ? clientsByZohoAccountId.get(
+        accountRef
+      ) || null
+    : null;
 
-      if (accountRef) {
-        matchedAccount = await Account.findOne({
-          orgId,
-          externalSource: "zoho_crm",
-          externalId: accountRef,
-        });
-      }
+if (
+  !matchedClient &&
+  accountRef
+) {
+  matchedClient =
+    await Client.findOne({
+      orgId,
+      externalSource:
+        "zoho_crm",
+      externalId:
+        accountRef,
+    });
+}
+
+/*
+ * Deal.clientId is required.
+ * Don't import an orphaned Zoho deal
+ * that cannot be tied to an Atlas Client.
+ */
+if (!matchedClient) {
+  console.warn(
+    "Skipping Zoho deal without matching client:",
+    {
+      zohoDealId,
+      dealName,
+      accountRef,
+    }
+  );
+
+  continue;
+}
 
       const rawStage = String(deal?.Stage || "").toLowerCase();
 
@@ -5465,7 +5565,7 @@ const response = await fetch(
           $set: {
             orgId,
             name: dealName,
-            clientId: matchedAccount?._id || null,
+            clientId: natchedClient._id,
             amount: Number(deal?.Amount || 0),
             stage: normalizedStage,
             closeDate: deal?.Closing_Date || null,
@@ -5500,11 +5600,14 @@ const response = await fetch(
       provider: "zoho_crm",
       mode: "live",
       summary: {
-        accountsFetched: zohoAccounts.length,
-        dealsFetched: zohoDeals.length,
-        accountsUpserted,
-        dealsUpserted,
-      },
+  accountsFetched:
+    zohoAccounts.length,
+  dealsFetched:
+    zohoDeals.length,
+  clientsUpserted,
+  accountsUpserted,
+  dealsUpserted,
+},
     });
   } catch (err) {
     console.error("Zoho CRM sync error:", err);
