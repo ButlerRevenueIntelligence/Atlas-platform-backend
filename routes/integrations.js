@@ -835,71 +835,407 @@ async function getZohoOrgInfo(accessToken) {
 
 function buildPipedriveRedirectUri() {
   const base = buildBackendBaseUrl();
-  if (!base) return null;
+
+  if (!base) {
+    return null;
+  }
+
   return `${base}/api/integrations/pipedrive/callback`;
 }
 
-function buildPipedriveAuthUrl(orgId) {
-  const clientId = String(process.env.PIPEDRIVE_CLIENT_ID || "").trim();
-  const redirectUri = buildPipedriveRedirectUri();
+function getPipedriveBasicAuthHeader() {
+  const clientId = String(
+    process.env.PIPEDRIVE_CLIENT_ID || ""
+  ).trim();
 
-  if (!clientId || !redirectUri || !orgId) return null;
+  const clientSecret = String(
+    process.env.PIPEDRIVE_CLIENT_SECRET || ""
+  ).trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      "Pipedrive OAuth credentials are not configured"
+    );
+  }
+
+  return `Basic ${Buffer.from(
+    `${clientId}:${clientSecret}`
+  ).toString("base64")}`;
+}
+
+function buildPipedriveAuthUrl(orgId) {
+  const clientId = String(
+    process.env.PIPEDRIVE_CLIENT_ID || ""
+  ).trim();
+
+  const redirectUri =
+    buildPipedriveRedirectUri();
+
+  if (!clientId || !redirectUri || !orgId) {
+    return null;
+  }
 
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    state: safeStateString({ orgId: String(orgId), provider: "pipedrive" }),
+    state: safeStateString({
+      orgId: String(orgId),
+      provider: "pipedrive",
+    }),
   });
 
-  return `https://oauth.pipedrive.com/oauth/authorize?${params.toString()}`;
+  return (
+    "https://oauth.pipedrive.com/oauth/authorize?" +
+    params.toString()
+  );
 }
 
 async function exchangePipedriveCodeForTokens(code) {
-  const clientId = String(process.env.PIPEDRIVE_CLIENT_ID || "").trim();
-  const clientSecret = String(process.env.PIPEDRIVE_CLIENT_SECRET || "").trim();
-  const redirectUri = buildPipedriveRedirectUri();
+  const redirectUri =
+    buildPipedriveRedirectUri();
 
-  if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error("Pipedrive OAuth is not fully configured");
+  if (!redirectUri || !code) {
+    throw new Error(
+      "Pipedrive OAuth is not fully configured"
+    );
   }
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
-    code,
+    code: String(code),
     redirect_uri: redirectUri,
-    client_id: clientId,
-    client_secret: clientSecret,
   });
 
-  const res = await fetch("https://oauth.pipedrive.com/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  const response = await fetch(
+    "https://oauth.pipedrive.com/oauth/token",
+    {
+      method: "POST",
+      headers: {
+        Authorization:
+          getPipedriveBasicAuthHeader(),
 
-  const data = await res.json().catch(() => ({}));
+        "Content-Type":
+          "application/x-www-form-urlencoded",
 
-  if (!res.ok) {
+        Accept: "application/json",
+      },
+      body,
+    }
+  );
+
+  const data =
+    await response.json().catch(() => ({}));
+
+  if (!response.ok) {
     throw new Error(
-      data?.error || data?.error_description || "Pipedrive token exchange failed"
+      data?.error_description ||
+        data?.error ||
+        "Pipedrive token exchange failed"
+    );
+  }
+
+  if (!data?.access_token) {
+    throw new Error(
+      "Pipedrive did not return an access token"
     );
   }
 
   return data;
 }
 
-async function getPipedriveUserInfo(accessToken) {
-  const res = await fetch("https://api.pipedrive.com/v1/users/me", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
+async function refreshPipedriveAccessToken(
+  refreshToken
+) {
+  if (!refreshToken) {
+    throw new Error(
+      "Missing Pipedrive refresh token"
+    );
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: String(refreshToken),
   });
 
-  const data = await res.json().catch(() => ({}));
+  const response = await fetch(
+    "https://oauth.pipedrive.com/oauth/token",
+    {
+      method: "POST",
+      headers: {
+        Authorization:
+          getPipedriveBasicAuthHeader(),
 
-  if (!res.ok || data?.success === false) {
-    throw new Error("Failed to fetch Pipedrive user");
+        "Content-Type":
+          "application/x-www-form-urlencoded",
+
+        Accept: "application/json",
+      },
+      body,
+    }
+  );
+
+  const data =
+    await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      data?.error_description ||
+        data?.error ||
+        "Failed to refresh Pipedrive access token"
+    );
+  }
+
+  if (!data?.access_token) {
+    throw new Error(
+      "Pipedrive refresh did not return an access token"
+    );
+  }
+
+  return data;
+}
+
+function normalizePipedriveApiDomain(value) {
+  return String(
+    value || "https://api.pipedrive.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+async function ensurePipedriveAccessToken(
+  connection,
+  forceRefresh = false
+) {
+  if (!connection) {
+    throw new Error(
+      "Missing Pipedrive connection"
+    );
+  }
+
+  const expiresAt =
+    connection.tokenExpiresAt
+      ? new Date(
+          connection.tokenExpiresAt
+        ).getTime()
+      : 0;
+
+  /*
+   * Refresh two minutes before expiration so
+   * a token doesn't expire during a sync.
+   */
+  const refreshEarlyMs =
+    2 * 60 * 1000;
+
+  const tokenStillValid =
+    connection.accessToken &&
+    expiresAt &&
+    expiresAt >
+      Date.now() + refreshEarlyMs;
+
+  if (
+    !forceRefresh &&
+    tokenStillValid
+  ) {
+    return connection.accessToken;
+  }
+
+  /*
+   * Older saved connections may not have
+   * tokenExpiresAt populated.
+   */
+  if (
+    !forceRefresh &&
+    connection.accessToken &&
+    !expiresAt
+  ) {
+    return connection.accessToken;
+  }
+
+  if (!connection.refreshToken) {
+    if (
+      connection.accessToken &&
+      !forceRefresh
+    ) {
+      return connection.accessToken;
+    }
+
+    throw new Error(
+      "Pipedrive access token expired and no refresh token is available"
+    );
+  }
+
+  const tokenData =
+    await refreshPipedriveAccessToken(
+      connection.refreshToken
+    );
+
+  connection.accessToken =
+    tokenData.access_token;
+
+  /*
+   * Pipedrive can return a new refresh token.
+   * Always save it when supplied.
+   *
+   * IntegrationConnection's setter encrypts
+   * it automatically before MongoDB storage.
+   */
+  if (tokenData.refresh_token) {
+    connection.refreshToken =
+      tokenData.refresh_token;
+  }
+
+  connection.tokenType =
+    tokenData.token_type ||
+    connection.tokenType ||
+    "Bearer";
+
+  const expiresIn =
+    Number(tokenData.expires_in || 0) || 0;
+
+  connection.tokenExpiresAt =
+    expiresIn
+      ? new Date(
+          Date.now() +
+            expiresIn * 1000
+        )
+      : null;
+
+  /*
+   * Pipedrive returns the customer's API
+   * domain with OAuth token responses.
+   */
+  if (tokenData.api_domain) {
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      apiDomain:
+        normalizePipedriveApiDomain(
+          tokenData.api_domain
+        ),
+    };
+  }
+
+  await connection.save();
+
+  return connection.accessToken;
+}
+
+async function pipedriveApiRequest(
+  connection,
+  path,
+  options = {},
+  retryOnUnauthorized = true
+) {
+  let accessToken =
+    await ensurePipedriveAccessToken(
+      connection
+    );
+
+  const apiDomain =
+    normalizePipedriveApiDomain(
+      connection?.metadata?.apiDomain
+    );
+
+  const makeRequest = async (token) => {
+    return fetch(
+      `${apiDomain}${path}`,
+      {
+        ...options,
+
+        headers: {
+          Accept: "application/json",
+
+          ...(options.body
+            ? {
+                "Content-Type":
+                  "application/json",
+              }
+            : {}),
+
+          ...(options.headers || {}),
+
+          Authorization:
+            `Bearer ${token}`,
+        },
+      }
+    );
+  };
+
+  let response =
+    await makeRequest(accessToken);
+
+  /*
+   * The token can become invalid before
+   * Atlas's stored expiration time.
+   *
+   * Refresh once and retry.
+   */
+  if (
+    response.status === 401 &&
+    retryOnUnauthorized &&
+    connection.refreshToken
+  ) {
+    accessToken =
+      await ensurePipedriveAccessToken(
+        connection,
+        true
+      );
+
+    response =
+      await makeRequest(accessToken);
+  }
+
+  const data =
+    await response.json().catch(() => ({}));
+
+  if (
+    !response.ok ||
+    data?.success === false
+  ) {
+    const message =
+      data?.error_info ||
+      data?.error ||
+      data?.error_description ||
+      `Pipedrive API request failed with status ${response.status}`;
+
+    throw new Error(message);
+  }
+
+  return data;
+}
+
+async function getPipedriveUserInfo(
+  accessToken,
+  apiDomain = null
+) {
+  const base =
+    normalizePipedriveApiDomain(
+      apiDomain
+    );
+
+  const response = await fetch(
+    `${base}/v1/users/me`,
+    {
+      method: "GET",
+      headers: {
+        Authorization:
+          `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    }
+  );
+
+  const data =
+    await response.json().catch(() => ({}));
+
+  if (
+    !response.ok ||
+    data?.success === false
+  ) {
+    throw new Error(
+      data?.error ||
+        "Failed to fetch Pipedrive user"
+    );
   }
 
   return data?.data || null;
@@ -3306,24 +3642,45 @@ router.get("/pipedrive/callback", async (req, res) => {
       );
     }
 
-    const {
-  orgId,
-  codeVerifier,
-} = parsedState;
+    const { orgId } = parsedState;
 
     if (!orgId) return res.status(400).send("Missing orgId in state");
 
     const org = await ensureOrg(orgId);
     if (!org) return res.status(404).send("Workspace not found");
 
-    const tokenData = await exchangePipedriveCodeForTokens(code);
-    const accessToken = tokenData?.access_token || null;
-    const refreshToken = tokenData?.refresh_token || null;
-    const expiresIn = Number(tokenData?.expires_in || 0) || 0;
+    const tokenData =
+  await exchangePipedriveCodeForTokens(
+    code
+  );
 
-    if (!accessToken) throw new Error("Pipedrive did not return access token");
+const accessToken =
+  tokenData?.access_token || null;
 
-    const me = await getPipedriveUserInfo(accessToken);
+const refreshToken =
+  tokenData?.refresh_token || null;
+
+const expiresIn =
+  Number(
+    tokenData?.expires_in || 0
+  ) || 0;
+
+const apiDomain =
+  normalizePipedriveApiDomain(
+    tokenData?.api_domain
+  );
+
+if (!accessToken) {
+  throw new Error(
+    "Pipedrive did not return access token"
+  );
+}
+
+const me =
+  await getPipedriveUserInfo(
+    accessToken,
+    apiDomain
+  );
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -3344,8 +3701,9 @@ router.get("/pipedrive/callback", async (req, res) => {
       tokenExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
       scopes: [],
       metadata: {
-        user: me,
-      },
+  user: me,
+  apiDomain,
+},
     });
 
     await connection.save();
