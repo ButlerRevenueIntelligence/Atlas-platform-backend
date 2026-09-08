@@ -5265,48 +5265,863 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/pipedrive/sync", requireAuth, async (req, res) => {
-  try {
-    const orgId = getOrgId(req);
-    if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
+/* -------------------------------- */
+/* Pipedrive real CRM sync          */
+/* -------------------------------- */
 
-    const connection = await IntegrationConnection.findOne({
-      orgId,
-      provider: "pipedrive",
-      status: "connected",
-    }).select("+accessToken +refreshToken");
+async function fetchAllPipedriveV2(
+  connection,
+  path,
+  extraParams = {}
+) {
+  const records = [];
 
-    if (!connection) {
-      return res.status(404).json({
-        ok: false,
-        message: "Pipedrive is not connected for this workspace",
-      });
+  let cursor = null;
+
+  do {
+    const params =
+      new URLSearchParams();
+
+    params.set("limit", "500");
+
+    if (cursor) {
+      params.set("cursor", cursor);
     }
 
-    connection.markSyncSuccess();
-    await connection.save();
+    for (const [
+      key,
+      value,
+    ] of Object.entries(extraParams)) {
+      if (
+        value !== undefined &&
+        value !== null &&
+        value !== ""
+      ) {
+        params.set(
+          key,
+          String(value)
+        );
+      }
+    }
 
-    await updateOrgIntegrationSummary(orgId, "pipedrive", {
-      connected: true,
-      lastSync: new Date(),
-      mode: "live",
-    });
+    const separator =
+      path.includes("?")
+        ? "&"
+        : "?";
 
-    return res.json({
-      ok: true,
-      message: "Pipedrive sync completed",
-      provider: "pipedrive",
-      mode: "live",
-    });
-  } catch (err) {
-    console.error("Pipedrive sync error:", err);
-    return res.status(500).json({
-      ok: false,
-      message: "Failed to sync Pipedrive",
-      error: err.message,
-    });
+    const response =
+      await pipedriveApiRequest(
+        connection,
+        `${path}${separator}${params.toString()}`
+      );
+
+    const pageData =
+      Array.isArray(response?.data)
+        ? response.data
+        : [];
+
+    records.push(...pageData);
+
+    cursor =
+      response?.additional_data
+        ?.next_cursor ||
+      response?.additional_data
+        ?.pagination
+        ?.next_cursor ||
+      null;
+  } while (cursor);
+
+  return records;
+}
+
+function normalizePipedriveDealStage(
+  deal,
+  stageRecord
+) {
+  const status =
+    String(
+      deal?.status || ""
+    ).toLowerCase();
+
+  if (status === "won") {
+    return "Closed Won";
   }
-});
+
+  if (status === "lost") {
+    return "Closed Lost";
+  }
+
+  const stageName =
+    String(
+      stageRecord?.name || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  /*
+   * Atlas currently supports only:
+   * Discovery
+   * Proposal
+   * Follow-Up
+   * Negotiation
+   * Closed Won
+   * Closed Lost
+   *
+   * Normalize common Pipedrive stage names
+   * into those Atlas stages.
+   */
+
+  if (
+    stageName.includes("negotiat") ||
+    stageName.includes("contract") ||
+    stageName.includes("closing")
+  ) {
+    return "Negotiation";
+  }
+
+  if (
+    stageName.includes("proposal") ||
+    stageName.includes("quote") ||
+    stageName.includes("demo") ||
+    stageName.includes("presentation")
+  ) {
+    return "Proposal";
+  }
+
+  if (
+    stageName.includes("follow") ||
+    stageName.includes("nurture") ||
+    stageName.includes("waiting")
+  ) {
+    return "Follow-Up";
+  }
+
+  return "Discovery";
+}
+
+function normalizePipedriveProbability(
+  deal,
+  stageRecord
+) {
+  const rawProbability =
+    deal?.probability ??
+    stageRecord?.deal_probability ??
+    null;
+
+  const numeric =
+    Number(rawProbability);
+
+  if (
+    Number.isFinite(numeric)
+  ) {
+    /*
+     * Pipedrive probabilities are percentages.
+     * Atlas stores probability from 0 to 1.
+     */
+    return Math.max(
+      0,
+      Math.min(
+        1,
+        numeric / 100
+      )
+    );
+  }
+
+  const status =
+    String(
+      deal?.status || ""
+    ).toLowerCase();
+
+  if (status === "won") {
+    return 1;
+  }
+
+  if (status === "lost") {
+    return 0;
+  }
+
+  return 0.5;
+}
+
+function safePipedriveDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date =
+    new Date(value);
+
+  if (
+    Number.isNaN(
+      date.getTime()
+    )
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+router.post(
+  "/pipedrive/sync",
+  requireAuth,
+  async (req, res) => {
+    let connection = null;
+
+    try {
+      const orgId =
+        getOrgId(req);
+
+      if (!orgId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            message:
+              "Missing org context",
+          });
+      }
+
+      connection =
+        await IntegrationConnection.findOne(
+          {
+            orgId,
+            provider:
+              "pipedrive",
+            status: {
+              $in: [
+                "connected",
+                "error",
+              ],
+            },
+          }
+        ).select(
+          "+accessToken +refreshToken"
+        );
+
+      if (!connection) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            message:
+              "Pipedrive is not connected for this workspace",
+          });
+      }
+
+      /*
+       * Do not call markSyncRunning()
+       * here because that method may change
+       * connection.status away from "connected".
+       *
+       * We only need to mark the sync
+       * lifecycle fields.
+       */
+      connection.lastSyncStatus =
+        "running";
+
+      connection.lastSyncError =
+        "";
+
+      await connection.save();
+
+      /*
+       * Fetch Pipedrive CRM data.
+       *
+       * Sequential fetches intentionally
+       * avoid mutating/saving the same
+       * IntegrationConnection in parallel
+       * if a token refresh occurs.
+       */
+      const organizations =
+        await fetchAllPipedriveV2(
+          connection,
+          "/api/v2/organizations"
+        );
+
+      const pipelines =
+        await fetchAllPipedriveV2(
+          connection,
+          "/api/v2/pipelines"
+        );
+
+      const stages =
+        await fetchAllPipedriveV2(
+          connection,
+          "/api/v2/stages"
+        );
+
+      const deals =
+        await fetchAllPipedriveV2(
+          connection,
+          "/api/v2/deals"
+        );
+
+      const stagesById =
+        new Map(
+          stages.map(
+            (stage) => [
+              String(stage.id),
+              stage,
+            ]
+          )
+        );
+
+      const pipelinesById =
+        new Map(
+          pipelines.map(
+            (pipeline) => [
+              String(
+                pipeline.id
+              ),
+              pipeline,
+            ]
+          )
+        );
+
+      /*
+       * Maps Pipedrive Organization ID
+       * -> Atlas Client document.
+       */
+      const clientsByExternalId =
+        new Map();
+
+      let importedClients = 0;
+      let importedAccounts = 0;
+      let importedDeals = 0;
+      let skippedDeals = 0;
+
+      /*
+       * ------------------------------------------------
+       * Organizations -> Atlas Clients + Accounts
+       * ------------------------------------------------
+       */
+      for (
+        const organization
+        of organizations
+      ) {
+        const externalId =
+          organization?.id != null
+            ? String(
+                organization.id
+              )
+            : "";
+
+        if (!externalId) {
+          continue;
+        }
+
+        const name =
+          String(
+            organization?.name ||
+              `Pipedrive Organization ${externalId}`
+          ).trim();
+
+        /*
+         * Pipedrive organization standard data
+         * does not guarantee website/industry
+         * fields unless those exist as custom
+         * fields, so we do not invent them.
+         */
+        const sourcePayload = {
+          ...organization,
+        };
+
+        /*
+         * -------- Client --------
+         */
+
+        let client =
+          await Client.findOne({
+            orgId,
+            externalSource:
+              "pipedrive",
+            externalId,
+          });
+
+        if (!client) {
+          /*
+           * Client has no unique-name
+           * restriction, so creating by
+           * external ID is safe.
+           */
+          client =
+            new Client({
+              orgId,
+              workspaceId:
+                orgId,
+              name,
+              status:
+                "active",
+              externalSource:
+                "pipedrive",
+              externalId,
+              sourcePayload,
+            });
+
+          await client.save();
+
+          importedClients += 1;
+        } else {
+          client.name =
+            name;
+
+          client.sourcePayload =
+            sourcePayload;
+
+          client.workspaceId =
+            client.workspaceId ||
+            orgId;
+
+          await client.save();
+        }
+
+        clientsByExternalId.set(
+          externalId,
+          client
+        );
+
+        /*
+         * -------- Account --------
+         *
+         * Account has unique
+         * { orgId, name }, so first
+         * look by Pipedrive identity.
+         */
+        let account =
+          await Account.findOne({
+            orgId,
+            externalSource:
+              "pipedrive",
+            externalId,
+          });
+
+        if (!account) {
+          /*
+           * If Atlas already has an
+           * account with exactly the
+           * same name, reuse it rather
+           * than violating the unique
+           * orgId + name index.
+           */
+          account =
+            await Account.findOne({
+              orgId,
+              name,
+            });
+        }
+
+        if (!account) {
+          account =
+            new Account({
+              orgId,
+              workspaceId:
+                orgId,
+              name,
+              status:
+                "Active",
+              externalSource:
+                "pipedrive",
+              externalId,
+              sourcePayload,
+            });
+
+          await account.save();
+
+          importedAccounts += 1;
+        } else {
+          /*
+           * Only claim the external
+           * identity if this record
+           * does not already belong to
+           * another provider.
+           */
+          if (
+            !account.externalSource ||
+            account.externalSource ===
+              "pipedrive"
+          ) {
+            account.externalSource =
+              "pipedrive";
+
+            account.externalId =
+              externalId;
+          }
+
+          account.sourcePayload =
+            sourcePayload;
+
+          account.workspaceId =
+            account.workspaceId ||
+            orgId;
+
+          await account.save();
+        }
+      }
+
+      /*
+       * ------------------------------------------------
+       * Deals -> Atlas Deals
+       * ------------------------------------------------
+       */
+      for (
+        const pipedriveDeal
+        of deals
+      ) {
+        const externalId =
+          pipedriveDeal?.id != null
+            ? String(
+                pipedriveDeal.id
+              )
+            : "";
+
+        if (!externalId) {
+          skippedDeals += 1;
+          continue;
+        }
+
+        /*
+         * Pipedrive v2 deals link to an
+         * organization using org_id.
+         */
+        const pipedriveOrgId =
+          pipedriveDeal?.org_id !=
+          null
+            ? String(
+                pipedriveDeal.org_id
+              )
+            : "";
+
+        let client =
+          pipedriveOrgId
+            ? clientsByExternalId.get(
+                pipedriveOrgId
+              )
+            : null;
+
+        /*
+         * If the organization wasn't
+         * returned in this fetch for
+         * some reason, try Atlas.
+         */
+        if (
+          !client &&
+          pipedriveOrgId
+        ) {
+          client =
+            await Client.findOne({
+              orgId,
+              externalSource:
+                "pipedrive",
+              externalId:
+                pipedriveOrgId,
+            });
+
+          if (client) {
+            clientsByExternalId.set(
+              pipedriveOrgId,
+              client
+            );
+          }
+        }
+
+        /*
+         * Atlas requires Deal.clientId.
+         *
+         * Do NOT use Account._id here.
+         */
+        if (!client) {
+          skippedDeals += 1;
+          continue;
+        }
+
+        const stageRecord =
+          pipedriveDeal
+            ?.stage_id != null
+            ? stagesById.get(
+                String(
+                  pipedriveDeal.stage_id
+                )
+              )
+            : null;
+
+        const pipelineRecord =
+          pipedriveDeal
+            ?.pipeline_id != null
+            ? pipelinesById.get(
+                String(
+                  pipedriveDeal
+                    .pipeline_id
+                )
+              )
+            : null;
+
+        const normalizedStage =
+          normalizePipedriveDealStage(
+            pipedriveDeal,
+            stageRecord
+          );
+
+        const probability =
+          normalizePipedriveProbability(
+            pipedriveDeal,
+            stageRecord
+          );
+
+        const amountValue =
+          Number(
+            pipedriveDeal?.value ??
+              0
+          );
+
+        const amount =
+          Number.isFinite(
+            amountValue
+          ) &&
+          amountValue >= 0
+            ? amountValue
+            : 0;
+
+        const status =
+          String(
+            pipedriveDeal?.status ||
+              ""
+          ).toLowerCase();
+
+        const expectedCloseDate =
+          safePipedriveDate(
+            pipedriveDeal
+              ?.expected_close_date
+          );
+
+        const closedAt =
+          safePipedriveDate(
+            pipedriveDeal
+              ?.close_time ||
+              pipedriveDeal
+                ?.won_time ||
+              pipedriveDeal
+                ?.lost_time
+          );
+
+        const sourcePayload = {
+          ...pipedriveDeal,
+
+          _atlasPipedrive: {
+            pipelineName:
+              pipelineRecord?.name ||
+              "",
+
+            stageName:
+              stageRecord?.name ||
+              "",
+          },
+        };
+
+        let deal =
+          await Deal.findOne({
+            orgId,
+            externalSource:
+              "pipedrive",
+            externalId,
+          });
+
+        if (!deal) {
+          deal =
+            new Deal({
+              orgId,
+              workspaceId:
+                orgId,
+
+              /*
+               * CRITICAL:
+               * references Client,
+               * not Account.
+               */
+              clientId:
+                client._id,
+
+              name:
+                String(
+                  pipedriveDeal
+                    ?.title ||
+                    `Pipedrive Deal ${externalId}`
+                ).trim(),
+
+              stage:
+                normalizedStage,
+
+              amount,
+
+              probability,
+
+              closeDate:
+                expectedCloseDate,
+
+              closedAt:
+                closedAt,
+
+              closedReason:
+                status === "lost"
+                  ? String(
+                      pipedriveDeal
+                        ?.lost_reason ||
+                        ""
+                    )
+                  : "",
+
+              externalSource:
+                "pipedrive",
+
+              externalId,
+
+              sourcePayload,
+            });
+
+          await deal.save();
+
+          importedDeals += 1;
+        } else {
+          deal.clientId =
+            client._id;
+
+          deal.name =
+            String(
+              pipedriveDeal
+                ?.title ||
+                deal.name
+            ).trim();
+
+          deal.stage =
+            normalizedStage;
+
+          deal.amount =
+            amount;
+
+          deal.probability =
+            probability;
+
+          deal.closeDate =
+            expectedCloseDate;
+
+          deal.closedAt =
+            closedAt;
+
+          deal.closedReason =
+            status === "lost"
+              ? String(
+                  pipedriveDeal
+                    ?.lost_reason ||
+                    ""
+                )
+              : "";
+
+          deal.sourcePayload =
+            sourcePayload;
+
+          deal.workspaceId =
+            deal.workspaceId ||
+            orgId;
+
+          await deal.save();
+        }
+      }
+
+      connection.status =
+        "connected";
+
+      connection.lastSyncStatus =
+        "success";
+
+      connection.lastSyncAt =
+        new Date();
+
+      connection.lastSyncError =
+        "";
+
+      await connection.save();
+
+      await updateOrgIntegrationSummary(
+        orgId,
+        "pipedrive",
+        {
+          connected: true,
+          lastSync:
+            new Date(),
+          mode: "live",
+        }
+      );
+
+      return res.json({
+        ok: true,
+        message:
+          "Pipedrive sync completed",
+        provider:
+          "pipedrive",
+        mode: "live",
+
+        imported: {
+          organizations:
+            organizations.length,
+          clients:
+            importedClients,
+          accounts:
+            importedAccounts,
+          deals:
+            importedDeals,
+          skippedDeals,
+          pipelines:
+            pipelines.length,
+          stages:
+            stages.length,
+        },
+      });
+    } catch (err) {
+      console.error(
+        "Pipedrive sync error:",
+        err
+      );
+
+      if (connection) {
+        try {
+          connection.status =
+            "connected";
+
+          connection.lastSyncStatus =
+            "failed";
+
+          connection.lastSyncError =
+            String(
+              err?.message ||
+                "Pipedrive sync failed"
+            ).slice(
+              0,
+              1000
+            );
+
+          await connection.save();
+        } catch (
+          saveError
+        ) {
+          console.error(
+            "Failed to save Pipedrive sync error:",
+            saveError
+          );
+        }
+      }
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          message:
+            "Failed to sync Pipedrive",
+          error:
+            err.message,
+        });
+    }
+  }
+);
 
 router.post("/bitrix24/sync", requireAuth, async (req, res) => {
   try {
