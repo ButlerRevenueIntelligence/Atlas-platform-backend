@@ -5332,8 +5332,19 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
       const allRecords = [];
 
       while (more) {
-        const response = await fetch(
-          `${zohoApiDomain}/crm/v8/${moduleName}?page=${page}&per_page=200`,
+        const fields =
+  moduleName === "Accounts"
+    ? "id,Account_Name,Website,Industry,Phone"
+    : "id,Deal_Name,Account_Name,Amount,Stage,Closing_Date,Probability";
+
+const params = new URLSearchParams({
+  page: String(page),
+  per_page: "200",
+  fields,
+});
+
+const response = await fetch(
+  `${zohoApiDomain}/crm/v8/${moduleName}?${params.toString()}`,
           {
             method: "GET",
             headers: {
