@@ -5408,16 +5408,11 @@ function normalizePipedriveProbability(
     stageRecord?.deal_probability ??
     null;
 
-  const numeric =
-    Number(rawProbability);
+  const numeric = Number(rawProbability);
 
   if (Number.isFinite(numeric)) {
-    // Pipedrive may return probability either as
-    // a decimal (0-1) or percentage (0-100).
-    if (numeric >= 0 && numeric <= 1) {
-      return numeric;
-    }
-
+    // Pipedrive probability is a percentage from 0–100.
+    // Atlas stores probability as a decimal from 0–1.
     return Math.max(
       0,
       Math.min(
@@ -5427,10 +5422,9 @@ function normalizePipedriveProbability(
     );
   }
 
-  const status =
-    String(
-      deal?.status || ""
-    ).toLowerCase();
+  const status = String(
+    deal?.status || ""
+  ).toLowerCase();
 
   if (status === "won") {
     return 1;
