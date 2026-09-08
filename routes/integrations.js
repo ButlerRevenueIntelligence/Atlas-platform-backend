@@ -5565,7 +5565,7 @@ if (!matchedClient) {
           $set: {
             orgId,
             name: dealName,
-            clientId: natchedClient._id,
+            clientId: matchedClient._id,
             amount: Number(deal?.Amount || 0),
             stage: normalizedStage,
             closeDate: deal?.Closing_Date || null,
