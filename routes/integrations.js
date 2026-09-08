@@ -780,11 +780,19 @@ function buildZohoAuthUrl(orgId) {
   return `${accountsBase}/oauth/v2/auth?${params.toString()}`;
 }
 
-async function exchangeZohoCodeForTokens(code) {
+async function exchangeZohoCodeForTokens(
+  code,
+  accountsServer = null
+) {
   const clientId = String(process.env.ZOHO_CLIENT_ID || "").trim();
   const clientSecret = String(process.env.ZOHO_CLIENT_SECRET || "").trim();
   const redirectUri = buildZohoRedirectUri();
-  const accountsBase = getZohoAccountsBase();
+  const accountsBase = String(
+  accountsServer ||
+    getZohoAccountsBase()
+)
+  .trim()
+  .replace(/\/+$/, "");
 
   if (!clientId || !clientSecret || !redirectUri) {
     throw new Error("Zoho OAuth is not fully configured");
@@ -3692,7 +3700,12 @@ router.get("/hubspot/callback", async (req, res) => {
 
 router.get("/zoho_crm/callback", async (req, res) => {
   try {
-    const { code, state } = req.query;
+    const {
+  code,
+  state,
+  location,
+  "accounts-server": accountsServer,
+} = req.query;
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
@@ -3720,7 +3733,11 @@ router.get("/zoho_crm/callback", async (req, res) => {
     const org = await ensureOrg(orgId);
     if (!org) return res.status(404).send("Workspace not found");
 
-    const tokenData = await exchangeZohoCodeForTokens(code);
+    const tokenData =
+  await exchangeZohoCodeForTokens(
+    code,
+    accountsServer
+  );
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
@@ -3755,9 +3772,17 @@ router.get("/zoho_crm/callback", async (req, res) => {
   "ZohoCRM.users.ALL",
   "ZohoCRM.org.READ",
 ],
-      metadata: {
-        orgInfo,
-      },
+     metadata: {
+  orgInfo,
+  location:
+    location || null,
+  accountsServer:
+    accountsServer ||
+    getZohoAccountsBase(),
+  apiDomain:
+    tokenData?.api_domain ||
+    "https://www.zohoapis.com",
+},
     });
 
     await connection.save();
