@@ -3764,17 +3764,13 @@ router.get("/zoho_crm/callback", async (req, res) => {
 
     if (!accessToken) throw new Error("Zoho did not return access token");
 
-    const savedZohoApiDomain =
+    const zohoApiDomain =
   String(
-    connection?.metadata?.apiDomain || ""
-  ).trim();
-
-const zohoApiDomain =
-  /^https:\/\/(?:www\.)?zohoapis\.[a-z.]+$/i.test(
-    savedZohoApiDomain
+    tokenData?.api_domain ||
+      "https://www.zohoapis.com"
   )
-    ? savedZohoApiDomain.replace(/\/+$/, "")
-    : "https://www.zohoapis.com";
+    .trim()
+    .replace(/\/+$/, "");
 
 const orgInfo =
   await getZohoOrgInfo(
