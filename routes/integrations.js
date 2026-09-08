@@ -813,6 +813,160 @@ async function exchangeZohoCodeForTokens(code) {
   return data;
 }
 
+async function refreshZohoAccessToken(refreshToken) {
+  const clientId = String(
+    process.env.ZOHO_CLIENT_ID || ""
+  ).trim();
+
+  const clientSecret = String(
+    process.env.ZOHO_CLIENT_SECRET || ""
+  ).trim();
+
+  const accountsBase =
+    getZohoAccountsBase();
+
+  if (
+    !clientId ||
+    !clientSecret ||
+    !refreshToken
+  ) {
+    throw new Error(
+      "Zoho refresh token configuration is incomplete"
+    );
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: String(refreshToken),
+  });
+
+  const response = await fetch(
+    `${accountsBase}/oauth/v2/token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded",
+      },
+      body,
+    }
+  );
+
+  const data =
+    await response.json().catch(() => ({}));
+
+  if (
+    !response.ok ||
+    !data?.access_token
+  ) {
+    throw new Error(
+      data?.error_description ||
+        data?.error ||
+        "Failed to refresh Zoho access token"
+    );
+  }
+
+  return data;
+}
+
+async function ensureZohoAccessToken(
+  connection,
+  forceRefresh = false
+) {
+  if (!connection) {
+    throw new Error(
+      "Missing Zoho CRM connection"
+    );
+  }
+
+  const expiresAt =
+    connection.tokenExpiresAt
+      ? new Date(
+          connection.tokenExpiresAt
+        ).getTime()
+      : 0;
+
+  const refreshEarlyMs =
+    2 * 60 * 1000;
+
+  const tokenStillValid =
+    connection.accessToken &&
+    expiresAt &&
+    expiresAt >
+      Date.now() + refreshEarlyMs;
+
+  if (
+    !forceRefresh &&
+    tokenStillValid
+  ) {
+    return connection.accessToken;
+  }
+
+  if (
+    !forceRefresh &&
+    connection.accessToken &&
+    !expiresAt
+  ) {
+    return connection.accessToken;
+  }
+
+  if (!connection.refreshToken) {
+    if (
+      connection.accessToken &&
+      !forceRefresh
+    ) {
+      return connection.accessToken;
+    }
+
+    throw new Error(
+      "Zoho access token expired and no refresh token is available"
+    );
+  }
+
+  const tokenData =
+    await refreshZohoAccessToken(
+      connection.refreshToken
+    );
+
+  connection.accessToken =
+    tokenData.access_token;
+
+  connection.tokenType =
+    tokenData.token_type ||
+    connection.tokenType ||
+    "Bearer";
+
+  const expiresIn =
+    Number(
+      tokenData.expires_in || 0
+    ) || 0;
+
+  connection.tokenExpiresAt =
+    expiresIn
+      ? new Date(
+          Date.now() +
+            expiresIn * 1000
+        )
+      : null;
+
+  if (tokenData.api_domain) {
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      apiDomain:
+        String(
+          tokenData.api_domain
+        )
+          .trim()
+          .replace(/\/+$/, ""),
+    };
+  }
+
+  await connection.save();
+
+  return connection.accessToken;
+}
 async function getZohoOrgInfo(accessToken) {
   const res = await fetch("https://www.zohoapis.com/crm/v8/org", {
     headers: {
@@ -3589,7 +3743,10 @@ router.get("/zoho_crm/callback", async (req, res) => {
       externalAccountId: orgInfo?.id ? String(orgInfo.id) : null,
       externalAccountName: orgInfo?.company_name || "Zoho CRM",
       accessToken,
-      refreshToken,
+      refreshToken:
+  refreshToken ||
+  connection.refreshToken ||
+  null,
       tokenType: "Bearer",
       tokenExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
       scopes: [
@@ -5096,7 +5253,10 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
       });
     }
 
-    const accessToken = connection.accessToken;
+    const accessToken =
+  await ensureZohoAccessToken(
+    connection
+  );
 
     async function zohoGetAll(moduleName) {
       let page = 1;
