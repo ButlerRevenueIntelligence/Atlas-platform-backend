@@ -5345,10 +5345,23 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-          throw new Error(
-            data?.message || `Failed to fetch Zoho ${moduleName}`
-          );
-        }
+  console.error(
+    "Zoho API request failed:",
+    {
+      moduleName,
+      status: response.status,
+      data,
+    }
+  );
+
+  throw new Error(
+    `${moduleName}: ${
+      data?.message ||
+      data?.code ||
+      "Zoho API request failed"
+    }`
+  );
+}
 
         const rows = Array.isArray(data?.data) ? data.data : [];
         allRecords.push(...rows);
