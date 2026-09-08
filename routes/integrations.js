@@ -975,20 +975,40 @@ async function ensureZohoAccessToken(
 
   return connection.accessToken;
 }
-async function getZohoOrgInfo(accessToken) {
-  const res = await fetch("https://www.zohoapis.com/crm/v8/org", {
-    headers: {
-      Authorization: `Zoho-oauthtoken ${accessToken}`,
-    },
-  });
+async function getZohoOrgInfo(
+  accessToken,
+  apiDomain = "https://www.zohoapis.com"
+) {
+  const base = String(
+    apiDomain || "https://www.zohoapis.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
 
-  const data = await res.json().catch(() => ({}));
+  const res = await fetch(
+    `${base}/crm/v8/org`,
+    {
+      headers: {
+        Authorization:
+          `Zoho-oauthtoken ${accessToken}`,
+      },
+    }
+  );
+
+  const data =
+    await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error("Failed to fetch Zoho org");
+    throw new Error(
+      data?.message ||
+        data?.code ||
+        "Failed to load Zoho organization"
+    );
   }
 
-  return Array.isArray(data?.org) ? data.org[0] : null;
+  return Array.isArray(data?.org)
+    ? data.org[0] || null
+    : data?.org || null;
 }
 
 /* -------------------------------- */
@@ -3744,7 +3764,19 @@ router.get("/zoho_crm/callback", async (req, res) => {
 
     if (!accessToken) throw new Error("Zoho did not return access token");
 
-    const orgInfo = await getZohoOrgInfo(accessToken);
+    const zohoApiDomain =
+  String(
+    tokenData?.api_domain ||
+      "https://www.zohoapis.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
+
+const orgInfo =
+  await getZohoOrgInfo(
+    accessToken,
+    zohoApiDomain
+  );
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -5283,6 +5315,13 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
     connection
   );
 
+    const zohoApiDomain =
+  String(
+    connection?.metadata?.apiDomain ||
+      "https://www.zohoapis.com"
+  )
+    .trim()
+    .replace(/\/+$/, "");
     async function zohoGetAll(moduleName) {
       let page = 1;
       let more = true;
@@ -5290,7 +5329,7 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
 
       while (more) {
         const response = await fetch(
-          `https://www.zohoapis.com/crm/v8/${moduleName}?page=${page}&per_page=200`,
+          `${zohoApiDomain}/crm/v8/${moduleName}?page=${page}&per_page=200`,
           {
             method: "GET",
             headers: {
