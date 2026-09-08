@@ -383,22 +383,28 @@ router.get("/", requireAuth, async (req, res) => {
 
     const workspaceMode = detectWorkspaceMode(org);
 
-    if (workspaceMode === "demo") {
-      const demoMetrics = buildDemoMetrics();
-      const demoDeals = buildDemoDeals(org);
-      const demoIntegrations = buildDemoIntegrations();
+   if (workspaceMode === "demo") {
+  const realDeals = await db
+    .collection("deals")
+    .find(orgIdMatch(ctx.orgId))
+    .toArray();
 
-      return res.json(
-        buildDashboardResponse({
-          org,
-          membership: ctx.membership,
-          integrations: demoIntegrations,
-          deals: demoDeals,
-          metrics: demoMetrics,
-          workspaceMode: "demo",
-        })
-      );
-    }
+  const hasRealDeals = Array.isArray(realDeals) && realDeals.length > 0;
+
+  const demoMetrics = buildDemoMetrics();
+  const demoIntegrations = buildDemoIntegrations();
+
+  return res.json(
+    buildDashboardResponse({
+      org,
+      membership: ctx.membership,
+      integrations: demoIntegrations,
+      deals: hasRealDeals ? realDeals : buildDemoDeals(org),
+      metrics: demoMetrics,
+      workspaceMode: "demo",
+    })
+  );
+}
 
     const integrations = await db
       .collection("integrations")
