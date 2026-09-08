@@ -5312,7 +5312,8 @@ router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
 
     const accessToken =
   await ensureZohoAccessToken(
-    connection
+    connection,
+    true
   );
 
     const zohoApiDomain =
