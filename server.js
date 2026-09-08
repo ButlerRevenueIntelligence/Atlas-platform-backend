@@ -40,7 +40,6 @@ import trialRoutes from "./routes/trial.js";
 import hubspotSyncRoutes from "./routes/hubspotSync.js";
 import importsRoutes from "./routes/imports.js";
 import ghlRoutes from "./routes/ghl.js";
-import pipedriveRoutes from "./routes/pipedrive.js";
 import linkedinAdsRoutes from "./routes/linkedinAds.js";
 import graphiqRoutes from "./routes/graphiq.js";
 
@@ -187,10 +186,6 @@ app.use(
   linkedinAdsRoutes
 );
 
-app.use(
-  "/api/integrations/pipedrive",
-  pipedriveRoutes
-);
 
 /**
  * OAuth callbacks need to be accessible without normal
