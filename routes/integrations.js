@@ -5411,13 +5411,13 @@ function normalizePipedriveProbability(
   const numeric =
     Number(rawProbability);
 
-  if (
-    Number.isFinite(numeric)
-  ) {
-    /*
-     * Pipedrive probabilities are percentages.
-     * Atlas stores probability from 0 to 1.
-     */
+  if (Number.isFinite(numeric)) {
+    // Pipedrive may return probability either as
+    // a decimal (0-1) or percentage (0-100).
+    if (numeric >= 0 && numeric <= 1) {
+      return numeric;
+    }
+
     return Math.max(
       0,
       Math.min(
