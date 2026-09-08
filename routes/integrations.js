@@ -2694,6 +2694,102 @@ router.post("/disconnect", requireAuth, async (req, res) => {
       }
     }
     /*
+ * --------------------------------
+ * ZOHO CRM TOKEN REVOCATION
+ * --------------------------------
+ *
+ * Revoke Zoho authorization remotely before
+ * clearing Atlas's local token storage.
+ */
+if (
+  id === "zoho_crm" &&
+  connection.status === "connected"
+) {
+  try {
+    const tokenToRevoke =
+      connection.refreshToken ||
+      connection.accessToken;
+
+    if (tokenToRevoke) {
+      const accountsServer = String(
+        connection?.metadata?.accountsServer ||
+          getZohoAccountsBase()
+      )
+        .trim()
+        .replace(/\/+$/, "");
+
+      const clientId = String(
+        process.env.ZOHO_CLIENT_ID || ""
+      ).trim();
+
+      const clientSecret = String(
+        process.env.ZOHO_CLIENT_SECRET || ""
+      ).trim();
+
+      if (!clientId || !clientSecret) {
+        throw new Error(
+          "Zoho OAuth credentials are not configured"
+        );
+      }
+
+      const basicAuth = Buffer.from(
+        `${clientId}:${clientSecret}`
+      ).toString("base64");
+
+      const revokeBody = new URLSearchParams({
+        token: tokenToRevoke,
+        token_type: connection.refreshToken
+          ? "refresh_token"
+          : "access_token",
+      });
+
+      const revokeResponse = await fetch(
+        `${accountsServer}/oauth/v2/revoke/token`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${basicAuth}`,
+            "Content-Type":
+              "application/x-www-form-urlencoded",
+          },
+          body: revokeBody,
+        }
+      );
+
+      if (!revokeResponse.ok) {
+        const revokeText =
+          await revokeResponse.text();
+
+        throw new Error(
+          revokeText ||
+            `Zoho token revocation failed with status ${revokeResponse.status}`
+        );
+      }
+    }
+  } catch (zohoErr) {
+    console.error(
+      "Zoho token revocation error:",
+      zohoErr
+    );
+
+    connection.lastError = String(
+      zohoErr?.message ||
+        "Zoho token revocation failed"
+    );
+
+    await connection.save();
+
+    return res.status(502).json({
+      ok: false,
+      message:
+        "Zoho CRM could not be fully disconnected. Zoho authorization is still active.",
+      error:
+        zohoErr?.message ||
+        "Zoho token revocation failed",
+    });
+  }
+}
+    /*
      * --------------------------------
      * LOCAL DISCONNECT
      * --------------------------------
