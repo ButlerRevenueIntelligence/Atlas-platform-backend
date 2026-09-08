@@ -5433,6 +5433,7 @@ const clientsByZohoAccountId =
       {
         $set: {
           orgId,
+          workspaceId: orgId,
           name,
           website,
           domain,
