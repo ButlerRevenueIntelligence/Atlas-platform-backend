@@ -7325,7 +7325,7 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
         method: "GET",
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          "LinkedIn-Version": "202404",
+          "LinkedIn-Version": "202608",
           "X-Restli-Protocol-Version": "2.0.0",
         },
       });
