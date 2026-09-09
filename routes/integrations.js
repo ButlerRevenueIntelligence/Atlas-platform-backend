@@ -7333,12 +7333,17 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(
-          data?.message ||
-            data?.serviceErrorCode ||
-            "LinkedIn API request failed"
-        );
-      }
+  console.error(
+    "LinkedIn API error details:",
+    JSON.stringify(data, null, 2)
+  );
+
+  throw new Error(
+    data?.message ||
+      data?.serviceErrorCode ||
+      "LinkedIn API request failed"
+  );
+}
 
       return data;
     }
