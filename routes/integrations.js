@@ -1832,20 +1832,54 @@ async function exchangeShopifyCodeForToken({ code, shopDomain }) {
 async function getShopifyShopInfo({ shopDomain, accessToken }) {
   const cleanDomain = normalizeShopDomain(shopDomain);
 
-  const res = await fetch(`https://${cleanDomain}/admin/api/2024-10/shop.json`, {
-    headers: {
-      "X-Shopify-Access-Token": accessToken,
-      "Content-Type": "application/json",
-    },
-  });
+  const response = await fetch(
+    `https://${cleanDomain}/admin/api/2026-07/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `
+          query AtlasShopInfo {
+            shop {
+              id
+              name
+              email
+              myshopifyDomain
+              primaryDomain {
+                host
+                url
+              }
+              currencyCode
+              timezoneAbbreviation
+            }
+          }
+        `,
+      }),
+    }
+  );
 
-  const data = await res.json().catch(() => ({}));
+  const data = await response.json().catch(() => ({}));
 
-  if (!res.ok) {
-    throw new Error(data?.errors || "Failed to fetch Shopify shop info");
+  if (!response.ok || data?.errors?.length) {
+    const message =
+      data?.errors?.[0]?.message ||
+      `Shopify GraphQL request failed with status ${response.status}`;
+
+    const error = new Error(message);
+    error.status = response.status;
+    error.shopifyResponse = data;
+
+    throw error;
   }
 
-  return data?.shop || null;
+  if (!data?.data?.shop) {
+    throw new Error("Shopify did not return shop information");
+  }
+
+  return data.data.shop;
 }
 
 /* -------------------------------- */
