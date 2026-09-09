@@ -1539,7 +1539,7 @@ async function getGoogleAdsAccessibleCustomers(accessToken) {
   }
 
   const res = await fetch(
-    "https://googleads.googleapis.com/v14/customers:listAccessibleCustomers",
+    "https://googleads.googleapis.com/v25/customers:listAccessibleCustomers",
     {
       method: "GET",
       headers,
