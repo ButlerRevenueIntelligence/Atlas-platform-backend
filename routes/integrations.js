@@ -4740,6 +4740,10 @@ router.get("/linkedin_ads/callback", async (req, res) => {
 
     const accessToken = tokenData?.access_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
+    const refreshToken = tokenData?.refresh_token || null;
+
+const refreshTokenExpiresIn =
+  Number(tokenData?.refresh_token_expires_in || 0) || 0;
 
     if (!accessToken) {
       throw new Error("LinkedIn did not return an access token");
@@ -4761,7 +4765,10 @@ router.get("/linkedin_ads/callback", async (req, res) => {
     connection.connectedAt = new Date();
     connection.disconnectedAt = null;
     connection.accessToken = accessToken;
-    connection.refreshToken = null;
+    connection.refreshToken =
+  refreshToken ||
+  connection.refreshToken ||
+  null;
     connection.tokenType = "Bearer";
     connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
     connection.externalAccountId = profile?.sub || null;
