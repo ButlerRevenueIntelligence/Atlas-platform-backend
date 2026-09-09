@@ -7388,10 +7388,10 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
     if (externalAccountId) {
       try {
         const campaignsResponse = await linkedInGet(
-          `https://api.linkedin.com/rest/adCampaigns?q=search&search=(account:(values:List(urn%3Ali%3AsponsoredAccount%3A${encodeURIComponent(
-            externalAccountId
-          )})))`
-        );
+  `https://api.linkedin.com/rest/adAccounts/${encodeURIComponent(
+    externalAccountId
+  )}/adCampaigns?q=search`
+);
 
         campaigns = Array.isArray(campaignsResponse?.elements)
           ? campaignsResponse.elements
