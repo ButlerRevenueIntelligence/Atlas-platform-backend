@@ -1664,7 +1664,7 @@ async function exchangeMetaCodeForTokens(code) {
   });
 
   const res = await fetch(
-    `https://graph.facebook.com/v18.0/oauth/access_token?${params.toString()}`
+    `https://graph.facebook.com/v26.0/oauth/access_token?${params.toString()}`
   );
 
   const data = await res.json().catch(() => ({}));
@@ -1678,7 +1678,7 @@ async function exchangeMetaCodeForTokens(code) {
 
 async function getMetaAdAccounts(accessToken) {
   const res = await fetch(
-    "https://graph.facebook.com/v18.0/me/adaccounts?fields=id,name,account_status",
+    "https://graph.facebook.com/v26.0/me/adaccounts?fields=id,name,account_status",
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
