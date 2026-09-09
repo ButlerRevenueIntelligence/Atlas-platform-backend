@@ -4729,6 +4729,10 @@ router.get("/linkedin_ads/callback", async (req, res) => {
     }
 
     const tokenData = await exchangeLinkedInCodeForTokens(code);
+    console.log(
+  "LinkedIn token response fields:",
+  Object.keys(tokenData || {})
+);
 
     const accessToken = tokenData?.access_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
