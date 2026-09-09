@@ -761,9 +761,8 @@ function buildZohoAuthUrl(orgId) {
   if (!clientId || !redirectUri || !orgId) return null;
 
   const scope = [
-  "ZohoCRM.modules.ALL",
-  "ZohoCRM.settings.ALL",
-  "ZohoCRM.users.ALL",
+  "ZohoCRM.modules.accounts.READ",
+  "ZohoCRM.modules.deals.READ",
   "ZohoCRM.org.READ",
 ].join(",");
 
