@@ -2160,7 +2160,13 @@ function buildLinkedInAdsAuthUrl(orgId) {
     return null;
   }
 
-  const scope = ["openid", "profile", "email"].join(" ");
+  const scope = [
+  "openid",
+  "profile",
+  "email",
+  "r_ads",
+  "r_ads_reporting",
+].join(" ");
 
   const params = new URLSearchParams({
     response_type: "code",
