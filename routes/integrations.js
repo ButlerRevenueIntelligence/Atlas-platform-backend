@@ -7515,6 +7515,7 @@ if (
     error: err.message,
   });
 }
+});
 
 /* -------------------------------- */
 /* STRIPE REVENUE DAILY             */
