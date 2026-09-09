@@ -1815,6 +1815,7 @@ async function exchangeShopifyCodeForToken({ code, shopDomain }) {
       client_id: clientId,
       client_secret: clientSecret,
       code,
+      expiring: 1,
     }),
   });
 
@@ -1827,6 +1828,82 @@ async function exchangeShopifyCodeForToken({ code, shopDomain }) {
   }
 
   return data;
+}
+
+async function refreshShopifyAccessToken({ shopDomain, refreshToken }) {
+  const clientId = String(process.env.SHOPIFY_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.SHOPIFY_CLIENT_SECRET || "").trim();
+  const cleanDomain = normalizeShopDomain(shopDomain);
+
+  if (!clientId || !clientSecret || !cleanDomain || !refreshToken) {
+    throw new Error("Shopify token refresh is not fully configured");
+  }
+
+  const response = await fetch(
+    `https://${cleanDomain}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data?.access_token || !data?.refresh_token) {
+    throw new Error(
+      data?.error_description || data?.error || "Shopify token refresh failed"
+    );
+  }
+
+  return data;
+}
+
+async function getValidShopifyAccessToken(connection, shopDomain) {
+  const expiresAt = connection?.tokenExpiresAt
+    ? new Date(connection.tokenExpiresAt).getTime()
+    : 0;
+
+  if (
+    connection?.accessToken &&
+    expiresAt > Date.now() + 5 * 60 * 1000
+  ) {
+    return connection.accessToken;
+  }
+
+  if (!connection?.refreshToken) {
+    throw new Error(
+      "Shopify authorization must be renewed. Disconnect and reconnect Shopify."
+    );
+  }
+
+  const tokenData = await refreshShopifyAccessToken({
+    shopDomain,
+    refreshToken: connection.refreshToken,
+  });
+
+  connection.accessToken = tokenData.access_token;
+  connection.refreshToken = tokenData.refresh_token;
+  connection.tokenType = tokenData.token_type || "bearer";
+  connection.tokenExpiresAt = tokenData.expires_in
+    ? new Date(Date.now() + Number(tokenData.expires_in) * 1000)
+    : null;
+  connection.metadata = {
+    ...(connection.metadata || {}),
+    shopifyRefreshTokenExpiresAt: tokenData.refresh_token_expires_in
+      ? new Date(
+          Date.now() + Number(tokenData.refresh_token_expires_in) * 1000
+        )
+      : null,
+  };
+
+  await connection.save();
+  return connection.accessToken;
 }
 
 async function getShopifyShopInfo({ shopDomain, accessToken }) {
@@ -3866,6 +3943,7 @@ router.get("/hubspot/callback", async (req, res) => {
 
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
     const hubId = tokenData?.hub_id
       ? String(tokenData.hub_id)
@@ -4649,6 +4727,12 @@ router.get("/shopify/callback", async (req, res) => {
       throw new Error("Shopify did not return an access token");
     }
 
+    if (!refreshToken || !tokenData?.expires_in) {
+      throw new Error(
+        "Shopify did not return an expiring offline token. Reinstall the app and try again."
+      );
+    }
+
     const shop = await getShopifyShopInfo({
       shopDomain,
       accessToken,
@@ -4668,9 +4752,11 @@ router.get("/shopify/callback", async (req, res) => {
     connection.connectedAt = new Date();
     connection.disconnectedAt = null;
     connection.accessToken = accessToken;
-    connection.refreshToken = null;
-    connection.tokenType = "bearer";
-    connection.tokenExpiresAt = null;
+    connection.refreshToken = refreshToken;
+    connection.tokenType = tokenData?.token_type || "bearer";
+    connection.tokenExpiresAt = new Date(
+      Date.now() + Number(tokenData.expires_in) * 1000
+    );
     connection.externalAccountId = shop?.id ? String(shop.id) : shopDomain;
     connection.externalAccountName = shop?.name || shopDomain;
     connection.scopes = scopes;
@@ -4684,6 +4770,11 @@ router.get("/shopify/callback", async (req, res) => {
       shopEmail: shop?.email || null,
       currency: shop?.currency || null,
       planName: shop?.plan_name || null,
+      shopifyRefreshTokenExpiresAt: tokenData?.refresh_token_expires_in
+        ? new Date(
+            Date.now() + Number(tokenData.refresh_token_expires_in) * 1000
+          )
+        : null,
     };
 
     await connection.save();
@@ -6815,7 +6906,7 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
       orgId,
       provider: "shopify",
       status: "connected",
-    }).select("+accessToken");
+    }).select("+accessToken +refreshToken");
 
     if (!connection || !connection.accessToken) {
       return res.status(404).json({
@@ -6834,7 +6925,10 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
       });
     }
 
-    const accessToken = connection.accessToken;
+    const accessToken = await getValidShopifyAccessToken(
+      connection,
+      shopDomain
+    );
     const cleanDomain = String(shopDomain)
       .trim()
       .toLowerCase()
@@ -6843,7 +6937,7 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
 
     async function shopifyGet(path, query = {}) {
       const qs = new URLSearchParams(query).toString();
-      const url = `https://${cleanDomain}/admin/api/2024-10/${path}${qs ? `?${qs}` : ""}`;
+      const url = `https://${cleanDomain}/admin/api/2026-07/${path}${qs ? `?${qs}` : ""}`;
 
       const response = await fetch(url, {
         method: "GET",
