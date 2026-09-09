@@ -7334,6 +7334,28 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
     }
 
     const accessToken = connection.accessToken;
+    const tokenExpiresAt = connection.tokenExpiresAt
+  ? new Date(connection.tokenExpiresAt)
+  : null;
+
+if (
+  tokenExpiresAt &&
+  tokenExpiresAt.getTime() <= Date.now() + 60_000
+) {
+  connection.lastSyncStatus = "failed";
+  connection.lastError =
+    "LinkedIn access token expired. Reconnect LinkedIn Ads.";
+
+  await connection.save();
+
+  return res.status(401).json({
+    ok: false,
+    reconnectRequired: true,
+    provider: "linkedin_ads",
+    message:
+      "LinkedIn Ads authorization expired. Please reconnect LinkedIn Ads.",
+  });
+}
 
     async function linkedInGet(url) {
       const response = await fetch(url, {
@@ -7353,11 +7375,16 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
     JSON.stringify(data, null, 2)
   );
 
-  throw new Error(
+  const error = new Error(
     data?.message ||
       data?.serviceErrorCode ||
       "LinkedIn API request failed"
   );
+
+  error.status = response.status;
+  error.linkedinData = data;
+
+  throw error;
 }
 
       return data;
@@ -7464,15 +7491,30 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("LinkedIn Ads sync error:", err);
+  console.error("LinkedIn Ads sync error:", err);
 
-    return res.status(500).json({
+  if (err?.status === 401) {
+    connection.lastSyncStatus = "failed";
+    connection.lastError =
+      "LinkedIn authorization is no longer valid. Reconnect LinkedIn Ads.";
+
+    await connection.save();
+
+    return res.status(401).json({
       ok: false,
-      message: "Failed to sync LinkedIn Ads",
-      error: err.message,
+      reconnectRequired: true,
+      provider: "linkedin_ads",
+      message:
+        "LinkedIn Ads authorization expired or was revoked. Please reconnect LinkedIn Ads.",
     });
   }
-});
+
+  return res.status(500).json({
+    ok: false,
+    message: "Failed to sync LinkedIn Ads",
+    error: err.message,
+  });
+}
 
 /* -------------------------------- */
 /* STRIPE REVENUE DAILY             */
