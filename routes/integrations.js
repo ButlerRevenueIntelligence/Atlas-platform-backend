@@ -3943,7 +3943,6 @@ router.get("/hubspot/callback", async (req, res) => {
 
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
-    const refreshToken = tokenData?.refresh_token || null;
     const expiresIn = Number(tokenData?.expires_in || 0) || 0;
     const hubId = tokenData?.hub_id
       ? String(tokenData.hub_id)
@@ -4718,6 +4717,7 @@ router.get("/shopify/callback", async (req, res) => {
     });
 
     const accessToken = tokenData?.access_token || null;
+    const refreshToken = tokenData?.refresh_token || null;
     const scopes = String(tokenData?.scope || "")
       .split(",")
       .map((s) => s.trim())
