@@ -3902,9 +3902,8 @@ const orgInfo =
       tokenType: "Bearer",
       tokenExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
       scopes: [
-  "ZohoCRM.modules.ALL",
-  "ZohoCRM.settings.ALL",
-  "ZohoCRM.users.ALL",
+  "ZohoCRM.modules.accounts.READ",
+  "ZohoCRM.modules.deals.READ",
   "ZohoCRM.org.READ",
 ],
      metadata: {
