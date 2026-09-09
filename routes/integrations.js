@@ -2795,6 +2795,100 @@ if (
   }
 }
     /*
+ * --------------------------------
+ * STRIPE CONNECT DEAUTHORIZATION
+ * --------------------------------
+ *
+ * Revoke the connected Stripe account's
+ * authorization before clearing Atlas's
+ * local credentials.
+ */
+if (
+  id === "stripe" &&
+  connection.status === "connected"
+) {
+  try {
+    const clientId = String(
+      process.env.STRIPE_CONNECT_CLIENT_ID || ""
+    ).trim();
+
+    const secretKey = String(
+      process.env.STRIPE_SECRET_KEY || ""
+    ).trim();
+
+    const stripeAccountId = String(
+      connection.externalAccountId || ""
+    ).trim();
+
+    if (
+      !clientId ||
+      !secretKey ||
+      !stripeAccountId
+    ) {
+      throw new Error(
+        "Stripe deauthorization configuration is incomplete"
+      );
+    }
+
+    const body = new URLSearchParams({
+      client_id: clientId,
+      stripe_user_id: stripeAccountId,
+    });
+
+    const response = await fetch(
+      "https://connect.stripe.com/oauth/deauthorize",
+      {
+        method: "POST",
+        headers: {
+          Authorization:
+            `Basic ${Buffer.from(
+              `${secretKey}:`
+            ).toString("base64")}`,
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body,
+      }
+    );
+
+    const data =
+      await response.json().catch(() => ({}));
+
+    if (
+      !response.ok ||
+      !data?.stripe_user_id
+    ) {
+      throw new Error(
+        data?.error_description ||
+          data?.error ||
+          "Stripe deauthorization failed"
+      );
+    }
+  } catch (stripeErr) {
+    console.error(
+      "Stripe deauthorization error:",
+      stripeErr
+    );
+
+    connection.lastError = String(
+      stripeErr?.message ||
+        "Stripe deauthorization failed"
+    );
+
+    await connection.save();
+
+    return res.status(502).json({
+      ok: false,
+      message:
+        "Stripe could not be fully disconnected. Stripe authorization is still active.",
+      error:
+        stripeErr?.message ||
+        "Stripe deauthorization failed",
+    });
+  }
+}
+    /*
      * --------------------------------
      * LOCAL DISCONNECT
      * --------------------------------
