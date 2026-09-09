@@ -1644,7 +1644,7 @@ function buildMetaAdsAuthUrl(orgId) {
     response_type: "code",
   });
 
-  return `https://www.facebook.com/v18.0/dialog/oauth?${params.toString()}`;
+  return `https://www.facebook.com/v26.0/dialog/oauth?${params.toString()}`;
 }
 
 async function exchangeMetaCodeForTokens(code) {
