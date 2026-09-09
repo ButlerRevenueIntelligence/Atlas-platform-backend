@@ -7611,6 +7611,390 @@ if (
 }
 });
 
+router.post("/meta_ads/sync", requireAuth, async (req, res) => {
+  let connection = null;
+
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({
+        ok: false,
+        message: "Missing org context",
+      });
+    }
+
+    connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "meta_ads",
+      status: "connected",
+    }).select("+accessToken +refreshToken");
+
+    if (!connection || !connection.accessToken) {
+      return res.status(404).json({
+        ok: false,
+        message: "Meta Ads is not connected for this workspace",
+      });
+    }
+
+    const accessToken = connection.accessToken;
+
+    /*
+     * Meta user tokens do not use the same refresh-token
+     * flow as providers such as HubSpot.
+     *
+     * If the saved token has expired, require reconnect.
+     */
+    const tokenExpiresAt = connection.tokenExpiresAt
+      ? new Date(connection.tokenExpiresAt)
+      : null;
+
+    if (
+      tokenExpiresAt &&
+      tokenExpiresAt.getTime() <= Date.now() + 60_000
+    ) {
+      connection.lastSyncAt = new Date();
+      connection.lastSyncStatus = "failed";
+      connection.lastError =
+        "Meta Ads access token expired. Reconnect Meta Ads.";
+
+      await connection.save();
+
+      return res.status(401).json({
+        ok: false,
+        reconnectRequired: true,
+        provider: "meta_ads",
+        message:
+          "Meta Ads authorization expired. Please reconnect Meta Ads.",
+      });
+    }
+
+    async function metaGet(url) {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+
+      const data = await response
+        .json()
+        .catch(() => ({}));
+
+      if (!response.ok || data?.error) {
+        const error = new Error(
+          data?.error?.message ||
+            `Meta API request failed with status ${response.status}`
+        );
+
+        error.status = response.status;
+        error.metaCode =
+          data?.error?.code || null;
+        error.metaSubcode =
+          data?.error?.error_subcode || null;
+        error.metaResponse = data;
+
+        throw error;
+      }
+
+      return data;
+    }
+
+    async function metaGetAll(initialUrl) {
+      const results = [];
+      let nextUrl = initialUrl;
+
+      while (nextUrl) {
+        const data = await metaGet(nextUrl);
+
+        if (Array.isArray(data?.data)) {
+          results.push(...data.data);
+        }
+
+        nextUrl =
+          data?.paging?.next || null;
+      }
+
+      return results;
+    }
+
+    /*
+     * Refresh the list of ad accounts available to
+     * this Meta login.
+     */
+    const accounts = await metaGetAll(
+      "https://graph.facebook.com/v26.0/me/adaccounts" +
+        "?fields=id,name,account_status,currency,timezone_name" +
+        "&limit=100"
+    );
+
+    if (!accounts.length) {
+      throw new Error(
+        "No Meta ad accounts found for this login"
+      );
+    }
+
+    /*
+     * Prefer the account Atlas already selected.
+     * Otherwise use the first available account.
+     */
+    const savedAccountId = String(
+      connection.externalAccountId || ""
+    ).replace(/^act_/, "");
+
+    let selectedAccount =
+      accounts.find((account) => {
+        const id = String(
+          account?.id || ""
+        ).replace(/^act_/, "");
+
+        return (
+          savedAccountId &&
+          id === savedAccountId
+        );
+      }) || null;
+
+    if (!selectedAccount) {
+      selectedAccount =
+        connection?.metadata?.selectedAccount ||
+        accounts[0] ||
+        null;
+    }
+
+    if (!selectedAccount?.id) {
+      throw new Error(
+        "Meta Ads account selection is missing"
+      );
+    }
+
+    const accountId = String(
+      selectedAccount.id
+    ).startsWith("act_")
+      ? String(selectedAccount.id)
+      : `act_${selectedAccount.id}`;
+
+    /*
+     * Pull campaign configuration.
+     */
+    const campaignsUrl =
+      `https://graph.facebook.com/v26.0/${encodeURIComponent(
+        accountId
+      )}/campaigns?` +
+      new URLSearchParams({
+        fields:
+          "id,name,status,effective_status,objective,daily_budget,lifetime_budget",
+        limit: "100",
+      }).toString();
+
+    const campaigns =
+      await metaGetAll(campaignsUrl);
+
+    /*
+     * Pull real campaign-level performance for
+     * the last 30 days.
+     */
+    const insightsUrl =
+      `https://graph.facebook.com/v26.0/${encodeURIComponent(
+        accountId
+      )}/insights?` +
+      new URLSearchParams({
+        level: "campaign",
+        date_preset: "last_30d",
+        fields: [
+          "campaign_id",
+          "campaign_name",
+          "impressions",
+          "reach",
+          "clicks",
+          "spend",
+          "cpc",
+          "cpm",
+          "ctr",
+          "frequency",
+          "actions",
+          "action_values",
+          "date_start",
+          "date_stop",
+        ].join(","),
+        limit: "100",
+      }).toString();
+
+    const campaignInsights =
+      await metaGetAll(insightsUrl);
+
+    const totalSpend =
+      campaignInsights.reduce(
+        (sum, row) =>
+          sum + Number(row?.spend || 0),
+        0
+      );
+
+    const totalImpressions =
+      campaignInsights.reduce(
+        (sum, row) =>
+          sum +
+          Number(row?.impressions || 0),
+        0
+      );
+
+    const totalClicks =
+      campaignInsights.reduce(
+        (sum, row) =>
+          sum +
+          Number(row?.clicks || 0),
+        0
+      );
+
+    const syncedAt = new Date();
+
+    connection.externalAccountId =
+      selectedAccount.id;
+
+    connection.externalAccountName =
+      selectedAccount.name ||
+      selectedAccount.id ||
+      "Meta Ads Account";
+
+    connection.mode = "live";
+    connection.status = "connected";
+
+    connection.lastSyncAt = syncedAt;
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+
+    connection.syncCursor =
+      syncedAt.toISOString();
+
+    connection.metadata = {
+      ...(connection.metadata || {}),
+
+      accounts,
+      selectedAccount,
+      needsSelection: false,
+
+      campaigns,
+      campaignInsights,
+
+      lastMetaAdsSync: {
+        accountsFound: accounts.length,
+        campaignsFound: campaigns.length,
+        insightRows:
+          campaignInsights.length,
+
+        totalSpend: Number(
+          totalSpend.toFixed(2)
+        ),
+
+        totalImpressions,
+        totalClicks,
+
+        syncedAt,
+      },
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(
+      orgId,
+      "meta_ads",
+      {
+        connected: true,
+        lastSync: syncedAt,
+        mode: "live",
+      }
+    );
+
+    return res.json({
+      ok: true,
+      message:
+        "Meta Ads sync completed",
+
+      provider: "meta_ads",
+      mode: "live",
+
+      summary: {
+        account:
+          connection.externalAccountName,
+
+        accountsFound:
+          accounts.length,
+
+        campaignsFound:
+          campaigns.length,
+
+        insightRows:
+          campaignInsights.length,
+
+        totalSpend: Number(
+          totalSpend.toFixed(2)
+        ),
+
+        totalImpressions,
+        totalClicks,
+
+        syncedAt,
+      },
+    });
+  } catch (err) {
+    console.error(
+      "Meta Ads sync error:",
+      err?.metaResponse || err
+    );
+
+    /*
+     * Meta commonly uses OAuth error code 190 when
+     * an access token is invalid or expired.
+     */
+    const authorizationError =
+      err?.status === 401 ||
+      Number(err?.metaCode) === 190;
+
+    if (connection) {
+      try {
+        connection.lastSyncAt =
+          new Date();
+
+        connection.lastSyncStatus =
+          "failed";
+
+        connection.lastError =
+          authorizationError
+            ? "Meta Ads authorization is no longer valid. Reconnect Meta Ads."
+            : String(
+                err?.message ||
+                  "Meta Ads sync failed"
+              );
+
+        await connection.save();
+      } catch (saveErr) {
+        console.error(
+          "Failed to record Meta Ads sync error:",
+          saveErr
+        );
+      }
+    }
+
+    if (authorizationError) {
+      return res.status(401).json({
+        ok: false,
+        reconnectRequired: true,
+        provider: "meta_ads",
+        message:
+          "Meta Ads authorization expired or was revoked. Please reconnect Meta Ads.",
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message:
+        "Failed to sync Meta Ads",
+      error:
+        err?.message ||
+        "Unknown Meta Ads sync error",
+    });
+  }
+});
 /* -------------------------------- */
 /* STRIPE REVENUE DAILY             */
 /* -------------------------------- */
