@@ -4694,6 +4694,10 @@ const tokenData =
 router.get("/linkedin_ads/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
+    console.log("LinkedIn Ads OAuth callback hit", {
+  hasCode: Boolean(code),
+  hasState: Boolean(state),
+});
 
     if (!code || !state) {
       return res.status(400).send("Missing code or state");
