@@ -25,7 +25,6 @@ import partnersRoutes from "./routes/partners.js";
 import orgRoutes from "./routes/org.js";
 import organizationsRoutes from "./routes/organizations.js";
 import atlasRoutes from "./routes/atlas.js";
-import atlasOperator from "./routes/atlasOperator.js";
 import operatorRoutes from "./routes/operator.js";
 import accountsRoutes from "./routes/accounts.js";
 import metricsRoutes from "./routes/metrics.js";
@@ -367,12 +366,6 @@ app.use(
 /**
  * ENTERPRISE / ADVANCED ROUTES
  */
-app.use(
-  "/api/atlas",
-  requirePlan("GROWTH"),
-  atlasOperator
-);
-
 app.use(
   "/api/operator",
   requirePlan("GROWTH"),
