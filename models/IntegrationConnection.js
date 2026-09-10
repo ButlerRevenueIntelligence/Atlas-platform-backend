@@ -28,6 +28,7 @@ const IntegrationConnectionSchema = new mongoose.Schema(
         "ga4",
         "stripe",
         "shopify",
+        "quickbooks",
         "zoho_crm",
         "pipedrive",
         "bitrix24",
