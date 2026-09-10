@@ -27,6 +27,7 @@ const INTEGRATIONS = [
   { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: true },
   { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: true },
   { id: "stripe", name: "Stripe", category: "Payments", supportsLive: true },
+  { id: "quickbooks", name: "QuickBooks Online", category: "Accounting", supportsLive: true },
   { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: true },
 ];
 
@@ -2411,6 +2412,7 @@ async function formatIntegrations(orgId) {
         selectedSalesforceOrg: live?.metadata?.salesforceOrgId || null,
         selectedLinkedInAccount: live?.externalAccountName || null,
         bitrixWebhookUrl: live?.metadata?.webhookUrl || null,
+        financialSummary: live?.metadata?.financialSummary || null,
         supportsLive: item.supportsLive,
       };
     }
@@ -2439,6 +2441,7 @@ async function formatIntegrations(orgId) {
       selectedSalesforceOrg: null,
       selectedLinkedInAccount: null,
       bitrixWebhookUrl: null,
+      financialSummary: null,
       supportsLive: item.supportsLive,
     };
   });
@@ -2999,6 +3002,58 @@ if (
     });
   }
 }
+    /*
+     * --------------------------------
+     * QUICKBOOKS TOKEN REVOCATION
+     * --------------------------------
+     */
+    if (
+      id === "quickbooks" &&
+      connection.status === "connected"
+    ) {
+      try {
+        const clientId = String(process.env.QUICKBOOKS_CLIENT_ID || "").trim();
+        const clientSecret = String(process.env.QUICKBOOKS_CLIENT_SECRET || "").trim();
+        const tokenToRevoke = connection.refreshToken || connection.accessToken;
+
+        if (!clientId || !clientSecret || !tokenToRevoke) {
+          throw new Error("QuickBooks deauthorization configuration is incomplete");
+        }
+
+        const revokeResponse = await fetch(
+          "https://developer.api.intuit.com/v2/oauth2/tokens/revoke",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ token: tokenToRevoke }),
+          }
+        );
+
+        if (!revokeResponse.ok) {
+          const revokeText = await revokeResponse.text();
+          throw new Error(
+            revokeText || `QuickBooks token revocation failed with status ${revokeResponse.status}`
+          );
+        }
+      } catch (quickBooksError) {
+        console.error("QuickBooks token revocation error:", quickBooksError);
+        connection.lastError = String(
+          quickBooksError?.message || "QuickBooks token revocation failed"
+        );
+        await connection.save();
+
+        return res.status(502).json({
+          ok: false,
+          message:
+            "QuickBooks could not be fully disconnected. QuickBooks authorization is still active.",
+          error: quickBooksError?.message || "QuickBooks token revocation failed",
+        });
+      }
+    }
     /*
      * --------------------------------
      * LOCAL DISCONNECT
