@@ -27,6 +27,7 @@ const INTEGRATIONS = [
   { id: "linkedin_ads", name: "LinkedIn Ads", category: "Advertising", supportsLive: true },
   { id: "ga4", name: "Google Analytics 4", category: "Analytics", supportsLive: true },
   { id: "stripe", name: "Stripe", category: "Payments", supportsLive: true },
+  { id: "quickbooks", name: "QuickBooks Online", category: "Accounting", supportsLive: true },
   { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: true },
 ];
 
@@ -2411,6 +2412,7 @@ async function formatIntegrations(orgId) {
         selectedSalesforceOrg: live?.metadata?.salesforceOrgId || null,
         selectedLinkedInAccount: live?.externalAccountName || null,
         bitrixWebhookUrl: live?.metadata?.webhookUrl || null,
+        financialSummary: live?.metadata?.financialSummary || null,
         supportsLive: item.supportsLive,
       };
     }
@@ -2439,6 +2441,7 @@ async function formatIntegrations(orgId) {
       selectedSalesforceOrg: null,
       selectedLinkedInAccount: null,
       bitrixWebhookUrl: null,
+      financialSummary: null,
       supportsLive: item.supportsLive,
     };
   });
@@ -2999,6 +3002,58 @@ if (
     });
   }
 }
+    /*
+     * --------------------------------
+     * QUICKBOOKS TOKEN REVOCATION
+     * --------------------------------
+     */
+    if (
+      id === "quickbooks" &&
+      connection.status === "connected"
+    ) {
+      try {
+        const clientId = String(process.env.QUICKBOOKS_CLIENT_ID || "").trim();
+        const clientSecret = String(process.env.QUICKBOOKS_CLIENT_SECRET || "").trim();
+        const tokenToRevoke = connection.refreshToken || connection.accessToken;
+
+        if (!clientId || !clientSecret || !tokenToRevoke) {
+          throw new Error("QuickBooks deauthorization configuration is incomplete");
+        }
+
+        const revokeResponse = await fetch(
+          "https://developer.api.intuit.com/v2/oauth2/tokens/revoke",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ token: tokenToRevoke }),
+          }
+        );
+
+        if (!revokeResponse.ok) {
+          const revokeText = await revokeResponse.text();
+          throw new Error(
+            revokeText || `QuickBooks token revocation failed with status ${revokeResponse.status}`
+          );
+        }
+      } catch (quickBooksError) {
+        console.error("QuickBooks token revocation error:", quickBooksError);
+        connection.lastError = String(
+          quickBooksError?.message || "QuickBooks token revocation failed"
+        );
+        await connection.save();
+
+        return res.status(502).json({
+          ok: false,
+          message:
+            "QuickBooks could not be fully disconnected. QuickBooks authorization is still active.",
+          error: quickBooksError?.message || "QuickBooks token revocation failed",
+        });
+      }
+    }
     /*
      * --------------------------------
      * LOCAL DISCONNECT
@@ -6983,7 +7038,6 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
 
     let accountsUpserted = 0;
     let dealsUpserted = 0;
-    const shopifyClientsByCustomerId = new Map();
 
     for (const customer of customers) {
       const shopifyCustomerId =
@@ -7002,31 +7056,6 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
         email ||
         phone ||
         `Shopify Customer ${shopifyCustomerId}`;
-
-      const client = await Client.findOneAndUpdate(
-        {
-          orgId,
-          externalSource: "shopify",
-          externalId: shopifyCustomerId,
-        },
-        {
-          $set: {
-            orgId,
-            workspaceId: orgId,
-            name,
-            primaryContactName: fullName,
-            primaryContactEmail: email,
-            primaryContactPhone: phone,
-            status: "active",
-            externalSource: "shopify",
-            externalId: shopifyCustomerId,
-            sourcePayload: customer,
-          },
-        },
-        { upsert: true, new: true }
-      );
-
-      shopifyClientsByCustomerId.set(shopifyCustomerId, client);
 
       await Account.findOneAndUpdate(
         {
@@ -7072,55 +7101,6 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
         });
       }
 
-      let matchedClient = customerId
-        ? shopifyClientsByCustomerId.get(customerId) || null
-        : null;
-
-      if (!matchedClient && customerId) {
-        matchedClient = await Client.findOne({
-          orgId,
-          externalSource: "shopify",
-          externalId: customerId,
-        });
-      }
-
-      if (!matchedClient) {
-        const guestEmail = String(order?.email || order?.contact_email || "").trim();
-        if (guestEmail) {
-          matchedClient = await Client.findOne({
-            orgId,
-            primaryContactEmail: guestEmail.toLowerCase(),
-            archivedAt: null,
-          });
-        }
-
-        if (!matchedClient) {
-          const guestExternalId = guestEmail
-            ? `guest:${guestEmail.toLowerCase()}`
-            : `order-customer:${shopifyOrderId}`;
-          matchedClient = await Client.findOneAndUpdate(
-            {
-              orgId,
-              externalSource: "shopify",
-              externalId: guestExternalId,
-            },
-            {
-              $set: {
-                orgId,
-                workspaceId: orgId,
-                name: guestEmail || `Shopify Customer for ${order?.name || shopifyOrderId}`,
-                primaryContactEmail: guestEmail,
-                status: "active",
-                externalSource: "shopify",
-                externalId: guestExternalId,
-                sourcePayload: order?.customer || null,
-              },
-            },
-            { upsert: true, new: true }
-          );
-        }
-      }
-
       const financialStatus = String(order?.financial_status || "").toLowerCase();
       const fulfillmentStatus = String(order?.fulfillment_status || "").toLowerCase();
       const cancelledAt = order?.cancelled_at || null;
@@ -7141,11 +7121,11 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
         normalizedStage = "Negotiation";
       }
 
-      const orderName = order?.name
-        ? `Order ${order.name}`
-        : order?.order_number != null
-        ? `Order #${order.order_number}`
-        : `Shopify Order ${shopifyOrderId}`;
+      const orderName =
+        order?.name ||
+        order?.order_number != null
+          ? `Order ${order.name || `#${order.order_number}`}`
+          : `Shopify Order ${shopifyOrderId}`;
 
       await Deal.findOneAndUpdate(
         {
@@ -7157,7 +7137,7 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
           $set: {
             orgId,
             name: orderName,
-            clientId: matchedClient._id,
+            clientId: matchedAccount?._id || null,
             amount: Number(order?.current_total_price || order?.total_price || 0),
             stage: normalizedStage,
             closeDate: order?.processed_at || order?.created_at || null,
@@ -7384,7 +7364,6 @@ await connection.save();
     }
 
     const accountMap = new Map();
-    const clientMap = new Map();
 
     let accountsUpserted = 0;
     let opportunitiesUpserted = 0;
@@ -7425,31 +7404,7 @@ await connection.save();
         }
       );
 
-      const atlasClient = await Client.findOneAndUpdate(
-        {
-          orgId,
-          externalSource: "salesforce",
-          externalId,
-        },
-        {
-          $set: {
-            orgId,
-            workspaceId: orgId,
-            name: accountName,
-            website: salesforceAccount?.Website || "",
-            industry: salesforceAccount?.Industry || "",
-            primaryContactPhone: salesforceAccount?.Phone || "",
-            status: "active",
-            externalSource: "salesforce",
-            externalId,
-            sourcePayload: salesforceAccount,
-          },
-        },
-        { upsert: true, new: true }
-      );
-
       accountMap.set(externalId, atlasAccount);
-      clientMap.set(externalId, atlasClient);
       accountsUpserted += 1;
     }
 
@@ -7514,27 +7469,6 @@ await connection.save();
         });
       }
 
-      let matchedClient = accountExternalId
-        ? clientMap.get(accountExternalId) || null
-        : null;
-
-      if (!matchedClient && accountExternalId) {
-        matchedClient = await Client.findOne({
-          orgId,
-          externalSource: "salesforce",
-          externalId: accountExternalId,
-        });
-      }
-
-      if (!matchedClient) {
-        console.warn("Skipping Salesforce opportunity without matching client:", {
-          opportunityId: externalId,
-          opportunityName: opportunity?.Name || null,
-          accountExternalId,
-        });
-        continue;
-      }
-
       const opportunityName =
         String(opportunity?.Name || "").trim() ||
         "Unnamed Salesforce Opportunity";
@@ -7549,7 +7483,7 @@ await connection.save();
           $set: {
             orgId,
             name: opportunityName,
-            clientId: matchedClient._id,
+            clientId: matchedAccount?._id || null,
             amount: Number(opportunity?.Amount || 0),
             stage: normalizeSalesforceStage(opportunity),
             closeDate: opportunity?.CloseDate || null,
