@@ -25,6 +25,7 @@ import partnersRoutes from "./routes/partners.js";
 import orgRoutes from "./routes/org.js";
 import organizationsRoutes from "./routes/organizations.js";
 import atlasRoutes from "./routes/atlas.js";
+import atlasOperator from "./routes/atlasOperator.js";
 import operatorRoutes from "./routes/operator.js";
 import accountsRoutes from "./routes/accounts.js";
 import metricsRoutes from "./routes/metrics.js";
@@ -41,6 +42,7 @@ import importsRoutes from "./routes/imports.js";
 import ghlRoutes from "./routes/ghl.js";
 import linkedinAdsRoutes from "./routes/linkedinAds.js";
 import graphiqRoutes from "./routes/graphiq.js";
+import quickBooksRoutes from "./routes/quickbooks.js";
 
 const app = express();
 
@@ -185,7 +187,6 @@ app.use(
   linkedinAdsRoutes
 );
 
-
 /**
  * OAuth callbacks need to be accessible without normal
  * Atlas workspace headers because external providers
@@ -224,6 +225,20 @@ function integrationPlanGate(req, res, next) {
     next
   );
 }
+
+function quickBooksPlanGate(req, res, next) {
+  if (req.method === "GET" && req.path === "/callback") {
+    return next();
+  }
+
+  return coreIntegrationPlanGate(req, res, next);
+}
+
+app.use(
+  "/api/integrations/quickbooks",
+  quickBooksPlanGate,
+  quickBooksRoutes
+);
 
 app.use(
   "/api/integrations",
@@ -366,6 +381,12 @@ app.use(
 /**
  * ENTERPRISE / ADVANCED ROUTES
  */
+app.use(
+  "/api/atlas",
+  requirePlan("GROWTH"),
+  atlasOperator
+);
+
 app.use(
   "/api/operator",
   requirePlan("GROWTH"),
