@@ -8,6 +8,7 @@ import mongoose from "mongoose";
 
 import { requirePlan } from "./middleware/requirePlan.js";
 import { startIntegrationAutoSync } from "./jobs/integrationAutoSync.js";
+import { startSlackExecutiveBriefings } from "./jobs/slackExecutiveBriefing.js";
 import { startSlackDealRiskAlerts } from "./services/slackDealRiskAlerts.js";
 
 import authRoutes from "./routes/auth.js";
@@ -441,6 +442,7 @@ const MONGO_URI =
 let server;
 let syncStarted = false;
 let stopSlackDealRiskAlertJob = null;
+let stopSlackExecutiveBriefingJob = null;
 
 async function start() {
   try {
@@ -482,9 +484,10 @@ async function start() {
           try {
             startIntegrationAutoSync();
             stopSlackDealRiskAlertJob = startSlackDealRiskAlerts();
+            stopSlackExecutiveBriefingJob = startSlackExecutiveBriefings();
 
             console.log(
-              "Integration auto-sync and Slack deal-risk alerts started"
+              "Integration auto-sync and Slack alert jobs started"
             );
           } catch (err) {
             console.error(
@@ -539,6 +542,11 @@ async function shutdown(signal) {
     if (stopSlackDealRiskAlertJob) {
       stopSlackDealRiskAlertJob();
       stopSlackDealRiskAlertJob = null;
+    }
+
+    if (stopSlackExecutiveBriefingJob) {
+      stopSlackExecutiveBriefingJob();
+      stopSlackExecutiveBriefingJob = null;
     }
 
     if (server) {
