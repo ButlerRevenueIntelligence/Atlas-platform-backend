@@ -32,6 +32,7 @@ const IntegrationConnectionSchema = new mongoose.Schema(
         "zoho_crm",
         "pipedrive",
         "bitrix24",
+        "slack",
       ],
       index: true,
     },
@@ -89,6 +90,24 @@ const IntegrationConnectionSchema = new mongoose.Schema(
     },
 
     refreshToken: {
+      type: String,
+      default: null,
+      select: false,
+
+      set(value) {
+        return encryptIntegrationToken(value);
+      },
+
+      get(value) {
+        return decryptIntegrationToken(value);
+      },
+    },
+
+    /*
+     * Provider webhook URLs are credentials too, so
+     * keep them encrypted and excluded from queries.
+     */
+    webhookUrl: {
       type: String,
       default: null,
       select: false,
@@ -209,6 +228,7 @@ IntegrationConnectionSchema.methods.markConnected =
     externalAccountName = null,
     accessToken = null,
     refreshToken = null,
+    webhookUrl = null,
     tokenType = null,
     tokenExpiresAt = null,
     scopes = [],
@@ -228,6 +248,7 @@ IntegrationConnectionSchema.methods.markConnected =
      */
     this.accessToken = accessToken;
     this.refreshToken = refreshToken;
+    this.webhookUrl = webhookUrl;
 
     this.tokenType = tokenType;
 
@@ -267,6 +288,7 @@ IntegrationConnectionSchema.methods.markDisconnected =
      */
     this.accessToken = null;
     this.refreshToken = null;
+    this.webhookUrl = null;
 
     this.tokenType = null;
     this.tokenExpiresAt = null;

@@ -170,6 +170,10 @@ const OrganizationSchema = new mongoose.Schema(
         type: integrationStateSchema,
         default: () => ({}),
       },
+      slack: {
+        type: integrationStateSchema,
+        default: () => ({}),
+      },
     },
 
     billing: {
