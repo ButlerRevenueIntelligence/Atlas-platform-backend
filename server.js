@@ -206,6 +206,7 @@ const integrationOAuthCallbacks = new Set([
   "/salesforce/callback",
   "/linkedin_ads/callback",
   "/pipedrive/callback",
+  "/slack/callback",
 ]);
 
 const coreIntegrationPlanGate = requirePlan("CORE");
