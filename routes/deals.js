@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
 import Deal from "../models/Deal.js";
 import Client from "../models/Client.js";
+import { notifyMajorProbabilityDrop } from "../services/slackDealRiskAlerts.js";
 
 const router = express.Router();
 
@@ -491,6 +492,13 @@ router.put("/:id", requireAuth, async (req, res) => {
       });
     }
 
+    const previousDeal =
+      payload.probability !== undefined
+        ? await Deal.findOne({ _id: id, orgId: ctx.orgId })
+            .select("probability")
+            .lean()
+        : null;
+
     const deal = await Deal.findOneAndUpdate(
       { _id: id, orgId: ctx.orgId },
       { $set: update },
@@ -503,6 +511,16 @@ router.put("/:id", requireAuth, async (req, res) => {
       return res.status(404).json({
         ok: false,
         message: "Deal not found",
+      });
+    }
+
+    if (previousDeal) {
+      notifyMajorProbabilityDrop({
+        orgId: ctx.orgId,
+        beforeDeal: previousDeal,
+        afterDeal: deal,
+      }).catch((error) => {
+        console.error("Deal probability alert error:", error);
       });
     }
 
