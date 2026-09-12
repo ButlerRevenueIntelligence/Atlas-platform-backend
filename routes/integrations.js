@@ -29,6 +29,7 @@ const INTEGRATIONS = [
   { id: "stripe", name: "Stripe", category: "Payments", supportsLive: true },
   { id: "quickbooks", name: "QuickBooks Online", category: "Accounting", supportsLive: true },
   { id: "shopify", name: "Shopify", category: "Commerce", supportsLive: true },
+  { id: "slack", name: "Slack", category: "Collaboration", supportsLive: true },
 ];
 
 /* -------------------------------- */
@@ -2343,6 +2344,68 @@ async function getLinkedInProfile(accessToken) {
 }
 
 /* -------------------------------- */
+/* Slack OAuth helpers              */
+/* -------------------------------- */
+
+function buildSlackRedirectUri() {
+  const base = buildBackendBaseUrl();
+  if (!base) return null;
+  return `${base}/api/integrations/slack/callback`;
+}
+
+function buildSlackAuthUrl(orgId) {
+  const clientId = String(process.env.SLACK_CLIENT_ID || "").trim();
+  const redirectUri = buildSlackRedirectUri();
+
+  if (!clientId || !redirectUri || !orgId) return null;
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    scope: "chat:write,incoming-webhook",
+    redirect_uri: redirectUri,
+    state: safeStateString({
+      orgId: String(orgId),
+      provider: "slack",
+    }),
+  });
+
+  return `https://slack.com/oauth/v2/authorize?${params.toString()}`;
+}
+
+async function exchangeSlackCodeForTokens(code) {
+  const clientId = String(process.env.SLACK_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.SLACK_CLIENT_SECRET || "").trim();
+  const redirectUri = buildSlackRedirectUri();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    throw new Error("Slack OAuth is not configured");
+  }
+
+  const body = new URLSearchParams({
+    code,
+    redirect_uri: redirectUri,
+  });
+
+  const response = await fetch("https://slack.com/api/oauth.v2.access", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body,
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data?.ok) {
+    throw new Error(data?.error || "Slack token exchange failed");
+  }
+
+  return data;
+}
+
+/* -------------------------------- */
 /* Shared helpers                   */
 /* -------------------------------- */
 
@@ -2411,6 +2474,7 @@ async function formatIntegrations(orgId) {
         shopDomain: live?.metadata?.shopDomain || null,
         selectedSalesforceOrg: live?.metadata?.salesforceOrgId || null,
         selectedLinkedInAccount: live?.externalAccountName || null,
+        slackChannel: live?.metadata?.incomingWebhookChannel || null,
         bitrixWebhookUrl: live?.metadata?.webhookUrl || null,
         financialSummary: live?.metadata?.financialSummary || null,
         supportsLive: item.supportsLive,
@@ -2440,6 +2504,7 @@ async function formatIntegrations(orgId) {
       shopDomain: null,
       selectedSalesforceOrg: null,
       selectedLinkedInAccount: null,
+      slackChannel: null,
       bitrixWebhookUrl: null,
       financialSummary: null,
       supportsLive: item.supportsLive,
@@ -3056,6 +3121,54 @@ if (
     }
     /*
      * --------------------------------
+     * SLACK TOKEN REVOCATION
+     * --------------------------------
+     */
+    if (
+      id === "slack" &&
+      connection.status === "connected"
+    ) {
+      try {
+        const tokenToRevoke = connection.accessToken;
+
+        if (!tokenToRevoke) {
+          throw new Error("Slack access token is missing");
+        }
+
+        const revokeResponse = await fetch(
+          "https://slack.com/api/auth.revoke",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tokenToRevoke}`,
+              "Content-Type": "application/x-www-form-urlencoded",
+              Accept: "application/json",
+            },
+          }
+        );
+
+        const revokeData = await revokeResponse.json().catch(() => ({}));
+
+        if (!revokeResponse.ok || !revokeData?.ok) {
+          throw new Error(revokeData?.error || "Slack token revocation failed");
+        }
+      } catch (slackErr) {
+        console.error("Slack token revocation error:", slackErr);
+        connection.lastError = String(
+          slackErr?.message || "Slack token revocation failed"
+        );
+        await connection.save();
+
+        return res.status(502).json({
+          ok: false,
+          message:
+            "Slack could not be fully disconnected. Slack authorization is still active.",
+          error: slackErr?.message || "Slack token revocation failed",
+        });
+      }
+    }
+    /*
+     * --------------------------------
      * LOCAL DISCONNECT
      * --------------------------------
      *
@@ -3258,6 +3371,17 @@ router.get("/:provider/auth-url", requireAuth, async (req, res) => {
         return res.status(500).json({
           ok: false,
           message: "LinkedIn Ads OAuth is not configured",
+        });
+      }
+      return res.json({ ok: true, provider, authUrl: url });
+    }
+
+    if (provider === "slack") {
+      const url = buildSlackAuthUrl(orgId);
+      if (!url) {
+        return res.status(500).json({
+          ok: false,
+          message: "Slack OAuth is not configured",
         });
       }
       return res.json({ ok: true, provider, authUrl: url });
@@ -5071,6 +5195,202 @@ const refreshTokenExpiresIn =
   } catch (err) {
     console.error("LinkedIn Ads callback error:", err);
     return res.redirect(formatOauthErrorRedirect("linkedin_ads"));
+  }
+});
+
+router.get("/slack/callback", async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+
+    if (error) {
+      return res.redirect(formatOauthErrorRedirect("slack", `slack_${error}`));
+    }
+
+    if (!code || !state) {
+      return res.status(400).send("Missing code or state");
+    }
+
+    let parsedState;
+
+    try {
+      parsedState = parseOauthState(state, "slack");
+    } catch (stateError) {
+      console.error("Slack OAuth state error:", stateError);
+      return res.status(400).send("Invalid or expired OAuth state");
+    }
+
+    const { orgId } = parsedState;
+
+    if (!orgId) {
+      return res.status(400).send("Missing orgId in state");
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).send("Workspace not found");
+    }
+
+    const tokenData = await exchangeSlackCodeForTokens(code);
+    const accessToken = tokenData?.access_token || null;
+    const teamId = tokenData?.team?.id || null;
+    const teamName = tokenData?.team?.name || "Slack Workspace";
+    const webhook = tokenData?.incoming_webhook || {};
+
+    if (!accessToken || !webhook?.url) {
+      throw new Error("Slack did not return the required authorization details");
+    }
+
+    let connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "slack",
+    }).select("+accessToken +refreshToken +webhookUrl");
+
+    if (!connection) {
+      connection = new IntegrationConnection({ orgId, provider: "slack" });
+    }
+
+    connection.status = "connected";
+    connection.mode = "live";
+    connection.connectedAt = new Date();
+    connection.disconnectedAt = null;
+    connection.accessToken = accessToken;
+    connection.refreshToken = null;
+    connection.webhookUrl = webhook.url;
+    connection.tokenType = tokenData?.token_type || "bot";
+    connection.tokenExpiresAt = null;
+    connection.externalAccountId = teamId;
+    connection.externalAccountName = teamName;
+    connection.scopes = String(tokenData?.scope || "")
+      .split(",")
+      .map((scope) => scope.trim())
+      .filter(Boolean);
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
+    connection.lastError = null;
+    connection.metadata = {
+      ...(connection.metadata || {}),
+      appId: tokenData?.app_id || null,
+      teamId,
+      teamName,
+      botUserId: tokenData?.bot_user_id || null,
+      isEnterpriseInstall: !!tokenData?.is_enterprise_install,
+      incomingWebhookChannel: webhook.channel || null,
+      incomingWebhookChannelId: webhook.channel_id || null,
+      incomingWebhookConfigurationUrl: webhook.configuration_url || null,
+    };
+
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "slack", {
+      connected: true,
+      connectedAt: new Date(),
+      lastSync: null,
+      mode: "live",
+    });
+
+    return res.redirect(`${getFrontendUrl()}/integrations?connected=slack&mode=live`);
+  } catch (err) {
+    console.error("Slack callback error:", err);
+    return res.redirect(formatOauthErrorRedirect("slack"));
+  }
+});
+
+router.post("/slack/test", requireAuth, async (req, res) => {
+  let connection = null;
+
+  try {
+    const orgId = getOrgId(req);
+
+    if (!orgId) {
+      return res.status(400).json({ ok: false, message: "Missing org context" });
+    }
+
+    const org = await ensureOrg(orgId);
+    if (!org) {
+      return res.status(404).json({ ok: false, message: "Workspace not found" });
+    }
+
+    connection = await IntegrationConnection.findOne({
+      orgId,
+      provider: "slack",
+      status: "connected",
+      mode: "live",
+    }).select("+webhookUrl");
+
+    const webhookUrl = String(connection?.webhookUrl || "").trim();
+
+    if (!connection || !webhookUrl) {
+      return res.status(400).json({
+        ok: false,
+        message: "Slack is not connected for this workspace",
+      });
+    }
+
+    const workspaceName = org?.name || "your Atlas workspace";
+    const channelName = connection?.metadata?.incomingWebhookChannel || "Slack";
+
+    const webhookResponse = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: `Atlas Revenue AI is connected to ${workspaceName}.`,
+        blocks: [
+          {
+            type: "header",
+            text: {
+              type: "plain_text",
+              text: "Atlas Revenue AI is connected",
+              emoji: true,
+            },
+          },
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `Revenue alerts and executive briefings from *${workspaceName}* can now be delivered to *${channelName}*.`,
+            },
+          },
+        ],
+      }),
+    });
+
+    const responseText = await webhookResponse.text();
+
+    if (!webhookResponse.ok || responseText !== "ok") {
+      throw new Error(responseText || "Slack rejected the test message");
+    }
+
+    connection.lastSyncAt = new Date();
+    connection.lastSyncStatus = "success";
+    connection.lastError = null;
+    await connection.save();
+
+    await updateOrgIntegrationSummary(orgId, "slack", {
+      connected: true,
+      lastSync: connection.lastSyncAt,
+      mode: "live",
+    });
+
+    return res.json({
+      ok: true,
+      message: "Slack test alert sent successfully",
+      channel: channelName,
+      integrations: await formatIntegrations(orgId),
+    });
+  } catch (err) {
+    console.error("Slack test alert error:", err);
+
+    if (connection) {
+      connection.lastSyncStatus = "failed";
+      connection.lastError = String(err?.message || "Slack test alert failed");
+      await connection.save().catch(() => null);
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to send Slack test alert",
+      error: err.message,
+    });
   }
 });
 
