@@ -1,3 +1,4 @@
+import { clientForAccount } from "./accountLinks.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import Organization from "../models/Organization.js";
 import Account from "../models/Account.js";
@@ -110,7 +111,7 @@ export async function autoSyncZohoForOrg(orgId) {
         $set: {
           orgId,
           name: dealName,
-          clientId: matchedAccount?._id || null,
+          clientId: (await clientForAccount(orgId, matchedAccount))?._id || null,
           amount: Number(deal?.Amount || 0),
           stage: normalizeAtlasStage(deal?.Stage),
           closeDate: deal?.Closing_Date || null,

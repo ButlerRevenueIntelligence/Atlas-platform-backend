@@ -1,7 +1,7 @@
 import cron from "node-cron";
 import Deal from "../models/Deal.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
-import MetricDaily from "../models/MetricDaily.js";
+import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 import Organization from "../models/Organization.js";
 
 const TIME_ZONE = "America/New_York";
@@ -162,24 +162,16 @@ async function postToSlack(webhookUrl, payload) {
 }
 
 async function buildBriefing(orgId, now = new Date()) {
-  const currentStart = new Date(now.getTime() - 30 * 86400000);
-  const previousStart = new Date(now.getTime() - 60 * 86400000);
+  const currentStart = new Date(now.getTime() - 29 * 86400000);
+  const previousStart = new Date(now.getTime() - 59 * 86400000);
 
-  const [org, metrics, deals, failedIntegrations] = await Promise.all([
+  currentStart.setUTCHours(0, 0, 0, 0);
+  previousStart.setUTCHours(0, 0, 0, 0);
+  const unified = await getUnifiedWorkspaceData(orgId, { days: 60 });
+  const metrics = unified.metrics;
+  const deals = unified.deals;
+  const [org, failedIntegrations] = await Promise.all([
     Organization.findById(orgId).select("name slug plan").lean(),
-    MetricDaily.find({
-      orgId,
-      date: { $gte: previousStart, $lte: now },
-    })
-      .select("date revenue spend leads")
-      .sort({ date: 1 })
-      .lean(),
-    Deal.find({ orgId, archivedAt: null })
-      .select(
-        "name stage amount probability closeDate nextActionDueAt lastActivityAt closedAt createdAt updatedAt clientId"
-      )
-      .populate({ path: "clientId", select: "name" })
-      .lean(),
     IntegrationConnection.countDocuments({
       orgId,
       provider: { $ne: "slack" },

@@ -1,4 +1,5 @@
 // backend/routes/attribution.js
+import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 import express from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
@@ -146,7 +147,7 @@ router.get("/summary", requireAuth, async (req, res) => {
     const workspaceMode = detectWorkspaceMode(org);
 
     const channels =
-      workspaceMode === "demo" ? buildFallback() : buildEmptyChannels();
+      workspaceMode === "demo" ? buildFallback() : (await getUnifiedWorkspaceData(orgId, { days: 30 })).channelMetrics.map(channel => ({ ...channel, revenue: 0, revenueAttributed: false }));
 
     const totals = channels.reduce(
       (acc, c) => {

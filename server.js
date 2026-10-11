@@ -6,6 +6,7 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 
+import { integrationWorkspace } from "./middleware/integrationWorkspace.js";
 import { requirePlan } from "./middleware/requirePlan.js";
 import { startIntegrationAutoSync } from "./jobs/integrationAutoSync.js";
 import { startSlackExecutiveBriefings } from "./jobs/slackExecutiveBriefing.js";
@@ -27,7 +28,6 @@ import partnersRoutes from "./routes/partners.js";
 import orgRoutes from "./routes/org.js";
 import organizationsRoutes from "./routes/organizations.js";
 import atlasRoutes from "./routes/atlas.js";
-import atlasOperator from "./routes/atlasOperator.js";
 import operatorRoutes from "./routes/operator.js";
 import accountsRoutes from "./routes/accounts.js";
 import metricsRoutes from "./routes/metrics.js";
@@ -222,11 +222,7 @@ function integrationPlanGate(req, res, next) {
     return next();
   }
 
-  return coreIntegrationPlanGate(
-    req,
-    res,
-    next
-  );
+  return integrationWorkspace(req, res, () => coreIntegrationPlanGate(req, res, next));
 }
 
 function quickBooksPlanGate(req, res, next) {
@@ -234,7 +230,7 @@ function quickBooksPlanGate(req, res, next) {
     return next();
   }
 
-  return coreIntegrationPlanGate(req, res, next);
+  return integrationWorkspace(req, res, () => coreIntegrationPlanGate(req, res, next));
 }
 
 app.use(
@@ -251,6 +247,7 @@ app.use(
 
 app.use(
   "/api/integrations/ghl",
+  integrationWorkspace,
   requirePlan("CORE"),
   ghlRoutes
 );
@@ -338,6 +335,7 @@ app.use(
 
 app.use(
   "/api/graphiq",
+  integrationWorkspace,
   requirePlan("CORE"),
   graphiqRoutes
 );
@@ -384,12 +382,6 @@ app.use(
 /**
  * ENTERPRISE / ADVANCED ROUTES
  */
-app.use(
-  "/api/atlas",
-  requirePlan("GROWTH"),
-  atlasOperator
-);
-
 app.use(
   "/api/operator",
   requirePlan("GROWTH"),

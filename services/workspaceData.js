@@ -1,10 +1,13 @@
 import mongoose from "mongoose";
+import { buildUnifiedMetrics } from "./workspaceMetrics.js";
+import SourceMetricDaily from "../models/SourceMetricDaily.js";
+import QuickBooksSnapshot from "../models/QuickBooksSnapshot.js";
 import Account from "../models/Account.js";
 import Client from "../models/Client.js";
 import Deal from "../models/Deal.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import MetricDaily from "../models/MetricDaily.js";
-import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
+import { stripeDailyRows } from "./stripeDailyReader.js";
 
 const safeNum = (value) => {
   const number = Number(value);
@@ -247,6 +250,8 @@ function normalizeDeal(deal) {
 
   return {
     ...deal,
+    createdAt: deal.sourcePayload?.CreatedDate || deal.sourcePayload?.Created_Time || deal.sourcePayload?.DATE_CREATE || deal.sourcePayload?.created_at || deal.sourcePayload?.add_time || deal.sourcePayload?.properties?.createdate || deal.createdAt,
+    updatedAt: deal.sourcePayload?.LastModifiedDate || deal.sourcePayload?.Modified_Time || deal.sourcePayload?.DATE_MODIFY || deal.sourcePayload?.updated_at || deal.sourcePayload?.update_time || deal.updatedAt,
     clientName:
       clean(deal?.clientId?.name) ||
       clean(deal?.clientName) ||
@@ -261,101 +266,6 @@ function normalizeDeal(deal) {
   };
 }
 
-function buildUnifiedMetrics({ baseMetrics, stripeRows, deals, days }) {
-  const cutoff = new Date();
-  cutoff.setUTCDate(cutoff.getUTCDate() - Math.max(1, days) + 1);
-  cutoff.setUTCHours(0, 0, 0, 0);
-
-  const rows = new Map();
-  const ensureRow = (date) => {
-    if (!rows.has(date)) {
-      rows.set(date, {
-        date,
-        dateISO: `${date}T00:00:00.000Z`,
-        revenue: 0,
-        baseRevenue: 0,
-        stripeRevenue: 0,
-        shopifyRevenue: 0,
-        spend: 0,
-        leads: 0,
-      });
-    }
-    return rows.get(date);
-  };
-
-  for (const metric of baseMetrics) {
-    const date = dayKey(metric.date);
-    if (!date || new Date(`${date}T00:00:00.000Z`) < cutoff) continue;
-    const row = ensureRow(date);
-    row.baseRevenue += safeNum(metric.revenue);
-    row.spend += safeNum(metric.spend);
-    row.leads += safeNum(metric.leads);
-  }
-
-  for (const metric of stripeRows) {
-    const date = dayKey(metric.date);
-    if (!date || new Date(`${date}T00:00:00.000Z`) < cutoff) continue;
-    const row = ensureRow(date);
-    row.stripeRevenue = (row.stripeRevenue || 0) + safeNum(metric.netRevenue);
-    row.transactions = (row.transactions || 0) + safeNum(metric.transactionCount);
-    row.customers = (row.customers || 0) + safeNum(metric.customerCount);
-  }
-
-  for (const deal of deals) {
-    if (
-      clean(deal.externalSource).toLowerCase() !== "shopify" ||
-      clean(deal.stage).toLowerCase() !== "closed won"
-    ) {
-      continue;
-    }
-
-    const date = dayKey(deal.closeDate || deal.closedAt || deal.createdAt);
-    if (!date || new Date(`${date}T00:00:00.000Z`) < cutoff) continue;
-    const row = ensureRow(date);
-    row.shopifyRevenue = (row.shopifyRevenue || 0) + safeNum(deal.amount);
-    row.shopifyOrders = (row.shopifyOrders || 0) + 1;
-  }
-
-  const values = [...rows.values()];
-  const totals = values.reduce(
-    (sum, row) => ({
-      base: sum.base + safeNum(row.baseRevenue),
-      stripe: sum.stripe + safeNum(row.stripeRevenue),
-      shopify: sum.shopify + safeNum(row.shopifyRevenue),
-    }),
-    { base: 0, stripe: 0, shopify: 0 }
-  );
-
-  // Prefer a single transactional source to prevent counting the same sale
-  // once in Shopify and again in Stripe. Existing imported daily revenue stays
-  // authoritative when present.
-  const revenueSource =
-    totals.base > 0
-      ? "metrics_daily"
-      : totals.stripe > 0
-      ? "stripe"
-      : totals.shopify > 0
-      ? "shopify"
-      : "none";
-
-  return {
-    revenueSource,
-    metrics: values
-      .map((row) => ({
-        ...row,
-        revenue:
-          revenueSource === "metrics_daily"
-            ? safeNum(row.baseRevenue)
-            : revenueSource === "stripe"
-            ? safeNum(row.stripeRevenue)
-            : revenueSource === "shopify"
-            ? safeNum(row.shopifyRevenue)
-            : 0,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date)),
-  };
-}
-
 export async function getUnifiedWorkspaceData(orgId, { days = 30 } = {}) {
   if (!mongoose.Types.ObjectId.isValid(String(orgId || ""))) {
     throw new Error("Invalid workspace id");
@@ -366,42 +276,55 @@ export async function getUnifiedWorkspaceData(orgId, { days = 30 } = {}) {
   cutoff.setUTCDate(cutoff.getUTCDate() - Math.max(1, days) + 1);
   cutoff.setUTCHours(0, 0, 0, 0);
 
-  const [connections, rawDeals, clients, accounts, baseMetrics, stripeRows] =
+  const [connections, rawDeals, clients, accounts, baseMetrics, stripeRows, sourceRows, financialSnapshot] =
     await Promise.all([
       IntegrationConnection.find({ orgId: objectId })
         .select("-accessToken -refreshToken")
         .sort({ provider: 1 })
         .lean(),
-      Deal.find({ orgId: objectId, archivedAt: null })
-        .populate(
-          "clientId",
-          "name website domain industry status externalSource externalId sourcePayload region country city state stateProvince"
-        )
-        .sort({ updatedAt: -1 })
-        .limit(1000)
-        .lean(),
+      Deal.find({ orgId: objectId, archivedAt: null }).sort({ updatedAt: -1 }).lean(),
       Client.find({ orgId: objectId, archivedAt: null }).lean(),
       Account.find({ orgId: objectId, archivedAt: null }).lean(),
       MetricDaily.find({ orgId: objectId, date: { $gte: cutoff } })
         .sort({ date: 1 })
         .lean(),
-      StripeRevenueDaily.find({
-        orgId: objectId,
-        date: { $gte: dayKey(cutoff) },
-      })
-        .sort({ date: 1 })
-        .lean(),
+      stripeDailyRows(objectId, dayKey(cutoff)),
+      SourceMetricDaily.find({ orgId: objectId, date: { $gte: dayKey(cutoff), $lte: dayKey(new Date()) } }).lean(),
+      QuickBooksSnapshot.findOne({ orgId: objectId }).sort({ syncedAt: -1 }).lean(),
     ]);
 
-  const deals = rawDeals.map(normalizeDeal);
+  const linkedRecords = new Map([...accounts, ...clients].map(record => [String(record._id), record]));
+  const excludedDealCurrencies = new Set();
+  const deals = rawDeals.filter(deal => {
+    const currency = String(deal.sourcePayload?.CurrencyIsoCode || deal.sourcePayload?.Currency || deal.sourcePayload?.CURRENCY_ID || deal.sourcePayload?.currency || "USD").toUpperCase();
+    if (currency !== "USD") { excludedDealCurrencies.add(currency); return false; }
+    return true;
+  }).map(deal => normalizeDeal({ ...deal, clientId: linkedRecords.get(String(deal.clientId)) || deal.clientId }));
   const unifiedMetrics = buildUnifiedMetrics({
     baseMetrics,
     stripeRows,
+    sourceRows: sourceRows.filter(row => {
+      const connection = connections.find(item => item.provider === row.provider);
+      return connection && !connection.metadata?.needsSelection && String(connection.externalAccountId || "").replace(/^properties\//, "").replace(/^act_/, "") === String(row.accountId).replace(/^act_/, "");
+    }),
     deals,
     days,
   });
 
+  const selectedSourceRows = sourceRows.filter(row => {
+    const connection = connections.find(item => item.provider === row.provider);
+    const normalizeId = id => String(id || "").replace(/^properties\//, "").replace(/^act_/, "");
+    return connection && !connection.metadata?.needsSelection && normalizeId(connection.externalAccountId) === normalizeId(row.accountId);
+  });
+  const channelMetrics = Object.values(selectedSourceRows.reduce((channels, row) => {
+    const channel = channels[row.provider] ||= { provider: row.provider, name: row.provider, spend: 0, leads: 0, conversions: 0, sessions: 0, clicks: 0, impressions: 0 };
+    if (String(row.currency).toUpperCase() === "USD") channel.spend += safeNum(row.spend);
+    for (const field of ["leads", "conversions", "sessions", "clicks", "impressions"]) channel[field] += safeNum(row[field]);
+    return channels;
+  }, {}));
   return {
+    channelMetrics,
+    dataAsOf: [...connections.filter(connection => connection.lastSyncAt).map(connection => new Date(connection.lastSyncAt).getTime()), ...baseMetrics.map(row => new Date(row.date).getTime())].filter(Number.isFinite).sort((a, b) => b - a).map(value => new Date(value).toISOString())[0] || null,
     orgId: String(objectId),
     integrations: connections.map((connection) => ({
       id: connection.provider,
@@ -420,8 +343,15 @@ export async function getUnifiedWorkspaceData(orgId, { days = 30 } = {}) {
     deals,
     accounts: mergeAccounts(clients, accounts),
     metrics: unifiedMetrics.metrics,
+    financials: financialSnapshot ? {
+      ...financialSnapshot.metrics, currency: financialSnapshot.currency,
+      periodStart: financialSnapshot.periodStart, periodEnd: financialSnapshot.periodEnd, syncedAt: financialSnapshot.syncedAt,
+    } : null,
+    warnings: [...new Set([...unifiedMetrics.excludedCurrencies, ...excludedDealCurrencies])].map(currency => `${currency} records excluded from USD totals; currency conversion is not configured.`),
     dataSources: {
       revenue: unifiedMetrics.revenueSource,
+      currency: unifiedMetrics.currency,
+      leads: sourceRows.some(row => row.provider === "ga4") ? "ga4_generate_lead" : sourceRows.length ? "advertising_leads" : "metrics_daily",
       integrations: "integration_connections",
       deals: "deals",
       accounts: "clients_and_accounts",

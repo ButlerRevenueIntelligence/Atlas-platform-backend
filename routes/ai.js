@@ -1,10 +1,11 @@
 // backend/routes/ai.js
+import CompanyIntelligence from "../models/CompanyIntelligence.js";
 import express from "express";
 import OpenAI from "openai";
 import { requireAuth } from "../middleware/auth.js";
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
-import Deal from "../models/Deal.js";
+import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 
 const router = express.Router();
 
@@ -222,7 +223,7 @@ function normalizeDeal(deal = {}) {
     id: String(deal._id || deal.id || ""),
     name: String(deal.name || deal.title || deal.dealName || "Untitled deal"),
     accountName: String(
-      deal.accountName || deal.companyName || deal.account?.name || deal.client?.name || "Account not recorded"
+      deal.clientName || deal.accountName || deal.companyName || deal.account?.name || deal.client?.name || "Account not recorded"
     ),
     amount,
     stage: normalizeStage(deal.stage || deal.status),
@@ -436,17 +437,17 @@ async function requireMembership(userId, orgId) {
 /* -------------------------------- */
 /* Local fallback insights          */
 /* -------------------------------- */
-router.post("/insights", (req, res) => {
-  const body = req.body || {};
-  const kpis = body.kpis || {};
-  const orgName = body.orgName || "Your org";
-
-  return res.json({
-    ok: true,
-    orgName,
-    insights: buildInsights(kpis),
-    source: "local",
-  });
+router.post("/insights", requireAuth, async (req, res) => {
+  try {
+    const data = await getUnifiedWorkspaceData(req.user.orgId, { days: 30 });
+    const kpis = {
+      revenue30: data.metrics.reduce((sum, row) => sum + safeNum(row.revenue), 0),
+      spend30: data.metrics.reduce((sum, row) => sum + safeNum(row.spend), 0),
+      leads30: data.metrics.reduce((sum, row) => sum + safeNum(row.leads), 0),
+      pipelineValue: data.deals.filter(deal => !["Closed Won", "Closed Lost"].includes(deal.stage)).reduce((sum, deal) => sum + safeNum(deal.amount), 0),
+    };
+    return res.json({ ok: true, orgName: req.user.orgName, insights: buildInsights(kpis), source: "workspace" });
+  } catch (error) { return res.status(500).json({ ok: false, message: error.message }); }
 });
 
 /* -------------------------------- */
@@ -488,29 +489,94 @@ router.post("/analyze", requireAuth, async (req, res) => {
     }
 
     const question = String(req.body?.question || "").trim();
-    const metrics = req.body?.metrics || {};
-    const context = req.body?.context || {};
+    const requestedMetrics = req.body?.metrics || {};
+    const requestedContext = req.body?.context || {};
+    const isDemo = String(org.slug || "").toLowerCase() === "atlas-demo-company" || String(org.name || "").toLowerCase() === "atlas demo company";
+    const workspaceMode = isDemo ? "demo" : "live";
+    const unified = isDemo
+      ? null
+      : await getUnifiedWorkspaceData(orgId, { days: 30 });
+
+    const unifiedMetrics = Array.isArray(unified?.metrics)
+      ? unified.metrics
+      : [];
+    const revenue30 = unifiedMetrics.slice(-30).reduce(
+      (sum, row) => sum + safeNum(row.revenue),
+      0
+    );
+    const spend30 = unifiedMetrics.slice(-30).reduce(
+      (sum, row) => sum + safeNum(row.spend),
+      0
+    );
+    const leads30 = unifiedMetrics.slice(-30).reduce(
+      (sum, row) => sum + safeNum(row.leads),
+      0
+    );
+    const liveDeals = Array.isArray(unified?.deals) ? unified.deals : [];
+    const openDeals = liveDeals.filter(
+      (deal) => !["closed won", "closed lost"].includes(
+        String(deal.stage || "").toLowerCase()
+      )
+    );
+    const wonDeals = liveDeals.filter(
+      (deal) => String(deal.stage || "").toLowerCase() === "closed won"
+    );
+    const lostDeals = liveDeals.filter(
+      (deal) => String(deal.stage || "").toLowerCase() === "closed lost"
+    );
+    const pipelineValue = openDeals.reduce(
+      (sum, deal) => sum + safeNum(deal.amount),
+      0
+    );
+
+    const metrics = isDemo
+      ? requestedMetrics
+      : {
+          revenue30,
+          spend30,
+          leads30,
+          pipelineValue,
+          coverage: revenue30 > 0 ? pipelineValue / revenue30 : 0,
+          openDeals: openDeals.length,
+          wonDeals: wonDeals.length,
+          lostDeals: lostDeals.length,
+          revenueSource: unified?.dataSources?.revenue || "none",
+        };
+
+    const context = isDemo
+      ? requestedContext
+      : {
+          ...requestedContext,
+          workspaceMode: "live",
+          orgName: org.name,
+          summary: metrics,
+          integrations: (unified?.integrations || []).map((integration) => ({
+            provider: integration.provider,
+            status: integration.status,
+            mode: integration.mode,
+            lastSyncAt: integration.lastSyncAt,
+          })),
+          accounts: (unified?.accounts || []).slice(0, 50),
+          deals: liveDeals.slice(0, 100).map((deal) => ({
+            id: deal._id || deal.id,
+            name: deal.name,
+            clientName: deal.clientName,
+            amount: deal.amount,
+            stage: deal.stage,
+            probability: deal.probability,
+            closeDate: deal.closeDate,
+            nextAction: deal.nextAction,
+            nextActionDueAt: deal.nextActionDueAt,
+            lastActivityAt: deal.lastActivityAt,
+          })),
+          dataSources: unified?.dataSources || {},
+        };
 
     if (isDealPriorityQuestion(question)) {
-      const workspaceMode = String(context?.workspaceMode || "live").toLowerCase();
-      const isDemo = workspaceMode === "demo";
-
-      let deals = [];
-
-      try {
-        deals = await Deal.find({
-          orgId,
-          status: { $nin: ["archived", "closed_lost", "lost"] },
-        })
-          .sort({ amount: -1, updatedAt: -1 })
-          .limit(50)
-          .lean();
-      } catch (dealError) {
-        console.error("DEAL PRIORITY LOOKUP ERROR:", dealError);
-      }
+      let deals = openDeals;
 
       if (isDemo) {
-        deals = enrichDemoDeals(deals);
+        deals = enrichDemoDeals([]);
       }
 
       const result = buildDealPriorityAnswer({
@@ -538,8 +604,16 @@ router.post("/analyze", requireAuth, async (req, res) => {
       });
     }
 
-    const externalCompanyIntelligence =
-      context?.externalCompanyIntelligence || null;
+    const snapshotId = requestedContext?.externalCompanyIntelligence?.snapshotId;
+    const externalSnapshot = /^[a-f0-9]{24}$/i.test(String(snapshotId || ""))
+      ? await CompanyIntelligence.findOne({ _id: snapshotId, orgId, expiresAt: { $gt: new Date() } }).lean() : null;
+    const rawExternal = externalSnapshot?.data;
+    const externalRows = Array.isArray(rawExternal) ? rawExternal : rawExternal?.entities || rawExternal?.organizations || rawExternal?.results || rawExternal?.items || rawExternal?.data || [];
+    const externalCompanyIntelligence = externalSnapshot ? {
+      source: "GraphIQ", asOf: externalSnapshot.createdAt, query: externalSnapshot.query,
+      organizations: Array.isArray(externalRows) ? externalRows.slice(0, 10) : [],
+    } : null;
+    context.externalCompanyIntelligence = externalCompanyIntelligence;
 
     const hasExternalCompanyIntelligence =
       Array.isArray(externalCompanyIntelligence?.organizations) &&

@@ -1,6 +1,6 @@
 export function calculateOperatorSignals({ deals = [], metrics = {} }) {
 
-  const pipelineValue = deals.reduce((sum, d) => {
+  const pipelineValue = deals.filter(d => !["closed won", "closed lost"].includes(String(d.stage || "").toLowerCase())).reduce((sum, d) => {
     const amt = Number(d.amount || 0)
     const prob = Number(d.probability || 0)
     return sum + amt * prob
