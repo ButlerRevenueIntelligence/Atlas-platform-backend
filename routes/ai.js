@@ -7,6 +7,8 @@ import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
 import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 
+import { buildRevenueRiskBriefing, isRevenueRiskQuestion } from "../services/operatorRiskBriefing.js";
+
 const router = express.Router();
 
 const openai =
@@ -26,7 +28,7 @@ const money = (value) =>
     maximumFractionDigits: 0,
   });
 
-const DEMO_DEALS = [
+export const DEMO_DEALS = [
   {
     name: "Northstar Enterprise Expansion",
     accountName: "Northstar Technology Group",
@@ -196,7 +198,7 @@ function isDealPriorityQuestion(question) {
     priorityTerms.some((term) => q.includes(term));
 }
 
-function normalizeDeal(deal = {}) {
+export function normalizeDeal(deal = {}) {
   const amount = safeNum(deal.amount ?? deal.value ?? deal.pipelineValue);
   const rawProbability = safeNum(
     deal.probability ?? deal.winProbability ?? deal.confidence
@@ -232,9 +234,10 @@ function normalizeDeal(deal = {}) {
     daysToClose,
     daysSinceActivity,
     owner: String(
-      deal.ownerName || deal.owner?.name || deal.assignedTo?.name || deal.salesRep || "Owner not recorded"
+      deal.ownerName || deal.owner?.name || deal.assignedTo?.name || deal.salesRep || (typeof deal.owner === "string" ? deal.owner : "") || "Owner not recorded"
     ),
-    nextStep: String(deal.nextStep || deal.recommendedAction || "Confirm the next buyer action and its due date."),
+    nextActionDueAt: deal.nextActionDueAt || null,
+    nextStep: String(deal.nextStep || deal.nextAction || deal.recommendedAction || "Confirm the next buyer action and its due date."),
     risk: String(deal.risk || deal.riskReason || deal.blocker || deal.notes || "No explicit blocker is recorded."),
   };
 }
@@ -284,7 +287,7 @@ function explainPriority(deal) {
   return reasons.length ? reasons.join(", ") : "its combination of value, stage, and execution risk";
 }
 
-function buildDealPriorityAnswer({ deals, orgName, isDemo }) {
+export function buildDealPriorityAnswer({ deals, orgName, isDemo }) {
   const ranked = deals
     .map(normalizeDeal)
     .filter((deal) => !["Closed Won", "Closed Lost"].includes(deal.stage))
@@ -572,6 +575,22 @@ router.post("/analyze", requireAuth, async (req, res) => {
           dataSources: unified?.dataSources || {},
         };
 
+    const analysisDeals = isDemo ? enrichDemoDeals([]) : openDeals;
+    if (isRevenueRiskQuestion(question)) {
+      const briefing = buildRevenueRiskBriefing({
+        deals: analysisDeals.map(normalizeDeal), orgName: org.name,
+        isDemo, revenueSource: metrics.revenueSource,
+      });
+      org.usage = org.usage || {};
+      org.usage.aiAnalyses = safeNum(org.usage.aiAnalyses) + 1;
+      await org.save();
+      return res.json({
+        ok: true, result: briefing.text, briefing, usage: org.usage,
+        source: "atlas-revenue-risk-engine",
+        intelligence: { internal: true, external: false, workspaceMode, dealsEvaluated: analysisDeals.length },
+      });
+    }
+
     if (isDealPriorityQuestion(question)) {
       let deals = openDeals;
 
@@ -602,6 +621,11 @@ router.post("/analyze", requireAuth, async (req, res) => {
           workspaceMode,
         },
       });
+    }
+
+    if (isDemo) {
+      context.deals = analysisDeals.map(normalizeDeal);
+      context.dataLabel = "Atlas sample revenue dataset; fictional deals and owners";
     }
 
     const snapshotId = requestedContext?.externalCompanyIntelligence?.snapshotId;
@@ -650,6 +674,12 @@ Your job:
 - never invent company facts, market signals, buying intent, funding events, hiring signals, technologies, or other external information that is not explicitly present in the supplied data
 - if external company intelligence is not supplied, do not claim that GraphIQ was searched
 - write clearly for an executive audience
+- ground every internal claim in supplied records or metrics; quote specific deal names, amounts, owners, and timing when available
+- do not infer channel ROI, engagement trends, upsell potential, or forecast concentration from generic alerts alone
+- distinguish probability-weighted open pipeline from realized revenue and from a committed forecast
+- identify missing evidence and describe suggested deadlines as recommendations unless a due date is recorded
+- for demo workspaces explicitly label the answer as sample analysis with fictional deals and owners
+- keep the answer concise; start with the decision, then evidence and actions with accountable owners
 
 When GraphIQ results are available:
 - answer the user's question directly first
