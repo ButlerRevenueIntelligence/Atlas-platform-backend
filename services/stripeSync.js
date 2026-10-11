@@ -1,7 +1,7 @@
 // backend/services/stripeSync.js
 import Stripe from "stripe";
 import IntegrationConnection from "../models/IntegrationConnection.js";
-import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
+import StripeRevenueDaily from "../models/StripeRevenueDailyV2.js";
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -12,8 +12,25 @@ function dayKeyFromUnix(unixSeconds) {
   return d.toISOString().slice(0, 10);
 }
 
-function amountToNumber(amount) {
-  return Number(amount || 0) / 100;
+export function amountToNumber(amount, currency = "usd") {
+  const zeroDecimal = new Set(["bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf"]);
+  return Number(amount || 0) / (zeroDecimal.has(String(currency).toLowerCase()) ? 1 : 100);
+}
+
+export function aggregateCharges(charges) {
+  const dailyMap = new Map();
+  for (const charge of charges) {
+    if (!charge?.created || charge.paid !== true || charge.status !== "succeeded") continue;
+    const date = dayKeyFromUnix(charge.created);
+    const currency = String(charge.currency || "usd").toLowerCase();
+    const key = `${date}:${currency}`;
+    const row = dailyMap.get(key) || { date, currency, grossRevenue: 0, refunds: 0, netRevenue: 0, transactionCount: 0 };
+    const gross = amountToNumber(charge.amount, currency);
+    const refunds = amountToNumber(charge.amount_refunded, currency);
+    row.grossRevenue += gross; row.refunds += refunds; row.netRevenue += gross - refunds; row.transactionCount += 1;
+    dailyMap.set(key, row);
+  }
+  return dailyMap;
 }
 
 async function listAllCustomers(stripeAccount) {
@@ -85,31 +102,7 @@ export async function syncStripeForOrg(orgId) {
       listAllCharges(stripeAccount),
     ]);
 
-    const dailyMap = new Map();
-
-    for (const charge of charges) {
-      if (!charge?.created) continue;
-
-      const key = dayKeyFromUnix(charge.created);
-      const existing = dailyMap.get(key) || {
-        grossRevenue: 0,
-        netRevenue: 0,
-        refunds: 0,
-        transactionCount: 0,
-        currency: String(charge.currency || "usd").toLowerCase(),
-      };
-
-      const gross = amountToNumber(charge.amount);
-      const refunded = amountToNumber(charge.amount_refunded);
-      const net = gross - refunded;
-
-      existing.grossRevenue += gross;
-      existing.netRevenue += net;
-      existing.refunds += refunded;
-      existing.transactionCount += 1;
-
-      dailyMap.set(key, existing);
-    }
+    const dailyMap = aggregateCharges(charges);
 
     const customerDayMap = new Map();
     for (const customer of customers) {
@@ -120,11 +113,12 @@ export async function syncStripeForOrg(orgId) {
 
     let upserts = 0;
 
-    for (const [date, value] of dailyMap.entries()) {
+    for (const value of dailyMap.values()) {
+      const date = value.date;
       const customerCount = customerDayMap.get(date) || 0;
 
       await StripeRevenueDaily.findOneAndUpdate(
-        { orgId, provider: "stripe", date },
+        { orgId, provider: "stripe", date, currency: value.currency },
         {
           $set: {
             currency: value.currency,
@@ -142,6 +136,8 @@ export async function syncStripeForOrg(orgId) {
       upserts += 1;
     }
 
+    const importedKeys = [...dailyMap.values()].map(row => ({ date: row.date, currency: row.currency }));
+    await StripeRevenueDaily.deleteMany(importedKeys.length ? { orgId, provider: "stripe", $nor: importedKeys } : { orgId, provider: "stripe" });
     connection.status = "connected";
     connection.lastSyncAt = new Date();
     connection.lastSyncStatus = "success";
@@ -151,6 +147,9 @@ export async function syncStripeForOrg(orgId) {
       syncedCharges: charges.length,
       syncedCustomers: customers.length,
       syncedDays: upserts,
+      excludedCurrencies: [...new Set([...dailyMap.values()].map(row => row.currency).filter(currency => currency !== "usd"))],
+      revenueSnapshotComplete: true,
+      revenueSnapshotAccountId: String(stripeAccount),
     };
     await connection.save();
 

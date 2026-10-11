@@ -1,3 +1,4 @@
+import CompanyIntelligence from "../models/CompanyIntelligence.js";
 import express from "express";
 
 const router = express.Router();
@@ -66,8 +67,10 @@ router.post("/organizations/search", async (req, res) => {
       });
     }
 
+    const snapshot = await CompanyIntelligence.create({ orgId: req.orgId || req.user.orgId, query: organization, data, expiresAt: new Date(Date.now() + 86400000) });
     return res.json({
       ok: true,
+      snapshotId: String(snapshot._id),
       data,
     });
   } catch (error) {
@@ -80,4 +83,10 @@ router.post("/organizations/search", async (req, res) => {
   }
 });
 
+router.get("/context", async (req, res) => {
+  try {
+    const snapshot = await CompanyIntelligence.findOne({ orgId: req.orgId || req.user.orgId, expiresAt: { $gt: new Date() } }).sort({ createdAt: -1 }).lean();
+    return res.json({ ok: true, data: snapshot?.data || [], query: snapshot?.query || null, snapshotId: snapshot?._id || null, asOf: snapshot?.createdAt || null });
+  } catch (error) { return res.status(500).json({ ok: false, message: "Unable to load company intelligence" }); }
+});
 export default router;

@@ -1,9 +1,13 @@
 import express from "express";
+import { registerProviderSync, runRegisteredSync } from "../services/providerSyncRegistry.js";
+import { clientForAccount } from "../services/accountLinks.js";
+import { syncAdditionalProvider, saveDailyMetrics } from "../services/providerMetrics.js";
 import Stripe from "stripe";
 import crypto from "crypto";
 import Organization from "../models/Organization.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
-import StripeRevenueDaily from "../models/StripeRevenueDaily.js";
+import { stripeDailyRows } from "../services/stripeDailyReader.js";
+import { integrationWorkspace } from "../middleware/integrationWorkspace.js";
 import { requireAuth } from "../middleware/auth.js";
 import { syncStripeForOrg } from "../services/stripeSync.js";
 import Account from "../models/Account.js";
@@ -11,6 +15,14 @@ import Client from "../models/Client.js";
 import Deal from "../models/Deal.js";
 
 const router = express.Router();
+function syncPost(path, auth, handler) {
+  const provider = path.split("/")[1];
+  registerProviderSync(provider, handler);
+  router.post(path, integrationWorkspace, async (req, res) => {
+    try { return res.json(await runRegisteredSync(provider, getOrgId(req))); }
+    catch (error) { return res.status(error.status || 500).json({ ok: false, message: error.message }); }
+  });
+}
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -38,10 +50,8 @@ const INTEGRATIONS = [
 
 function getOrgId(req) {
   return (
-    req.headers["x-org-id"] ||
-    req.query.orgId ||
-    req.body?.orgId ||
     req.orgId ||
+    req.headers["x-org-id"] ||
     req.org?._id ||
     ""
   );
@@ -1873,7 +1883,7 @@ async function getValidShopifyAccessToken(connection, shopDomain) {
 
   if (
     connection?.accessToken &&
-    expiresAt > Date.now() + 5 * 60 * 1000
+    (!expiresAt || expiresAt > Date.now() + 5 * 60 * 1000)
   ) {
     return connection.accessToken;
   }
@@ -2451,7 +2461,7 @@ async function formatIntegrations(orgId) {
         category: item.category,
         status: live.status || "disconnected",
         connected: live.status === "connected",
-        lastSync: live.lastSyncAt || summary.lastSync || null,
+        lastSync: live.lastSyncAt || null,
         connectedAt: live.connectedAt || summary.connectedAt || null,
         mode: live.mode || summary.mode || "demo",
         externalAccountId: live.externalAccountId || null,
@@ -3887,8 +3897,8 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
     connection.externalAccountName = externalAccountName;
     connection.mode = "live";
     connection.status = "connected";
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -3961,8 +3971,8 @@ router.post("/ga4/select-property", requireAuth, async (req, res) => {
     connection.externalAccountName = matched.property;
     connection.mode = "live";
     connection.status = "connected";
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -4038,8 +4048,8 @@ router.post("/meta_ads/select-account", requireAuth, async (req, res) => {
     connection.externalAccountName = matched.name || matched.id || "Meta Ads Account";
     connection.mode = "live";
     connection.status = "connected";
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -4176,8 +4186,8 @@ router.get("/hubspot/callback", async (req, res) => {
 
     connection.scopes = scopes;
 
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
 
     connection.metadata = {
@@ -4501,8 +4511,8 @@ router.get("/google_ads/callback", async (req, res) => {
     connection.externalAccountId = externalAccountId;
     connection.externalAccountName = externalAccountName;
     connection.scopes = scopes;
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -4600,8 +4610,8 @@ router.get("/stripe/callback", async (req, res) => {
     connection.externalAccountId = externalAccountId;
     connection.externalAccountName = externalAccountName;
     connection.scopes = scope ? [scope] : [];
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -4723,8 +4733,8 @@ router.get("/ga4/callback", async (req, res) => {
     connection.externalAccountId = externalAccountId;
     connection.externalAccountName = externalAccountName;
     connection.scopes = scopes;
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -4822,8 +4832,8 @@ router.get("/meta_ads/callback", async (req, res) => {
     connection.externalAccountId = externalAccountId;
     connection.externalAccountName = externalAccountName;
     connection.scopes = ["ads_read", "ads_management", "business_management"];
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -4939,8 +4949,8 @@ router.get("/shopify/callback", async (req, res) => {
     connection.externalAccountId = shop?.id ? String(shop.id) : shopDomain;
     connection.externalAccountName = shop?.name || shopDomain;
     connection.scopes = scopes;
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -5060,8 +5070,8 @@ const tokenData =
     connection.externalAccountId = identity?.organization_id || instanceUrl;
     connection.externalAccountName = identity?.organization_id || "Salesforce";
     connection.scopes = [];
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -5172,8 +5182,8 @@ const refreshTokenExpiresIn =
     connection.externalAccountId = profile?.sub || null;
     connection.externalAccountName = profile?.name || profile?.email || "LinkedIn";
     connection.scopes = ["openid", "profile", "email", "r_ads", "r_ads_reporting"];
-    connection.lastSyncAt = new Date();
-    connection.lastSyncStatus = "success";
+    connection.lastSyncAt = null;
+    connection.lastSyncStatus = "never";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
@@ -5398,7 +5408,7 @@ router.post("/slack/test", requireAuth, async (req, res) => {
 /* MANUAL SYNC ROUTES               */
 /* -------------------------------- */
 
-router.post(
+syncPost(
   "/hubspot/sync",
   requireAuth,
   async (req, res) => {
@@ -6003,7 +6013,7 @@ const hubSpotPipelines =
   }
 );
 
-router.post("/zoho_crm/sync", requireAuth, async (req, res) => {
+syncPost("/zoho_crm/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
 
@@ -6525,7 +6535,7 @@ function safePipedriveDate(value) {
   return date;
 }
 
-router.post(
+syncPost(
   "/pipedrive/sync",
   requireAuth,
   async (req, res) => {
@@ -7186,7 +7196,7 @@ router.post(
   }
 );
 
-router.post("/bitrix24/sync", requireAuth, async (req, res) => {
+syncPost("/bitrix24/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
     if (!orgId) return res.status(400).json({ ok: false, message: "Missing org context" });
@@ -7204,8 +7214,7 @@ router.post("/bitrix24/sync", requireAuth, async (req, res) => {
       });
     }
 
-    connection.markSyncSuccess();
-    await connection.save();
+    const summary = await syncAdditionalProvider("bitrix24", orgId);
 
     await updateOrgIntegrationSummary(orgId, "bitrix24", {
       connected: true,
@@ -7216,6 +7225,7 @@ router.post("/bitrix24/sync", requireAuth, async (req, res) => {
     return res.json({
       ok: true,
       message: "Bitrix24 sync completed",
+      summary,
       provider: "bitrix24",
       mode: "live",
     });
@@ -7229,7 +7239,7 @@ router.post("/bitrix24/sync", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/stripe/sync", requireAuth, async (req, res) => {
+syncPost("/stripe/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
 
@@ -7266,7 +7276,7 @@ router.post("/stripe/sync", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/shopify/sync", requireAuth, async (req, res) => {
+syncPost("/shopify/sync", requireAuth, async (req, res) => {
   try {
     const orgId = getOrgId(req);
 
@@ -7311,28 +7321,24 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
       .replace(/\/+$/, "");
 
     async function shopifyGet(path, query = {}) {
-      const qs = new URLSearchParams(query).toString();
-      const url = `https://${cleanDomain}/admin/api/2026-07/${path}${qs ? `?${qs}` : ""}`;
-
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "X-Shopify-Access-Token": accessToken,
-          "Content-Type": "application/json",
-        },
-      });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(
-          data?.errors ||
-            data?.error ||
-            `Failed Shopify request for ${path}`
-        );
+      const resource = path.replace(".json", "");
+      let url = `https://${cleanDomain}/admin/api/2026-07/${path}?${new URLSearchParams(query)}`;
+      const records = [];
+      const seen = new Set();
+      while (url) {
+        if (seen.has(url) || new URL(url).hostname !== cleanDomain) throw new Error("Invalid Shopify pagination link");
+        seen.add(url);
+        const response = await fetch(url, {
+          headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(60000),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(JSON.stringify(data.errors || `Shopify ${path} failed`));
+        records.push(...(data[resource] || []));
+        const next = (response.headers.get("link") || "").split(",").find(link => /rel="next"/.test(link));
+        url = next?.match(/<([^>]+)>/)?.[1] || null;
       }
-
-      return data;
+      return { [resource]: records };
     }
 
     const [ordersRes, customersRes, productsRes] = await Promise.all([
@@ -7429,9 +7435,7 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
       if (cancelledAt || financialStatus === "voided" || financialStatus === "refunded") {
         normalizedStage = "Closed Lost";
       } else if (
-        financialStatus === "paid" ||
-        fulfillmentStatus === "fulfilled" ||
-        fulfillmentStatus === "partial"
+        financialStatus === "paid" || financialStatus === "partially_refunded"
       ) {
         normalizedStage = "Closed Won";
       } else if (
@@ -7457,8 +7461,10 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
           $set: {
             orgId,
             name: orderName,
-            clientId: matchedAccount?._id || null,
-            amount: Number(order?.current_total_price || order?.total_price || 0),
+            clientId: (await clientForAccount(orgId, matchedAccount || {
+              name: `Shopify guest ${shopifyOrderId}`, externalSource: "shopify", externalId: `guest:${shopifyOrderId}`, sourcePayload: order,
+            }))._id,
+            amount: Number(order?.current_total_price ?? order?.total_price ?? 0),
             stage: normalizedStage,
             closeDate: order?.processed_at || order?.created_at || null,
             externalSource: "shopify",
@@ -7523,7 +7529,7 @@ router.post("/shopify/sync", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/salesforce/sync", requireAuth, async (req, res) => {
+syncPost("/salesforce/sync", requireAuth, async (req, res) => {
   let connection = null;
 
   try {
@@ -7803,7 +7809,9 @@ await connection.save();
           $set: {
             orgId,
             name: opportunityName,
-            clientId: matchedAccount?._id || null,
+            clientId: (await clientForAccount(orgId, matchedAccount || {
+              name: `Salesforce unassigned ${externalId}`, externalSource: "salesforce", externalId: `unassigned:${externalId}`, sourcePayload: opportunity,
+            }))._id,
             amount: Number(opportunity?.Amount || 0),
             stage: normalizeSalesforceStage(opportunity),
             closeDate: opportunity?.CloseDate || null,
@@ -7906,7 +7914,8 @@ await connection.save();
   }
 });
 
-router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
+syncPost("/linkedin_ads/sync", requireAuth, async (req, res) => {
+  let connection;
   try {
     const orgId = getOrgId(req);
 
@@ -7917,7 +7926,7 @@ router.post("/linkedin_ads/sync", requireAuth, async (req, res) => {
       });
     }
 
-    const connection = await IntegrationConnection.findOne({
+    connection = await IntegrationConnection.findOne({
       orgId,
       provider: "linkedin_ads",
       status: "connected",
@@ -8051,6 +8060,8 @@ if (
       }
     }
 
+    if (!externalAccountId) throw new Error("No accessible LinkedIn ad account; performance was not synced");
+    await syncAdditionalProvider("linkedin_ads", orgId, { accountId: externalAccountId });
     connection.externalAccountId = externalAccountId;
     connection.externalAccountName = externalAccountName;
     connection.mode = "live";
@@ -8090,7 +8101,7 @@ if (
   } catch (err) {
   console.error("LinkedIn Ads sync error:", err);
 
-  if (err?.status === 401) {
+  if (err?.status === 401 && connection) {
     connection.lastSyncStatus = "failed";
     connection.lastError =
       "LinkedIn authorization is no longer valid. Reconnect LinkedIn Ads.";
@@ -8114,7 +8125,7 @@ if (
 }
 });
 
-router.post("/meta_ads/sync", requireAuth, async (req, res) => {
+syncPost("/meta_ads/sync", requireAuth, async (req, res) => {
   let connection = null;
 
   try {
@@ -8304,6 +8315,7 @@ router.post("/meta_ads/sync", requireAuth, async (req, res) => {
       new URLSearchParams({
         level: "campaign",
         date_preset: "last_30d",
+        time_increment: "1",
         fields: [
           "campaign_id",
           "campaign_name",
@@ -8326,6 +8338,12 @@ router.post("/meta_ads/sync", requireAuth, async (req, res) => {
     const campaignInsights =
       await metaGetAll(insightsUrl);
 
+    await saveDailyMetrics(orgId, "meta_ads", accountId, campaignInsights.map(row => ({
+      date: row.date_start, spend: Number(row.spend || 0),
+      impressions: Number(row.impressions || 0), clicks: Number(row.clicks || 0),
+      currency: selectedAccount.currency || "USD",
+      leads: (row.actions || []).filter(action => action.action_type === "lead").reduce((sum, action) => sum + Number(action.value || 0), 0),
+    })));
     const totalSpend =
       campaignInsights.reduce(
         (sum, row) =>
@@ -8513,14 +8531,13 @@ router.get("/stripe/revenue-daily", requireAuth, async (req, res) => {
       });
     }
 
-    const rows = await StripeRevenueDaily.find({ orgId, provider: "stripe" })
-      .sort({ date: 1 })
-      .lean();
+    const rows = await stripeDailyRows(orgId);
 
-    const totalRevenue = rows.reduce((sum, r) => sum + Number(r.netRevenue || 0), 0);
-    const totalGross = rows.reduce((sum, r) => sum + Number(r.grossRevenue || 0), 0);
-    const totalRefunds = rows.reduce((sum, r) => sum + Number(r.refunds || 0), 0);
-    const totalTransactions = rows.reduce(
+    const usdRows = rows.filter(row => String(row.currency).toLowerCase() === "usd");
+    const totalRevenue = usdRows.reduce((sum, r) => sum + Number(r.netRevenue || 0), 0);
+    const totalGross = usdRows.reduce((sum, r) => sum + Number(r.grossRevenue || 0), 0);
+    const totalRefunds = usdRows.reduce((sum, r) => sum + Number(r.refunds || 0), 0);
+    const totalTransactions = usdRows.reduce(
       (sum, r) => sum + Number(r.transactionCount || 0),
       0
     );
@@ -8528,6 +8545,8 @@ router.get("/stripe/revenue-daily", requireAuth, async (req, res) => {
     return res.json({
       ok: true,
       summary: {
+        currency: "USD",
+        excludedCurrencies: [...new Set(rows.filter(row => String(row.currency).toLowerCase() !== "usd").map(row => row.currency))],
         totalRevenue: Number(totalRevenue.toFixed(2)),
         totalGross: Number(totalGross.toFixed(2)),
         totalRefunds: Number(totalRefunds.toFixed(2)),
@@ -8545,4 +8564,10 @@ router.get("/stripe/revenue-daily", requireAuth, async (req, res) => {
   }
 });
 
+for (const provider of ["google_ads", "ga4"]) {
+  syncPost(`/${provider}/sync`, requireAuth, async (req, res) => {
+    try { return res.json({ ok: true, summary: await syncAdditionalProvider(provider, getOrgId(req)) }); }
+    catch (error) { return res.status(error.status || 500).json({ ok: false, message: error.message }); }
+  });
+}
 export default router;

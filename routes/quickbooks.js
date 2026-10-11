@@ -1,3 +1,4 @@
+import { registerProviderSync, runRegisteredSync } from "../services/providerSyncRegistry.js";
 import crypto from "crypto";
 import express from "express";
 import { requireAuth } from "../middleware/auth.js";
@@ -12,10 +13,8 @@ const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 
 function getOrgId(req) {
   return (
-    req.headers["x-org-id"] ||
-    req.query.orgId ||
-    req.body?.orgId ||
     req.orgId ||
+    req.headers["x-org-id"] ||
     req.org?._id ||
     ""
   );
@@ -354,7 +353,7 @@ router.get("/status", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/sync", requireAuth, async (req, res) => {
+const syncQuickBooks = async (req, res) => {
   let connection;
   try {
     const orgId = getOrgId(req);
@@ -439,6 +438,11 @@ router.post("/sync", requireAuth, async (req, res) => {
     }
     return res.status(500).json({ ok: false, message: "Failed to sync QuickBooks", error: error.message });
   }
+};
+registerProviderSync("quickbooks", syncQuickBooks);
+router.post("/sync", requireAuth, async (req, res) => {
+  try { return res.json(await runRegisteredSync("quickbooks", getOrgId(req))); }
+  catch (error) { return res.status(error.status || 500).json({ ok: false, message: error.message }); }
 });
 
 router.get("/summary", requireAuth, async (req, res) => {

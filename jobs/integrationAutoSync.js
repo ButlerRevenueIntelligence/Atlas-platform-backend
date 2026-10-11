@@ -1,6 +1,8 @@
 import cron from "node-cron";
 import IntegrationConnection from "../models/IntegrationConnection.js";
-import { syncStripeForOrg } from "../services/stripeSync.js";
+import { runRegisteredSync } from "../services/providerSyncRegistry.js";
+import "../routes/integrations.js";
+import "../routes/quickbooks.js";
 import {
   notifyIntegrationFailure,
   notifyIntegrationRecovery,
@@ -9,37 +11,12 @@ import {
 } from "../services/slackIntegrationAlerts.js";
 
 const AUTO_SYNC_PROVIDERS = new Set([
-  "stripe",
-  "zoho_crm",
-  "hubspot",
-  "pipedrive",
+  "stripe", "zoho_crm", "hubspot", "pipedrive", "salesforce", "shopify", "quickbooks",
+  "bitrix24", "google_ads", "ga4", "meta_ads", "linkedin_ads",
 ]);
 
-async function runProviderSync(provider, orgId) {
-  if (provider === "stripe") {
-    return syncStripeForOrg(orgId);
-  }
-
-  if (provider === "zoho_crm") {
-    const { autoSyncZohoForOrg } = await import("../services/zohoAutoSync.js");
-    return autoSyncZohoForOrg(orgId);
-  }
-
-  if (provider === "hubspot") {
-    const { autoSyncHubSpotForOrg } = await import(
-      "../services/hubspotAutoSync.js"
-    );
-    return autoSyncHubSpotForOrg(orgId);
-  }
-
-  if (provider === "pipedrive") {
-    const { autoSyncPipedriveForOrg } = await import(
-      "../services/pipedriveAutoSync.js"
-    );
-    return autoSyncPipedriveForOrg(orgId);
-  }
-
-  return null;
+export async function runProviderSync(provider, orgId) {
+  return runRegisteredSync(provider, orgId);
 }
 
 async function prepareSyncAttempt(connection) {

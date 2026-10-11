@@ -1,18 +1,49 @@
 import express from "express"
 import { calculateOperatorSignals } from "../services/operatorEngine.js"
+import { requireAuth } from "../middleware/auth.js"
+import Membership from "../models/Membership.js"
+import { getUnifiedWorkspaceData } from "../services/workspaceData.js"
 
 const router = express.Router()
 
-router.get("/signals", async (req, res) => {
+router.get("/signals", requireAuth, async (req, res) => {
 
   try {
 
-    const deals = [] // later from DB
-    const metrics = { revenue30: 1200000 }
+    const orgId =
+      req.headers["x-org-id"] ||
+      req.headers["x-workspace-id"] ||
+      req.user?.orgId ||
+      req.orgId
 
-    const signals = calculateOperatorSignals({ deals, metrics })
+    const userId = req.user?.userId || req.user?.id || req.user?._id
+    const membership = await Membership.findOne({
+      userId,
+      orgId,
+      status: { $nin: ["disabled", "suspended"] },
+    }).lean()
 
-    res.json(signals)
+    if (!membership) {
+      return res.status(403).json({ ok: false, message: "Workspace access denied" })
+    }
+
+    const unified = await getUnifiedWorkspaceData(orgId, { days: 30 })
+    const revenue30 = unified.metrics.reduce(
+      (sum, metric) => sum + Number(metric.revenue || 0),
+      0
+    )
+    const metrics = { revenue30 }
+
+    const signals = calculateOperatorSignals({
+      deals: unified.deals,
+      metrics,
+    })
+
+    res.json({
+      ok: true,
+      signals,
+      dataSources: unified.dataSources,
+    })
 
   } catch (err) {
 

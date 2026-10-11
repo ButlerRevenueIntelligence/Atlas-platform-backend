@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
 import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
-import MetricDaily from "../models/MetricDaily.js";
+import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 
 const router = express.Router();
 
@@ -48,19 +48,6 @@ function pickOrgId(req) {
 const orgIdMatch = (orgId) => ({
   $or: [{ orgId }, { orgId: String(orgId) }],
 });
-
-const normalizeMetric = (m) => {
-  const d = m?.date ? new Date(m.date) : null;
-  const valid = d && !Number.isNaN(d.getTime());
-
-  return {
-    date: valid ? d.toISOString().slice(0, 10) : null,
-    dateISO: valid ? d.toISOString() : null,
-    revenue: coerceNumber(m?.revenue, 0),
-    spend: coerceNumber(m?.spend, 0),
-    leads: coerceNumber(m?.leads, 0),
-  };
-};
 
 async function getOrgContext(req) {
   const userId = pickUserId(req);
@@ -241,15 +228,21 @@ function buildDemoIntegrations() {
   ];
 }
 
-function buildDashboardResponse({
+export function buildDashboardResponse({
   org,
   membership,
   integrations = [],
   deals = [],
   metrics = [],
+  accounts = [],
+  dataSources = {},
+  financials = null,
+  warnings = [],
+  channelMetrics = [],
+  sourceAsOf = undefined,
   workspaceMode = "live",
 }) {
-  const dataAsOf =
+  const dataAsOf = sourceAsOf !== undefined ? sourceAsOf :
     metrics.length && metrics[metrics.length - 1]?.dateISO
       ? metrics[metrics.length - 1].dateISO
       : new Date().toISOString();
@@ -273,7 +266,13 @@ function buildDashboardResponse({
 
   const cac = leads30d > 0 ? spend30d / leads30d : 0;
 
-  const pipelineValue = (deals || []).reduce((sum, d) => {
+  const openDealRows = (deals || []).filter(
+    (deal) => !["closed won", "closed lost"].includes(
+      String(deal?.stage || "").toLowerCase()
+    )
+  );
+
+  const pipelineValue = openDealRows.reduce((sum, d) => {
     const v =
       coerceNumber(d?.amount, 0) ||
       coerceNumber(d?.value, 0) ||
@@ -281,22 +280,20 @@ function buildDashboardResponse({
     return sum + v;
   }, 0);
 
-  const openDeals = (deals || []).filter(
-    (d) => !["Closed Won", "Closed Lost"].includes(String(d?.stage || ""))
-  ).length;
+  const openDeals = openDealRows.length;
 
   const wonDeals = (deals || []).filter(
-    (d) => String(d?.stage || "") === "Closed Won"
+    (d) => String(d?.stage || "").toLowerCase() === "closed won"
   ).length;
 
   const lostDeals = (deals || []).filter(
-    (d) => String(d?.stage || "") === "Closed Lost"
+    (d) => String(d?.stage || "").toLowerCase() === "closed lost"
   ).length;
 
-  const avgDailyRevenue = metrics.length ? revenue30d / metrics.length : 0;
+  const avgDailyRevenue = revenue30d / 30;
   const forecast90d = avgDailyRevenue * 90;
 
-  let revenueHealth = 70;
+  let revenueHealth = pipelineValue || revenue30d || spend30d || leads30d ? 70 : 0;
   if (pipelineValue > 0) revenueHealth += 10;
   if (cac > 0 && cac < 300) revenueHealth += 10;
   if (revenue30d > 0) revenueHealth += 10;
@@ -347,6 +344,11 @@ function buildDashboardResponse({
     integrations,
     deals,
     metrics,
+    accounts,
+    dataSources,
+    financials,
+    warnings,
+    channelMetrics,
   };
 }
 
@@ -406,43 +408,21 @@ router.get("/", requireAuth, async (req, res) => {
   );
 }
 
-    const integrations = await db
-      .collection("integrations")
-      .find(orgIdMatch(ctx.orgId))
-      .toArray();
-
-    const deals = await db
-      .collection("deals")
-      .find(orgIdMatch(ctx.orgId))
-      .toArray();
-
-    let metricsRaw = [];
-    try {
-      metricsRaw = await MetricDaily.find(orgIdMatch(ctx.orgId))
-        .sort({ date: -1 })
-        .limit(30)
-        .lean();
-    } catch (e) {
-      metricsRaw = await db
-        .collection("metrics_daily")
-        .find(orgIdMatch(ctx.orgId))
-        .sort({ date: -1 })
-        .limit(30)
-        .toArray();
-    }
-
-    const metrics = (metricsRaw || [])
-      .map(normalizeMetric)
-      .filter((m) => !!m.date)
-      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const unified = await getUnifiedWorkspaceData(ctx.orgId, { days: 30 });
 
     return res.json(
       buildDashboardResponse({
         org,
         membership: ctx.membership,
-        integrations,
-        deals,
-        metrics,
+        integrations: unified.integrations,
+        deals: unified.deals,
+        metrics: unified.metrics,
+        accounts: unified.accounts,
+        dataSources: unified.dataSources,
+        financials: unified.financials,
+        warnings: unified.warnings,
+        channelMetrics: unified.channelMetrics,
+        sourceAsOf: unified.dataAsOf,
         workspaceMode: "live",
       })
     );
