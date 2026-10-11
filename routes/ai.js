@@ -28,138 +28,8 @@ const money = (value) =>
     maximumFractionDigits: 0,
   });
 
-export const DEMO_DEALS = [
-  {
-    name: "Northstar Enterprise Expansion",
-    accountName: "Northstar Technology Group",
-    amount: 480000,
-    stage: "Negotiation",
-    probability: 72,
-    daysToClose: 18,
-    daysSinceActivity: 9,
-    owner: "Maya Thompson",
-    nextStep: "Confirm the legal review deadline and schedule an executive sponsor call.",
-    risk: "Legal review is still open and buyer activity has slowed.",
-  },
-  {
-    name: "Elevate Financial Platform Rollout",
-    accountName: "Elevate Financial Partners",
-    amount: 365000,
-    stage: "Proposal",
-    probability: 65,
-    daysToClose: 24,
-    daysSinceActivity: 4,
-    owner: "Jordan Lee",
-    nextStep: "Bring the economic buyer into the next meeting and confirm the decision process.",
-    risk: "The economic buyer has not yet joined the evaluation.",
-  },
-  {
-    name: "Atlas Manufacturing Modernization",
-    accountName: "Atlas Manufacturing",
-    amount: 310000,
-    stage: "Negotiation",
-    probability: 58,
-    daysToClose: 14,
-    daysSinceActivity: 6,
-    owner: "Chris Morgan",
-    nextStep: "Deliver the competitive response and lock a final decision meeting within 48 hours.",
-    risk: "A competitor entered the deal late and the close date is approaching.",
-  },
-  {
-    name: "Summit Revenue Operations Program",
-    accountName: "Summit B2B Solutions",
-    amount: 225000,
-    stage: "Discovery",
-    probability: 35,
-    daysToClose: 46,
-    daysSinceActivity: 3,
-    owner: "Taylor Brooks",
-    nextStep: "Complete discovery and validate the financial impact with the buying committee.",
-    risk: "The opportunity is early stage and business impact has not been validated.",
-  },
-  {
-    name: "Vertex Growth Intelligence Expansion",
-    accountName: "Vertex Growth Agency",
-    amount: 190000,
-    stage: "Proposal",
-    probability: 52,
-    daysToClose: 32,
-    daysSinceActivity: 12,
-    owner: "Alex Carter",
-    nextStep: "Re-engage the champion and confirm whether the proposal remains in the current buying window.",
-    risk: "No meaningful activity has been recorded for 12 days.",
-  },
-];
-
-const DEMO_ENRICHMENT = [
-  {
-    accountName: "Northstar Technology Group",
-    owner: "Maya Thompson",
-    risk: "Buyer activity has slowed and the legal review deadline is still unconfirmed.",
-    nextStep: "Have Maya confirm the legal deadline and schedule an executive sponsor call within 48 hours.",
-  },
-  {
-    accountName: "Elevate Financial Partners",
-    owner: "Jordan Lee",
-    risk: "The economic buyer has not participated in the final evaluation.",
-    nextStep: "Bring the economic buyer into the next meeting and confirm the decision process this week.",
-  },
-  {
-    accountName: "Vertex Growth Agency",
-    owner: "Chris Morgan",
-    risk: "The deal is close to its decision date without a confirmed final approval meeting.",
-    nextStep: "Lock the final decision call and verify procurement requirements within 48 hours.",
-  },
-  {
-    accountName: "Summit B2B Solutions",
-    owner: "Taylor Brooks",
-    risk: "Business impact has not been fully validated with the buying committee.",
-    nextStep: "Complete financial-impact discovery and document the buyer's success criteria.",
-  },
-  {
-    accountName: "Atlas Manufacturing",
-    owner: "Alex Carter",
-    risk: "Engagement has weakened and the next buyer action is not confirmed.",
-    nextStep: "Re-engage the champion and establish a dated mutual action plan.",
-  },
-];
-
-function hasUsefulValue(value) {
-  return value !== undefined && value !== null && String(value).trim() !== "";
-}
-
-function enrichDemoDeals(deals = []) {
-  if (!deals.length) return DEMO_DEALS;
-
-  return deals.map((deal, index) => {
-    const defaults = DEMO_ENRICHMENT[index % DEMO_ENRICHMENT.length];
-    return {
-      ...deal,
-      accountName: hasUsefulValue(deal.accountName)
-        ? deal.accountName
-        : hasUsefulValue(deal.companyName)
-        ? deal.companyName
-        : defaults.accountName,
-      ownerName: hasUsefulValue(deal.ownerName)
-        ? deal.ownerName
-        : hasUsefulValue(deal.salesRep)
-        ? deal.salesRep
-        : defaults.owner,
-      risk: hasUsefulValue(deal.risk)
-        ? deal.risk
-        : hasUsefulValue(deal.riskReason)
-        ? deal.riskReason
-        : hasUsefulValue(deal.blocker)
-        ? deal.blocker
-        : defaults.risk,
-      nextStep: hasUsefulValue(deal.nextStep)
-        ? deal.nextStep
-        : hasUsefulValue(deal.recommendedAction)
-        ? deal.recommendedAction
-        : defaults.nextStep,
-    };
-  });
-}
+export { DEMO_DEALS } from "../services/demoWorkspace.js";
+import { DEMO_DEALS, buildDemoWorkspaceDeals } from "../services/demoWorkspace.js";
 
 function normalizeStage(value) {
   const stage = String(value || "Unknown").trim();
@@ -575,7 +445,7 @@ router.post("/analyze", requireAuth, async (req, res) => {
           dataSources: unified?.dataSources || {},
         };
 
-    const analysisDeals = isDemo ? enrichDemoDeals([]) : openDeals;
+    const analysisDeals = isDemo ? buildDemoWorkspaceDeals(org).filter(deal => !["Closed Won", "Closed Lost"].includes(deal.stage)) : openDeals;
     if (isRevenueRiskQuestion(question)) {
       const briefing = buildRevenueRiskBriefing({
         deals: analysisDeals.map(normalizeDeal), orgName: org.name,
@@ -595,7 +465,7 @@ router.post("/analyze", requireAuth, async (req, res) => {
       let deals = openDeals;
 
       if (isDemo) {
-        deals = enrichDemoDeals([]);
+        deals = analysisDeals;
       }
 
       const result = buildDealPriorityAnswer({

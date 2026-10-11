@@ -5,6 +5,9 @@ import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
 import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 
+import Organization from "../models/Organization.js";
+import { buildDemoWorkspaceDeals, isDemoWorkspace } from "../services/demoWorkspace.js";
+
 const router = express.Router();
 
 const toObjectId = (v) => {
@@ -56,9 +59,11 @@ router.get("/board", requireAuth, async (req, res) => {
       1,
       Number(req.query?.reactivateAfterDays || 30)
     );
-    const unified = await getUnifiedWorkspaceData(orgId, { days: 90 });
-    const deals = Array.isArray(unified.deals) ? unified.deals : [];
+    const org = await Organization.findById(orgId).lean();
+    const isDemo = isDemoWorkspace(org);
     const now = new Date();
+    const unified = isDemo ? { deals: buildDemoWorkspaceDeals(org, now), dataSources: { deals: "demo" } } : await getUnifiedWorkspaceData(orgId, { days: 90 });
+    const deals = Array.isArray(unified.deals) ? unified.deals : [];
     const todayStart = new Date(now);
     todayStart.setHours(0, 0, 0, 0);
     const tomorrowStart = new Date(todayStart);
@@ -81,7 +86,8 @@ router.get("/board", requireAuth, async (req, res) => {
       clientName: deal.clientName || "Unassigned account",
       stage: deal.stage,
       amount: Number(deal.amount || 0),
-      probability: Number(deal.probability || 0),
+      probability: Number(deal.probability || 0) > 1 ? Number(deal.probability) : Number(deal.probability || 0) * 100,
+      ownerName: deal.ownerName || "Owner not recorded",
       dueAt: deal.nextActionDueAt,
       nextAction: deal.nextAction || "Review next step",
       lastActivityAt: deal.lastActivityAt || deal.updatedAt || deal.createdAt,
@@ -125,6 +131,8 @@ router.get("/board", requireAuth, async (req, res) => {
           id: deal._id || deal.id,
           name: deal.name,
           clientName: deal.clientName || "Unassigned account",
+          ownerName: deal.ownerName || "Owner not recorded",
+          stage: deal.stage,
           amount: Number(deal.amount || 0),
           lastTouchAgeDays,
           suggested: deal.nextAction || "Re-engage and confirm the next step",
@@ -161,6 +169,7 @@ router.get("/board", requireAuth, async (req, res) => {
     return res.json({
       ok: true,
       orgId: String(orgId),
+      workspaceMode: isDemo ? "demo" : "live",
       membership,
       execution: {
         overdue,

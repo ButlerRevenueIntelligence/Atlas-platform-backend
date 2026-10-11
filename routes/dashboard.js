@@ -5,6 +5,8 @@ import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
 import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 
+import { buildDemoWorkspaceDeals } from "../services/demoWorkspace.js";
+
 const router = express.Router();
 
 const toObjectId = (v) => {
@@ -140,60 +142,7 @@ function buildDemoMetrics() {
 }
 
 function buildDemoDeals(org) {
-  const orgId = org?._id;
-
-  return [
-    {
-      _id: new mongoose.Types.ObjectId(),
-      orgId,
-      name: "Enterprise Expansion Program",
-      amount: 85000,
-      value: 85000,
-      stage: "Negotiation",
-      probability: 0.75,
-      source: "demo",
-    },
-    {
-      _id: new mongoose.Types.ObjectId(),
-      orgId,
-      name: "Revenue Operations Transformation",
-      amount: 120000,
-      value: 120000,
-      stage: "Proposal",
-      probability: 0.55,
-      source: "demo",
-    },
-    {
-      _id: new mongoose.Types.ObjectId(),
-      orgId,
-      name: "Demand Generation Rollout",
-      amount: 42000,
-      value: 42000,
-      stage: "Discovery",
-      probability: 0.35,
-      source: "demo",
-    },
-    {
-      _id: new mongoose.Types.ObjectId(),
-      orgId,
-      name: "Global Growth Initiative",
-      amount: 64000,
-      value: 64000,
-      stage: "Closed Won",
-      probability: 1,
-      source: "demo",
-    },
-    {
-      _id: new mongoose.Types.ObjectId(),
-      orgId,
-      name: "Pipeline Recovery Sprint",
-      amount: 18000,
-      value: 18000,
-      stage: "Closed Lost",
-      probability: 0,
-      source: "demo",
-    },
-  ];
+  return buildDemoWorkspaceDeals(org);
 }
 
 function buildDemoIntegrations() {
@@ -386,13 +335,6 @@ router.get("/", requireAuth, async (req, res) => {
     const workspaceMode = detectWorkspaceMode(org);
 
    if (workspaceMode === "demo") {
-  const realDeals = await db
-    .collection("deals")
-    .find(orgIdMatch(ctx.orgId))
-    .toArray();
-
-  const hasRealDeals = Array.isArray(realDeals) && realDeals.length > 0;
-
   const demoMetrics = buildDemoMetrics();
   const demoIntegrations = buildDemoIntegrations();
 
@@ -401,7 +343,7 @@ router.get("/", requireAuth, async (req, res) => {
       org,
       membership: ctx.membership,
       integrations: demoIntegrations,
-      deals: hasRealDeals ? realDeals : buildDemoDeals(org),
+      deals: buildDemoDeals(org),
       metrics: demoMetrics,
       workspaceMode: "demo",
     })
