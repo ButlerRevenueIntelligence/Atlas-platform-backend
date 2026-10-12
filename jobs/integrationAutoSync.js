@@ -28,12 +28,23 @@ async function prepareSyncAttempt(connection) {
   await connection.save();
 }
 
-async function markSyncSuccess(connection) {
+export async function markSyncSuccess(connection) {
   connection.status = "connected";
   connection.lastSyncStatus = "success";
   connection.lastSyncAt = new Date();
   connection.lastError = null;
-  await connection.save();
+  // The provider handler saves a different document instance. Fields that are
+  // unchanged on this job's snapshot may still be stale in MongoDB, so always
+  // write the complete successful outcome instead of relying on dirty tracking.
+  await IntegrationConnection.updateOne(
+    { _id: connection._id, orgId: connection.orgId, provider: connection.provider },
+    { $set: {
+      status: "connected",
+      lastSyncStatus: "success",
+      lastSyncAt: connection.lastSyncAt,
+      lastError: null,
+    } }
+  );
 }
 
 async function markSyncFailed(connection, error) {
