@@ -14,6 +14,13 @@ const schema = new mongoose.Schema({
     required: true,
     maxlength: 120
   },
+  sourceMode: {
+    type: String,
+    enum: ['demo', 'live']
+  },
+  execution: {
+    type: mongoose.Schema.Types.Mixed
+  },
   deals: {
     type: [mongoose.Schema.Types.Mixed],
     default: []
