@@ -324,6 +324,12 @@ export async function getUnifiedWorkspaceData(orgId, { days = 30 } = {}) {
   }, {}));
   return {
     channelMetrics,
+    // Original observation days distinguish genuine zero records from generated gap-fill rows.
+    revenueObservationDays: {
+      stripe: [...new Set(stripeRows.filter(row => String(row.currency || "USD").toUpperCase() === "USD").map(row => dayKey(row.date)).filter(Boolean))],
+      shopify: [...new Set(deals.filter(deal => String(deal.externalSource).toLowerCase() === "shopify" && String(deal.stage).toLowerCase() === "closed won").map(deal => dayKey(deal.closedAt || deal.closeDate || deal.sourcePayload?.processed_at || deal.createdAt)).filter(Boolean))],
+      metrics_daily: [...new Set(baseMetrics.map(row => dayKey(row.date)).filter(Boolean))],
+    },
     dataAsOf: [...connections.filter(connection => connection.lastSyncAt).map(connection => new Date(connection.lastSyncAt).getTime()), ...baseMetrics.map(row => new Date(row.date).getTime())].filter(Number.isFinite).sort((a, b) => b - a).map(value => new Date(value).toISOString())[0] || null,
     orgId: String(objectId),
     integrations: connections.map((connection) => ({
