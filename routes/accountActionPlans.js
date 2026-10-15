@@ -1,17 +1,13 @@
+import { accountPlanContext as context } from '../services/accountPlanContext.js';
 import express from 'express';
 import { requireAuth, requirePerm } from '../middleware/auth.js';
 import { requirePlan } from '../middleware/requirePlan.js';
 import Membership from '../models/Membership.js';
 import User from '../models/User.js';
-import Organization from '../models/Organization.js';
-import Client from '../models/Client.js';
-import Account from '../models/Account.js';
 import AccountActionPlan from '../models/AccountActionPlan.js';
 import RecoveryAction from '../models/RecoveryAction.js';
-import { getUnifiedWorkspaceData } from '../services/workspaceData.js';
-import { buildDemoWorkspaceDeals, isDemoWorkspace } from '../services/demoWorkspace.js';
-import { captureDeals, compareDeals } from '../services/leadershipBriefing.js';
-import { buildAccountCatalog, canManagePlan, validatePlanInput } from '../services/accountActionPlans.js';
+import { compareDeals } from '../services/leadershipBriefing.js';
+import { canManagePlan, validatePlanInput } from '../services/accountActionPlans.js';
 const router = express.Router();
 router.use(requireAuth, requirePlan('CORE'), requirePerm('clients.view'));
 router.use(async (req, res, next) => {
@@ -40,36 +36,6 @@ const wrap = fn => async (req, res, next) => {
     next(error);
   }
 };
-async function context(orgId) {
-  const org = await Organization.findById(orgId).select('_id name slug').lean();
-  if (!org) throw new Error('Workspace not found');
-  const demo = isDemoWorkspace(org),
-    now = new Date();
-  const [clients, accounts, data] = demo ? [[], [], {
-    deals: buildDemoWorkspaceDeals(org, new Date(now.toISOString().slice(0, 10))),
-    warnings: []
-  }] : await Promise.all([Client.find({
-    orgId,
-    archivedAt: null
-  }).lean(), Account.find({
-    orgId,
-    archivedAt: null
-  }).lean(), getUnifiedWorkspaceData(orgId, {
-    days: 30
-  })]);
-  return {
-    demo,
-    now,
-    deals: captureDeals(data.deals || []),
-    catalog: buildAccountCatalog({
-      clients,
-      accounts,
-      deals: data.deals || [],
-      demo
-    }),
-    warnings: data.warnings || []
-  };
-}
 async function roster(orgId) {
   const memberships = await Membership.find({
     orgId,

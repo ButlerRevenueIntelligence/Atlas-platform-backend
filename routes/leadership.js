@@ -1,16 +1,18 @@
+import decisionRoutes from './leadershipDecisions.js';
+import LeadershipDecision from '../models/LeadershipDecision.js';
+import AccountActionPlan from '../models/AccountActionPlan.js';
+import { currentLeadershipData as currentData } from '../services/leadershipData.js';
+import { captureExecution, meetingChanges, decisionView, canReadAccountPlans } from '../services/decisionOutcomes.js';
 import express from 'express';
 import mongoose from 'mongoose';
 import { requireAuth, requirePerm } from '../middleware/auth.js';
 import { requirePlan } from '../middleware/requirePlan.js';
-import Organization from '../models/Organization.js';
 import Membership from '../models/Membership.js';
 import User from '../models/User.js';
 import LeadershipCheckpoint from '../models/LeadershipCheckpoint.js';
 import RecoveryAction from '../models/RecoveryAction.js';
 import CompanyIntelligence from '../models/CompanyIntelligence.js';
-import { getUnifiedWorkspaceData } from '../services/workspaceData.js';
-import { buildDemoWorkspaceDeals, isDemoWorkspace } from '../services/demoWorkspace.js';
-import { captureDeals, compareDeals, summarize, priorities, simulateSlip, matchExternalContext, demoComparison } from '../services/leadershipBriefing.js';
+import { compareDeals, summarize, priorities, simulateSlip, matchExternalContext, demoComparison } from '../services/leadershipBriefing.js';
 const router = express.Router();
 router.use(requireAuth, requirePlan('CORE'), requirePerm('command_center.view'));
 router.use(async (req, res, next) => {
@@ -38,23 +40,7 @@ const wrap = fn => async (req, res, next) => {
     next(error);
   }
 };
-async function currentData(orgId) {
-  const org = await Organization.findById(orgId).lean();
-  const demo = isDemoWorkspace(org);
-  const now = new Date();
-  const workspace = demo ? {
-    deals: buildDemoWorkspaceDeals(org, new Date(now.toISOString().slice(0, 10))),
-    integrations: []
-  } : await getUnifiedWorkspaceData(orgId, {
-    days: 90
-  });
-  return {
-    now,
-    demo,
-    deals: captureDeals(workspace.deals || []),
-    integrations: workspace.integrations || []
-  };
-}
+router.use('/decisions', decisionRoutes);
 router.get('/briefing', wrap(async (req, res) => {
   const {
     now,
@@ -62,15 +48,15 @@ router.get('/briefing', wrap(async (req, res) => {
     deals,
     integrations
   } = await currentData(req.orgId);
-  const [checkpoints, actions, members, snapshots] = await Promise.all([LeadershipCheckpoint.find({
+  const [checkpoints, rawActions, members, snapshots, rawDecisions, rawPlans] = await Promise.all([LeadershipCheckpoint.find({
     orgId: req.orgId
   }).sort({
     createdAt: -1
-  }).limit(12).select('-deals').lean(), RecoveryAction.find({
+  }).limit(12).select('-deals -execution').lean(), RecoveryAction.find({
     orgId: req.orgId
   }).sort({
     createdAt: -1
-  }).limit(100).lean(), Membership.find({
+  }).limit(101).lean(), Membership.find({
     orgId: req.orgId,
     status: 'active'
   }).select('userId role').lean(), demo ? [] : CompanyIntelligence.find({
@@ -80,7 +66,23 @@ router.get('/briefing', wrap(async (req, res) => {
     }
   }).sort({
     createdAt: -1
-  }).limit(20).lean()]);
+  }).limit(20).lean(), LeadershipDecision.find({
+    orgId: req.orgId,
+    sourceMode: demo ? 'demo' : 'live'
+  }).sort({
+    createdAt: -1
+  }).limit(101).select({
+    reviews: {
+      $slice: -5
+    }
+  }).lean(), canReadAccountPlans(req) ? AccountActionPlan.find({
+    orgId: req.orgId
+  }).sort({
+    updatedAt: -1
+  }).limit(101).select('accountKey objective ownerId ownerName reviewAt blockers createdAt').lean() : []]);
+  const actions = rawActions.slice(0, 100),
+    decisions = rawDecisions.slice(0, 100);
+  const execution = captureExecution(rawActions, rawDecisions, rawPlans, canReadAccountPlans(req));
   const requested = req.query.checkpointId;
   if (requested && !mongoose.isValidObjectId(requested)) return res.status(400).json({
     message: 'Invalid checkpoint'
@@ -96,11 +98,14 @@ router.get('/briefing', wrap(async (req, res) => {
     message: 'Checkpoint not found'
   });
   if (!checkpoint && demo) checkpoint = demoComparison(deals, now);
+  const pipelineComparable = Boolean(checkpoint && (!checkpoint.sourceMode || checkpoint.sourceMode === (demo ? 'demo' : 'live')));
   const users = await User.find({
     _id: {
       $in: members.map(m => m.userId)
     },
-    status: {$nin: ['disabled', 'suspended']}
+    status: {
+      $nin: ['disabled', 'suspended']
+    }
   }).select('_id name email').lean();
   res.json({
     ok: true,
@@ -111,10 +116,23 @@ router.get('/briefing', wrap(async (req, res) => {
     deals,
     summary: summarize(deals, now),
     priorities: priorities(deals, now),
-    checkpoint,
+    checkpoint: checkpoint ? {
+      _id: checkpoint._id,
+      label: checkpoint.label,
+      createdAt: checkpoint.createdAt,
+      isIllustrative: checkpoint.isIllustrative
+    } : null,
     checkpoints,
-    changes: checkpoint ? compareDeals(checkpoint.deals, deals) : [],
-    previousSummary: checkpoint ? summarize(checkpoint.deals, now) : null,
+    meetingChanges: meetingChanges(checkpoint, {
+      ...execution,
+      deals
+    }, now, demo ? 'demo' : 'live'),
+    decisions: decisions.map(d => decisionView(d, deals, actions, demo ? 'demo' : 'live')),
+    decisionsLimited: rawDecisions.length > 100,
+    canReadAccountPlans: canReadAccountPlans(req),
+    pipelineComparisonAvailable: pipelineComparable,
+    changes: pipelineComparable ? compareDeals(checkpoint.deals, deals) : [],
+    previousSummary: pipelineComparable ? summarize(checkpoint.deals, now) : null,
     actions: actions.map(action => ({
       ...action,
       currentDeal: deals.find(d => d.id === action.dealId) || null,
@@ -144,17 +162,38 @@ router.post('/checkpoints', wrap(async (req, res) => {
     message: 'Provide a meeting name of 1–120 characters'
   });
   const {
-    deals
+    deals,
+    demo
   } = await currentData(req.orgId);
+  const [actions, decisions, plans] = await Promise.all([RecoveryAction.find({
+    orgId: req.orgId
+  }).sort({
+    createdAt: -1
+  }).limit(101).lean(), LeadershipDecision.find({
+    orgId: req.orgId,
+    sourceMode: demo ? 'demo' : 'live'
+  }).sort({
+    createdAt: -1
+  }).limit(101).lean(), canReadAccountPlans(req) ? AccountActionPlan.find({
+    orgId: req.orgId
+  }).sort({
+    updatedAt: -1
+  }).limit(101).select('accountKey objective ownerId ownerName reviewAt blockers createdAt').lean() : []]);
   const checkpoint = await LeadershipCheckpoint.create({
     orgId: req.orgId,
     createdBy: req.user.userId,
     label,
-    deals
+    deals,
+    sourceMode: demo ? 'demo' : 'live',
+    execution: captureExecution(actions, decisions, plans, canReadAccountPlans(req))
   });
   res.status(201).json({
     ok: true,
-    checkpoint
+    checkpoint: {
+      _id: checkpoint._id,
+      label: checkpoint.label,
+      createdAt: checkpoint.createdAt
+    }
   });
 }));
 router.post('/scenario', wrap(async (req, res) => {
@@ -205,7 +244,7 @@ router.post('/actions', wrap(async (req, res) => {
     message: 'Opportunity not found in this workspace'
   });
   const owner = await User.findById(assigneeId).select('name email status').lean();
-  if (!owner || ['disabled','suspended'].includes(owner.status)) return res.status(400).json({
+  if (!owner || ['disabled', 'suspended'].includes(owner.status)) return res.status(400).json({
     message: 'Member no longer available'
   });
   const action = await RecoveryAction.create({

@@ -1,3 +1,4 @@
+import LeadershipDecision from '../models/LeadershipDecision.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import router from '../routes/leadership.js';
@@ -222,6 +223,8 @@ test('action creation captures server-side deal evidence and real assignee ident
 });
 test('checkpoint snapshots come from workspace records, never caller-supplied deal arrays', async t => {
   demo(t);
+  t.mock.method(RecoveryAction, 'find', () => query([]));
+  t.mock.method(LeadershipDecision, 'find', () => query([]));
   t.mock.method(LeadershipCheckpoint, 'create', async input => {
     assert.equal(input.orgId, orgId);
     assert.equal(input.deals.length, 9);
@@ -239,7 +242,7 @@ test('checkpoint snapshots come from workspace records, never caller-supplied de
 });
 test('briefing rejects another workspace checkpoint and scopes every collection read', async t => {
   demo(t);
-  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership, CompanyIntelligence]) t.mock.method(model, 'find', filter => {
+  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership, CompanyIntelligence, LeadershipDecision]) t.mock.method(model, 'find', filter => {
     assert.equal(filter.orgId, orgId);
     return query([]);
   });
@@ -253,7 +256,7 @@ test('briefing rejects another workspace checkpoint and scopes every collection 
 });
 test('first demo briefing includes labeled rehearsal but saves nothing', async t => {
   demo(t);
-  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership]) t.mock.method(model, 'find', () => query([]));
+  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership, LeadershipDecision]) t.mock.method(model, 'find', () => query([]));
   t.mock.method(User, 'find', () => query([]));
   t.mock.method(LeadershipCheckpoint, 'create', () => assert.fail('Read-only briefing must not seed data'));
   const res = await invoke('/briefing', 'get', request());
@@ -278,4 +281,93 @@ test('scenario endpoint rejects invalid dates/deals instead of mutating opportun
   };
   const res = await invoke('/scenario', 'post', req);
   assert.equal(res.body.weightedImpact, 345600);
+});
+test('new checkpoints capture tenant-scoped execution records and return no raw account snapshot', async t => {
+  demo(t);
+  const decisions = (await import('../models/LeadershipDecision.js')).default,
+    plans = (await import('../models/AccountActionPlan.js')).default;
+  for (const model of [RecoveryAction, decisions, plans]) t.mock.method(model, 'find', filter => {
+    assert.equal(filter.orgId, orgId);
+    return query([]);
+  });
+  t.mock.method(LeadershipCheckpoint, 'create', async input => {
+    assert.equal(input.sourceMode, 'demo');
+    assert.equal(input.execution.version, 1);
+    assert.equal(input.execution.plansAvailable, true);
+    assert.equal(input.createdBy, userId);
+    return {
+      _id: actionId,
+      ...input
+    };
+  });
+  const req = request();
+  req.user.permissions = ['*'];
+  req.body = {
+    label: 'Leadership review',
+    execution: {
+      forged: true
+    }
+  };
+  const res = await invoke('/checkpoints', 'post', req);
+  assert.equal(res.code, 201);
+  assert.equal(res.body.checkpoint.execution, undefined);
+});
+test('briefing hides account-plan snapshots after permission loss while preserving opportunity comparison', async t => {
+  demo(t);
+  const plans = (await import('../models/AccountActionPlan.js')).default;
+  t.mock.method(plans, 'find', () => assert.fail('Account permission required to read plan collection'));
+  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership, LeadershipDecision]) t.mock.method(model, 'find', filter => {
+    assert.equal(filter.orgId, orgId);
+    return query([]);
+  });
+  t.mock.method(User, 'find', () => query([]));
+  t.mock.method(LeadershipCheckpoint, 'findOne', () => query({
+    _id: otherOrg,
+    label: 'Earlier meeting',
+    createdAt: new Date(),
+    sourceMode: 'demo',
+    deals: [],
+    execution: {
+      version: 1,
+      plansAvailable: true,
+      actions: [],
+      decisions: [],
+      plans: [{
+        accountKey: 'secret',
+        objective: 'Protected account plan'
+      }]
+    }
+  }));
+  const req = request();
+  req.query.checkpointId = otherOrg;
+  req.user.permissions = ['command_center.view'];
+  const res = await invoke('/briefing', 'get', req);
+  assert.equal(res.body.canReadAccountPlans, false);
+  assert.equal(res.body.meetingChanges.plansCompared, false);
+  assert.deepEqual(res.body.meetingChanges.planChanges, []);
+  assert.equal(res.body.checkpoint.execution, undefined);
+  assert.ok(!JSON.stringify(res.body).includes('Protected account plan'));
+});
+test('new demo/live mode mismatches cannot appear as pipeline gains or losses', async t => {
+  demo(t);
+  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership, LeadershipDecision]) t.mock.method(model, 'find', () => query([]));
+  t.mock.method(User, 'find', () => query([]));
+  t.mock.method(LeadershipCheckpoint, 'findOne', () => query({
+    _id: otherOrg,
+    label: 'Live meeting',
+    createdAt: new Date(),
+    sourceMode: 'live',
+    deals: [{
+      id: 'one',
+      amount: 100,
+      stage: 'Proposal',
+      probability: .5
+    }]
+  }));
+  const req = request();
+  req.query.checkpointId = otherOrg;
+  const result = await invoke('/briefing', 'get', req);
+  assert.equal(result.body.pipelineComparisonAvailable, false);
+  assert.deepEqual(result.body.changes, []);
+  assert.equal(result.body.previousSummary, null);
 });
