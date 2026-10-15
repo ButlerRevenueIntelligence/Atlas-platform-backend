@@ -25,6 +25,7 @@ export async function accountPlanContext(orgId) {
   return {
     demo,
     now,
+    workspace: data,
     deals: captureDeals(data.deals || []),
     catalog: buildAccountCatalog({
       clients,
