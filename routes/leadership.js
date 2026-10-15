@@ -1,0 +1,297 @@
+import express from 'express';
+import mongoose from 'mongoose';
+import { requireAuth, requirePerm } from '../middleware/auth.js';
+import { requirePlan } from '../middleware/requirePlan.js';
+import Organization from '../models/Organization.js';
+import Membership from '../models/Membership.js';
+import User from '../models/User.js';
+import LeadershipCheckpoint from '../models/LeadershipCheckpoint.js';
+import RecoveryAction from '../models/RecoveryAction.js';
+import CompanyIntelligence from '../models/CompanyIntelligence.js';
+import { getUnifiedWorkspaceData } from '../services/workspaceData.js';
+import { buildDemoWorkspaceDeals, isDemoWorkspace } from '../services/demoWorkspace.js';
+import { captureDeals, compareDeals, summarize, priorities, simulateSlip, matchExternalContext, demoComparison } from '../services/leadershipBriefing.js';
+const router = express.Router();
+router.use(requireAuth, requirePlan('CORE'), requirePerm('command_center.view'));
+router.use(async (req, res, next) => {
+  // An explicitly active membership is required, including for globally privileged accounts.
+  try {
+    const membership = await Membership.findOne({
+      orgId: req.orgId,
+      userId: req.user.userId,
+      status: 'active'
+    }).lean();
+    if (!membership) return res.status(403).json({
+      message: 'An active workspace membership is required'
+    });
+    req.leadershipMember = membership;
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+const canManage = req => ['owner', 'admin', 'manager'].includes(req.leadershipMember.role);
+const wrap = fn => async (req, res, next) => {
+  try {
+    await fn(req, res);
+  } catch (error) {
+    next(error);
+  }
+};
+async function currentData(orgId) {
+  const org = await Organization.findById(orgId).lean();
+  const demo = isDemoWorkspace(org);
+  const now = new Date();
+  const workspace = demo ? {
+    deals: buildDemoWorkspaceDeals(org, new Date(now.toISOString().slice(0, 10))),
+    integrations: []
+  } : await getUnifiedWorkspaceData(orgId, {
+    days: 90
+  });
+  return {
+    now,
+    demo,
+    deals: captureDeals(workspace.deals || []),
+    integrations: workspace.integrations || []
+  };
+}
+router.get('/briefing', wrap(async (req, res) => {
+  const {
+    now,
+    demo,
+    deals,
+    integrations
+  } = await currentData(req.orgId);
+  const [checkpoints, actions, members, snapshots] = await Promise.all([LeadershipCheckpoint.find({
+    orgId: req.orgId
+  }).sort({
+    createdAt: -1
+  }).limit(12).select('-deals').lean(), RecoveryAction.find({
+    orgId: req.orgId
+  }).sort({
+    createdAt: -1
+  }).limit(100).lean(), Membership.find({
+    orgId: req.orgId,
+    status: 'active'
+  }).select('userId role').lean(), demo ? [] : CompanyIntelligence.find({
+    orgId: req.orgId,
+    expiresAt: {
+      $gt: now
+    }
+  }).sort({
+    createdAt: -1
+  }).limit(20).lean()]);
+  const requested = req.query.checkpointId;
+  if (requested && !mongoose.isValidObjectId(requested)) return res.status(400).json({
+    message: 'Invalid checkpoint'
+  });
+  let checkpoint = requested ? await LeadershipCheckpoint.findOne({
+    _id: requested,
+    orgId: req.orgId
+  }).lean() : checkpoints[0] ? await LeadershipCheckpoint.findOne({
+    _id: checkpoints[0]._id,
+    orgId: req.orgId
+  }).lean() : null;
+  if (requested && !checkpoint) return res.status(404).json({
+    message: 'Checkpoint not found'
+  });
+  if (!checkpoint && demo) checkpoint = demoComparison(deals, now);
+  const users = await User.find({
+    _id: {
+      $in: members.map(m => m.userId)
+    },
+    status: {$nin: ['disabled', 'suspended']}
+  }).select('_id name email').lean();
+  res.json({
+    ok: true,
+    asOf: now,
+    workspaceMode: demo ? 'demo' : 'live',
+    canManage: canManage(req),
+    userId: req.user.userId,
+    deals,
+    summary: summarize(deals, now),
+    priorities: priorities(deals, now),
+    checkpoint,
+    checkpoints,
+    changes: checkpoint ? compareDeals(checkpoint.deals, deals) : [],
+    previousSummary: checkpoint ? summarize(checkpoint.deals, now) : null,
+    actions: actions.map(action => ({
+      ...action,
+      currentDeal: deals.find(d => d.id === action.dealId) || null,
+      dealChanges: compareDeals([action.evidence], deals.filter(d => d.id === action.dealId))
+    })),
+    members: users.map(u => ({
+      id: String(u._id),
+      name: u.name || u.email,
+      role: members.find(m => String(m.userId) === String(u._id))?.role
+    })),
+    integrations: integrations.map(i => ({
+      provider: i.provider,
+      status: i.status,
+      lastSyncAt: i.lastSyncAt,
+      lastSyncStatus: i.lastSyncStatus
+    })),
+    externalContext: matchExternalContext(snapshots, deals, now),
+    externalEventsAvailable: false
+  });
+}));
+router.post('/checkpoints', wrap(async (req, res) => {
+  if (!canManage(req)) return res.status(403).json({
+    message: 'A workspace manager must save meeting checkpoints'
+  });
+  const label = String(req.body.label || '').trim();
+  if (!label || label.length > 120) return res.status(400).json({
+    message: 'Provide a meeting name of 1–120 characters'
+  });
+  const {
+    deals
+  } = await currentData(req.orgId);
+  const checkpoint = await LeadershipCheckpoint.create({
+    orgId: req.orgId,
+    createdBy: req.user.userId,
+    label,
+    deals
+  });
+  res.status(201).json({
+    ok: true,
+    checkpoint
+  });
+}));
+router.post('/scenario', wrap(async (req, res) => {
+  const {
+    deals,
+    now
+  } = await currentData(req.orgId);
+  try {
+    res.json({
+      ok: true,
+      asOf: now,
+      ...simulateSlip(deals, req.body, now)
+    });
+  } catch (error) {
+    res.status(400).json({
+      message: error.message
+    });
+  }
+}));
+router.post('/actions', wrap(async (req, res) => {
+  if (!canManage(req)) return res.status(403).json({
+    message: 'A workspace manager must assign recovery actions'
+  });
+  const {
+    dealId,
+    title,
+    assigneeId,
+    dueAt
+  } = req.body;
+  const due = new Date(dueAt);
+  if (typeof title !== 'string' || !title.trim() || title.length > 500 || !mongoose.isValidObjectId(assigneeId) || !dueAt || !Number.isFinite(due.getTime())) return res.status(400).json({
+    message: 'Provide an action, active member, and valid deadline'
+  });
+  const member = await Membership.findOne({
+    orgId: req.orgId,
+    userId: assigneeId,
+    status: 'active'
+  }).lean();
+  if (!member || member.role === 'viewer') return res.status(400).json({
+    message: 'Choose an active member who can update actions'
+  });
+  const {
+    deals,
+    now
+  } = await currentData(req.orgId);
+  const deal = deals.find(d => d.id === dealId);
+  if (!deal) return res.status(404).json({
+    message: 'Opportunity not found in this workspace'
+  });
+  const owner = await User.findById(assigneeId).select('name email status').lean();
+  if (!owner || ['disabled','suspended'].includes(owner.status)) return res.status(400).json({
+    message: 'Member no longer available'
+  });
+  const action = await RecoveryAction.create({
+    orgId: req.orgId,
+    dealId,
+    dealName: deal.name,
+    title: title.trim(),
+    assigneeId,
+    ownerName: owner.name || owner.email,
+    dueAt: due,
+    createdBy: req.user.userId,
+    evidence: {
+      ...deal,
+      capturedAt: now
+    },
+    history: [{
+      status: 'open',
+      userId: req.user.userId,
+      at: now
+    }]
+  });
+  res.status(201).json({
+    ok: true,
+    action
+  });
+}));
+router.patch('/actions/:id', wrap(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({
+    message: 'Invalid action'
+  });
+  const {
+    status,
+    outcome,
+    version
+  } = req.body;
+  if (!['open', 'in_progress', 'blocked', 'completed'].includes(status) || typeof outcome !== 'string' || outcome.length > 2000 || !Number.isInteger(version)) return res.status(400).json({
+    message: 'Invalid action update'
+  });
+  const action = await RecoveryAction.findOne({
+    _id: req.params.id,
+    orgId: req.orgId
+  }).lean();
+  if (!action) return res.status(404).json({
+    message: 'Action not found'
+  });
+  if (req.leadershipMember.role === 'viewer' || !canManage(req) && String(action.assigneeId) !== req.user.userId) return res.status(403).json({
+    message: 'Only the assignee or a workspace manager may update this action'
+  });
+  if (status === 'completed' && !outcome.trim()) return res.status(400).json({
+    message: 'Record the outcome before completing an action'
+  });
+  const at = new Date();
+  const updated = await RecoveryAction.findOneAndUpdate({
+    _id: action._id,
+    orgId: req.orgId,
+    __v: version
+  }, {
+    $set: {
+      status,
+      outcome: outcome.trim(),
+      completedAt: status === 'completed' ? at : null
+    },
+    $inc: {
+      __v: 1
+    },
+    $push: {
+      history: {
+        $each: [{
+          status,
+          outcome: outcome.trim(),
+          userId: req.user.userId,
+          at
+        }],
+        $slice: -100
+      }
+    }
+  }, {
+    new: true,
+    runValidators: true
+  }).lean();
+  if (!updated) return res.status(409).json({
+    message: 'This action changed. Refresh before updating it again.'
+  });
+  res.json({
+    ok: true,
+    action: updated
+  });
+}));
+export default router;
