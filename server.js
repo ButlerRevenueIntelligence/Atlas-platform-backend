@@ -23,6 +23,7 @@ import clientsRouter from "./routes/clients.js";
 import dealsRouter from "./routes/deals.js";
 import dealIntelRouter from "./routes/dealIntel.js";
 import revenueIntelRouter from "./routes/revenueIntel.js";
+import leadershipRouter from "./routes/leadership.js";
 import forecastRoutes from "./routes/forecast.js";
 import partnersRoutes from "./routes/partners.js";
 import orgRoutes from "./routes/org.js";
@@ -284,6 +285,8 @@ app.use(
   requirePlan("CORE"),
   revenueStabilityRouter
 );
+
+app.use("/api/leadership", leadershipRouter);
 
 app.use(
   "/api/revenue-intel",
