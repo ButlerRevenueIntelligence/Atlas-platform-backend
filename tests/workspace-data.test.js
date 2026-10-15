@@ -20,7 +20,7 @@ test("all dashboard reads are scoped; legacy Account links resolve; old selected
     [Account, [{ _id: "legacy-account", orgId, name: "Buyer", externalSource: "salesforce", externalId: "a", sourcePayload: { BillingCountry: "United States" } }]],
     [Client, []], [Deal, [{ _id: "deal", orgId, clientId: "legacy-account", stage: "Negotiation", amount: 200 }]],
     [IntegrationConnection, [{ orgId, provider: "google_ads", externalAccountId: "123", status: "connected" }]],
-    [MetricDaily, []], [StripeRevenueDaily, [{ date, currency: "usd", netRevenue: 50 }]],
+    [MetricDaily, [{date, revenue:0}]], [StripeRevenueDaily, [{ date, currency: "usd", netRevenue: 50 }]],
     [SourceMetricDaily, [{ date, provider: "google_ads", accountId: "old-account", currency: "USD", spend: 999 }, { date, provider: "google_ads", accountId: "123", currency: "USD", spend: 10 }]],
   ];
   for (const [model, data] of fixtures) t.mock.method(model, "find", filter => { assert.equal(String(filter.orgId), orgId); return query(data); });
@@ -30,6 +30,8 @@ test("all dashboard reads are scoped; legacy Account links resolve; old selected
   assert.equal(data.deals[0].clientName, "Buyer"); assert.equal(data.deals[0].region, "North America");
   assert.equal(data.metrics.reduce((sum, row) => sum + row.spend, 0), 10);
   assert.equal(data.metrics.reduce((sum, row) => sum + row.revenue, 0), 50);
+  assert.deepEqual(data.revenueObservationDays.stripe, [date]);
+  assert.deepEqual(data.revenueObservationDays.metrics_daily, [date]); // Original zero-value row is an observation.
   assert.equal(data.financials.revenue, 2000); // Accounting YTD is not added to payment revenue.
   assert.equal(data.channelMetrics.length, 1);
 });

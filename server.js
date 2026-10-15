@@ -24,6 +24,7 @@ import dealsRouter from "./routes/deals.js";
 import dealIntelRouter from "./routes/dealIntel.js";
 import revenueIntelRouter from "./routes/revenueIntel.js";
 import leadershipRouter from "./routes/leadership.js";
+import revenuePlanningRouter from "./routes/revenuePlanning.js";
 import forecastRoutes from "./routes/forecast.js";
 import partnersRoutes from "./routes/partners.js";
 import orgRoutes from "./routes/org.js";
@@ -287,6 +288,7 @@ app.use(
 );
 
 app.use("/api/leadership", leadershipRouter);
+app.use("/api/revenue-planning", revenuePlanningRouter);
 
 app.use(
   "/api/revenue-intel",
