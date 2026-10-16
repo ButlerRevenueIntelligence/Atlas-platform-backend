@@ -1,3 +1,4 @@
+import {listQuickBooksEvidence,normalizeQuickBooks,saveCashSnapshot} from "../services/cashEvidence.js";
 import { registerProviderSync, runRegisteredSync } from "../services/providerSyncRegistry.js";
 import crypto from "crypto";
 import express from "express";
@@ -413,11 +414,25 @@ const syncQuickBooks = async (req, res) => {
       syncedAt: now,
     });
 
+    let cashEvidence;
+    const cashEnvironment=new URL(apiBaseUrl()).hostname === "quickbooks.api.intuit.com" ? "live" : "test";
+    try {
+      const requestDetail=options=>qboRequest({realmId,accessToken,...options});
+      const [invoices,payments,refunds,preferences]=await Promise.all([
+        listQuickBooksEvidence(requestDetail,"Invoice"),listQuickBooksEvidence(requestDetail,"Payment"),listQuickBooksEvidence(requestDetail,"RefundReceipt"),
+        requestDetail({path:"preferences"})
+      ]);
+      const homeCurrency=preferences?.Preferences?.CurrencyPrefs?.HomeCurrency?.value;
+      const saved=await saveCashSnapshot({orgId,provider:PROVIDER,accountId:realmId,environment:cashEnvironment,data:normalizeQuickBooks({invoices,payments,refunds,homeCurrency})});
+      cashEvidence={cashEvidenceStatus:"success",cashEvidenceAt:saved.capturedAt,cashEvidenceAccountId:realmId,cashEvidenceEnvironment:cashEnvironment};
+    } catch {
+      cashEvidence={cashEvidenceStatus:"failed",cashEvidenceAttemptAt:new Date(),cashEvidenceAccountId:realmId,cashEvidenceEnvironment:cashEnvironment};
+    }
     connection.externalAccountName = company.CompanyName || connection.externalAccountName;
     connection.lastSyncAt = now;
     connection.lastSyncStatus = "success";
     connection.lastError = null;
-    connection.metadata = { ...(connection.metadata || {}), financialSummary: metrics, latestSnapshotId: snapshot._id };
+    connection.metadata = { ...(connection.metadata || {}), ...cashEvidence, financialSummary: metrics, latestSnapshotId: snapshot._id };
     await connection.save();
 
     await updateOrgSummary(orgId, { connected: true, lastSync: now, mode: "live" });
@@ -425,6 +440,7 @@ const syncQuickBooks = async (req, res) => {
     return res.json({
       ok: true,
       message: "QuickBooks sync completed",
+      cashEvidenceStatus:cashEvidence.cashEvidenceStatus,
       provider: PROVIDER,
       mode: "live",
       summary: { companyName: snapshot.companyName, currency: snapshot.currency, periodStart: snapshot.periodStart, periodEnd: snapshot.periodEnd, ...metrics },
