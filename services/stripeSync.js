@@ -1,3 +1,4 @@
+import {listStripeEvidence,normalizeStripe,saveCashSnapshot} from "./cashEvidence.js";
 // backend/services/stripeSync.js
 import Stripe from "stripe";
 import IntegrationConnection from "../models/IntegrationConnection.js";
@@ -138,12 +139,25 @@ export async function syncStripeForOrg(orgId) {
 
     const importedKeys = [...dailyMap.values()].map(row => ({ date: row.date, currency: row.currency }));
     await StripeRevenueDaily.deleteMany(importedKeys.length ? { orgId, provider: "stripe", $nor: importedKeys } : { orgId, provider: "stripe" });
+    // Supplemental detail failures do not replace a good detail snapshot or fail daily revenue sync.
+    let cashEvidence;
+    try {
+      const [invoices,invoicePayments]=await Promise.all([
+        listStripeEvidence(stripe.invoices,stripeAccount),
+        listStripeEvidence(stripe.invoicePayments,stripeAccount,{status:"paid"})
+      ]);
+      const saved=await saveCashSnapshot({orgId,provider:"stripe",accountId:stripeAccount,environment:"live",data:normalizeStripe({invoices,charges,invoicePayments})});
+      cashEvidence={cashEvidenceStatus:"success",cashEvidenceAt:saved.capturedAt,cashEvidenceAccountId:String(stripeAccount),cashEvidenceEnvironment:"live"};
+    } catch {
+      cashEvidence={cashEvidenceStatus:"failed",cashEvidenceAttemptAt:new Date(),cashEvidenceAccountId:String(stripeAccount),cashEvidenceEnvironment:"live"};
+    }
     connection.status = "connected";
     connection.lastSyncAt = new Date();
     connection.lastSyncStatus = "success";
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
+      ...cashEvidence,
       syncedCharges: charges.length,
       syncedCustomers: customers.length,
       syncedDays: upserts,
@@ -156,6 +170,7 @@ export async function syncStripeForOrg(orgId) {
     return {
       ok: true,
       stripeAccount,
+      cashEvidenceStatus: cashEvidence.cashEvidenceStatus,
       chargesSynced: charges.length,
       customersSynced: customers.length,
       dailyRowsUpserted: upserts,

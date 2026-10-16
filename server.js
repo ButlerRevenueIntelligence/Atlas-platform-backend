@@ -24,6 +24,7 @@ import dealsRouter from "./routes/deals.js";
 import dealIntelRouter from "./routes/dealIntel.js";
 import revenueIntelRouter from "./routes/revenueIntel.js";
 import workspaceSetupRouter from "./routes/workspaceSetup.js";
+import revenueToCashRouter from "./routes/revenueToCash.js";
 import leadershipRouter from "./routes/leadership.js";
 import accountActionPlansRouter from "./routes/accountActionPlans.js";
 import revenuePlanningRouter from "./routes/revenuePlanning.js";
@@ -290,6 +291,7 @@ app.use(
 );
 
 app.use("/api/leadership", leadershipRouter);
+app.use("/api/revenue-to-cash", revenueToCashRouter);
 app.use("/api/workspace-setup", workspaceSetupRouter);
 app.use("/api/account-plans", accountActionPlansRouter);
 app.use("/api/revenue-planning", revenuePlanningRouter);
