@@ -1,3 +1,4 @@
+import { buildDemoExecution, withDemoRecords } from '../services/demoLeadership.js';
 import decisionRoutes from './leadershipDecisions.js';
 import LeadershipDecision from '../models/LeadershipDecision.js';
 import AccountActionPlan from '../models/AccountActionPlan.js';
@@ -80,9 +81,13 @@ router.get('/briefing', wrap(async (req, res) => {
   }).sort({
     updatedAt: -1
   }).limit(101).select('accountKey objective ownerId ownerName reviewAt blockers createdAt').lean() : []]);
-  const actions = rawActions.slice(0, 100),
-    decisions = rawDecisions.slice(0, 100);
-  const execution = captureExecution(rawActions, rawDecisions, rawPlans, canReadAccountPlans(req));
+  const scenario = demo ? buildDemoExecution(deals, now) : null;
+  const allActions = scenario ? withDemoRecords(rawActions, scenario.actions, '_id') : rawActions;
+  const allDecisions = scenario ? withDemoRecords(rawDecisions, scenario.decisions, '_id') : rawDecisions;
+  const allPlans = scenario && canReadAccountPlans(req) ? withDemoRecords(rawPlans, scenario.plans, 'accountKey') : rawPlans;
+  const actions = allActions.slice(0, 100),
+    decisions = allDecisions.slice(0, 100);
+  const execution = captureExecution(allActions, allDecisions, allPlans, canReadAccountPlans(req));
   const requested = req.query.checkpointId;
   if (requested && !mongoose.isValidObjectId(requested)) return res.status(400).json({
     message: 'Invalid checkpoint'
@@ -97,7 +102,27 @@ router.get('/briefing', wrap(async (req, res) => {
   if (requested && !checkpoint) return res.status(404).json({
     message: 'Checkpoint not found'
   });
-  if (!checkpoint && demo) checkpoint = demoComparison(deals, now);
+  if (!checkpoint && demo) {
+    checkpoint = demoComparison(deals, now);
+    checkpoint.sourceMode = 'demo';
+    checkpoint.execution = captureExecution(scenario.actions.map(a => ({
+      ...a,
+      status: 'open',
+      outcome: '',
+      completedAt: null
+    })), scenario.decisions.map(d => ({
+      ...d,
+      reviews: [],
+      reviewCount: 0,
+      latestReviewAt: null
+    })), canReadAccountPlans(req) ? scenario.plans.map(p => ({
+      ...p,
+      blockers: p.blockers.map(b => ({
+        ...b,
+        status: 'open'
+      }))
+    })) : [], canReadAccountPlans(req));
+  }
   const pipelineComparable = Boolean(checkpoint && (!checkpoint.sourceMode || checkpoint.sourceMode === (demo ? 'demo' : 'live')));
   const users = await User.find({
     _id: {
@@ -149,7 +174,7 @@ router.get('/briefing', wrap(async (req, res) => {
       lastSyncAt: i.lastSyncAt,
       lastSyncStatus: i.lastSyncStatus
     })),
-    externalContext: matchExternalContext(snapshots, deals, now),
+    externalContext: scenario ? scenario.externalContext : matchExternalContext(snapshots, deals, now),
     externalEventsAvailable: false
   });
 }));
@@ -185,7 +210,7 @@ router.post('/checkpoints', wrap(async (req, res) => {
     label,
     deals,
     sourceMode: demo ? 'demo' : 'live',
-    execution: captureExecution(actions, decisions, plans, canReadAccountPlans(req))
+    execution: captureExecution(demo ? withDemoRecords(actions, buildDemoExecution(deals).actions, '_id') : actions, demo ? withDemoRecords(decisions, buildDemoExecution(deals).decisions, '_id') : decisions, demo && canReadAccountPlans(req) ? withDemoRecords(plans, buildDemoExecution(deals).plans, 'accountKey') : plans, canReadAccountPlans(req))
   });
   res.status(201).json({
     ok: true,

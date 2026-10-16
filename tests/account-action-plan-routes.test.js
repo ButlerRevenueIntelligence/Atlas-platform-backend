@@ -139,7 +139,8 @@ test('directory reads do not create demo plans and resolve by exact opportunity 
   assert.equal(res.body.resolvedKey, key);
   assert.equal(res.body.accounts.length, 6);
   assert.equal(res.body.workspaceMode, 'demo');
-  assert.equal(res.body.accounts[0].plan, null);
+  assert.equal(res.body.accounts[0].plan.isDemoRecord, true);
+  assert.ok(res.body.accounts.every(a => a.plan?.objective && a.plan?.blockers.length));
 });
 test('unknown opportunity/account references never resolve by a matching name', async t => {
   demo(t);
@@ -383,4 +384,42 @@ test('a former plan owner cannot post a decision after concurrent ownership reas
     text: 'Decision made while ownership changed'
   };
   assert.equal((await invoke('/:accountKey/updates', 'post', req)).code, 409);
+});
+test('demo detail shows one connected plan with stakeholders, decisions and account-specific actions', async t => {
+  demo(t);
+  roster(t);
+  t.mock.method(AccountActionPlan, 'findOne', () => query(null));
+  t.mock.method(RecoveryAction, 'find', () => query([]));
+  t.mock.method(AccountActionPlan, 'create', () => assert.fail('A GET must not persist templates'));
+  const data = (await invoke('/:accountKey', 'get', request('owner'))).body;
+  assert.equal(data.plan.accountKey, data.account.key);
+  assert.ok(data.plan.stakeholders.length >= 3);
+  assert.ok(data.plan.history.some(h => h.kind === 'decision'));
+  assert.ok(data.plan.blockers.some(b => b.status === 'open'));
+  assert.ok(data.actions.length);
+  assert.ok(data.actions.every(a => data.account.dealIds.includes(a.dealId)));
+  assert.equal(data.plan.__v, null);
+  assert.equal(data.canEdit, true);
+  assert.equal(data.canComment, false);
+});
+test('a saved plan replaces the demo template without losing team ownership or version', async t => {
+  demo(t);
+  roster(t);
+  const saved = {
+    accountKey: key,
+    objective: 'Team-owned objective',
+    ownerId: userId,
+    ownerName: 'Real member',
+    __v: 7,
+    history: [],
+    blockers: [],
+    stakeholders: []
+  };
+  t.mock.method(AccountActionPlan, 'findOne', () => query(saved));
+  t.mock.method(RecoveryAction, 'find', () => query([]));
+  const data = (await invoke('/:accountKey', 'get', request('member'))).body;
+  assert.equal(data.plan.objective, 'Team-owned objective');
+  assert.equal(data.plan.__v, 7);
+  assert.equal(data.plan.isDemoRecord, undefined);
+  assert.equal(data.canComment, true);
 });

@@ -249,6 +249,6 @@ export function demoCashSnapshot(deals, now = new Date()) {
     invoices,
     payments,
     refunds: [],
-    warnings: ['Fictional invoice/payment scenario connected to Atlas sample opportunity IDs. These are not imported financial records.']
+    warnings: []
   };
 }

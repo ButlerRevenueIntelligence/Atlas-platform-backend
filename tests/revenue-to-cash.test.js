@@ -619,5 +619,6 @@ test('demo is explicitly fictional and internally reconciles without database wr
   assert.equal(l.totals.unallocatedReceipts, 3500);
   assert.equal(l.totals.overdue, 39000);
   assert.equal(l.totals.linkedInvoices, 3);
-  assert.match(l.warnings[0], /Fictional/);
+  assert.deepEqual(l.warnings,[]);
+  assert.equal(s.environment,'demo');
 });

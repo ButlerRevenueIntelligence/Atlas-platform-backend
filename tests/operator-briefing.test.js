@@ -12,7 +12,7 @@ test("demo risk briefing shares ranking deal names, owners, amounts, and labels"
   assert.equal(result.risks[0].owner, "Maya Thompson");
   assert.ok(result.risks.some(risk => risk.name === "Atlas Manufacturing Modernization" && risk.owner === "Chris Morgan"));
   assert.ok(result.risks.every(risk => risk.deadline.startsWith("Recommended deadline:")));
-  assert.match(result.label, /fictional owners/);
+  assert.equal(result.label,'Revenue priorities');
   assert.doesNotMatch(buildDealPriorityAnswer({ deals: DEMO_DEALS, isDemo: true }), /Owner not recorded/);
   assert.match(result.opportunities[0], /Summit Revenue Operations Program/);
   assert.match(result.caveats.join(' '), /not realized revenue/);

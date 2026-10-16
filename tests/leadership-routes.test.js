@@ -371,3 +371,21 @@ test('new demo/live mode mismatches cannot appear as pipeline gains or losses', 
   assert.deepEqual(result.body.changes, []);
   assert.equal(result.body.previousSummary, null);
 });
+test('demo briefing fills recovery, decisions and local account context without writes or GraphIQ calls', async t => {
+  demo(t);
+  for (const model of [LeadershipCheckpoint, RecoveryAction, Membership, LeadershipDecision]) t.mock.method(model, 'find', () => query([]));
+  t.mock.method(User, 'find', () => query([]));
+  t.mock.method(CompanyIntelligence, 'find', () => assert.fail('Demo context must not claim a live GraphIQ result'));
+  t.mock.method(RecoveryAction, 'create', () => assert.fail('No read seeding'));
+  t.mock.method(LeadershipDecision, 'create', () => assert.fail('No read seeding'));
+  const result = (await invoke('/briefing', 'get', request())).body;
+  assert.ok(result.actions.length >= 6);
+  assert.equal(result.decisions.length, 3);
+  assert.ok(result.externalContext.length >= 3);
+  assert.ok(result.decisions.every(d => d.linkedActions.length && d.missingActionCount === 0));
+  assert.ok(result.actions.some(a => a.status === 'completed'));
+  assert.ok(result.actions.some(a => a.status === 'blocked'));
+  assert.ok(result.externalContext.every(c => c.source === 'Account research'));
+  assert.equal(result.meetingChanges.available, true);
+  assert.ok(result.meetingChanges.counts.completed > 0);
+});

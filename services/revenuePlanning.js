@@ -6,7 +6,7 @@ export const METRIC_LABELS = {
   stripe: 'Recorded revenue · Stripe',
   shopify: 'Recorded revenue · Shopify',
   metrics_daily: 'Recorded revenue · imported metrics',
-  sample_revenue: 'Sample recorded revenue'
+  sample_revenue: 'Recorded revenue'
 };
 const sourceField = {
   stripe: 'stripeRevenue',
@@ -192,4 +192,75 @@ export function buildPlanningDemo(org, now = new Date(), buildDeals) {
     integrations: [],
     warnings: []
   };
+}
+
+// Scenario history is returned only for the strict demo workspace; saved forecasts remain separate.
+export function buildDemoForecastHistory(data, period, metric, now = new Date()) {
+  if (!data.demo || !['bookings', 'sample_revenue'].includes(metric)) return [];
+  const selected = periodBounds(period, now),
+    step = selected.kind === 'quarter' ? 3 : 1;
+  const periods = [period];
+  for (let n = 1; n <= 2; n++) {
+    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - step * n, 1));
+    periods.push(selected.kind === 'quarter' ? currentPeriods(date).quarter : currentPeriods(date).month);
+  }
+  return [...new Set(periods)].map((key, n) => {
+    const bounds = periodBounds(key, now),
+      ended = bounds.end <= now;
+    // Historical booking cohorts are independent archived scenario records, not reused live deal IDs.
+    const historicalDeals = ended && metric === 'bookings' ? [64000, 97000, 83000].map((amount, i) => ({
+      _id: `demo-history-${key}-${i}`,
+      name: ['Northstar Analytics Foundation', 'Elevate Reporting Program', 'Atlas Manufacturing Assessment'][i],
+      accountName: ['Northstar Technology Group', 'Elevate Financial Partners', 'Atlas Manufacturing'][i],
+      amount: amount + (n === 2 ? 12000 : 0),
+      stage: 'Closed Won',
+      probability: 1,
+      source: 'demo',
+      closedAt: new Date(bounds.start.getTime() + (i + 3) * DAY).toISOString(),
+      closeDate: new Date(bounds.start.getTime() + (i + 3) * DAY).toISOString()
+    })) : data.deals;
+    const context = {
+      ...data,
+      deals: historicalDeals
+    };
+    const current = buildPlan(context, key, metric, null, now),
+      asOf = new Date(Math.min(now.getTime() - DAY, bounds.start.getTime() + 2 * DAY));
+    const baselineDeals = metric === 'bookings' ? historicalDeals.map(d => String(d.stage).toLowerCase() === 'closed won' && new Date(d.closedAt || d.closeDate) > asOf ? {
+      ...d,
+      stage: 'Proposal',
+      probability: .7,
+      closedAt: null
+    } : d) : historicalDeals;
+    const baseline = buildPlan({
+      ...context,
+      deals: baselineDeals
+    }, key, metric, null, asOf, true);
+    const forecast = ended ? round(current.actual * (n === 1 ? 1.12 : .94)) : baseline.forecast;
+    const snapshot = {
+      _id: `demo-forecast-${metric}-${key}`,
+      isDemoRecord: true,
+      workspaceMode: 'demo',
+      period: key,
+      metric,
+      label: ended ? `${bounds.label} leadership forecast` : `${bounds.label} operating forecast`,
+      asOf,
+      forecast: forecast ?? 0,
+      modelForecast: baseline.forecast,
+      method: ended ? 'leadership_estimate' : current.method,
+      actualAtSave: baseline.actual,
+      targetAtSave: metric === 'bookings' ? selected.kind === 'quarter' ? 1500000 : 750000 : selected.kind === 'quarter' ? 225000 : 75000,
+      rationale: ended ? 'Expected the planned customer launches to complete within the period. Review the outcome against the original commitment.' : 'Based on current won value and the recorded probabilities of opportunities due in the period.',
+      evidence: {
+        deals: capturePlanningDeals(baselineDeals),
+        actualRows: baseline.daily.filter(d => d.observed),
+        weightedOpen: baseline.weightedOpen,
+        observedBaselineDays: baseline.observedBaselineDays,
+        baselineDays: 30,
+        start: bounds.start,
+        end: bounds.end,
+        source: metric
+      }
+    };
+    return evaluateSnapshot(snapshot, context, now);
+  });
 }
