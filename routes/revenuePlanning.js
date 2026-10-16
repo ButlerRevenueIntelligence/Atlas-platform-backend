@@ -1,3 +1,4 @@
+import { buildDemoForecastHistory } from '../services/revenuePlanning.js';
 import express from 'express';
 import { requireAuth, requirePerm } from '../middleware/auth.js';
 import { requirePlan } from '../middleware/requirePlan.js';
@@ -98,7 +99,7 @@ router.get('/plan', wrap(async (req, res) => {
       key,
       label
     })),
-    snapshots: snapshots.map(s => evaluateSnapshot(s, data, now)),
+    snapshots: [...snapshots.map(s => evaluateSnapshot(s, data, now)), ...buildDemoForecastHistory(data, period, metric, now).filter(example => !snapshots.some(saved => saved.period === example.period))],
     integrations: (data.integrations || []).map(i => ({
       provider: i.provider,
       status: i.status,

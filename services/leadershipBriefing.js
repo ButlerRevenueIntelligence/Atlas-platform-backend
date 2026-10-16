@@ -163,7 +163,7 @@ export function demoComparison(deals, now = new Date()) {
     elevate.lastActivityAt = new Date(new Date(elevate.lastActivityAt).getTime() - 7 * DAY).toISOString();
   }
   return {
-    label: 'Sample prior meeting',
+    label: 'Weekly revenue review',
     isIllustrative: true,
     createdAt: new Date(now.getTime() - 7 * DAY),
     deals: previous

@@ -49,7 +49,7 @@ export function buildRevenueRiskBriefing({ deals = [], orgName, isDemo = false, 
     ...(missingDates ? [`${missingDates} open opportunities lack a close date; the near-term exposure may be incomplete.`] : []),
     ...(!isDemo && (!revenueSource || revenueSource === "none") ? ["No realized-revenue source is available; this briefing assesses pipeline execution only."] : []),
   ];
-  const label = isDemo ? "Demo analysis · Atlas sample deals and fictional owners" : "Workspace analysis · recorded opportunity data";
+  const label = isDemo ? "Revenue priorities" : "Workspace analysis · recorded opportunity data";
   const text = `${label}\n\nExecutive decision:\n${summary}\n\nThis week's priorities:\n${risks.length ? risks.map((r, i) => `${i + 1}. ${r.name} — ${money(r.amount)} (${money(r.weightedValue)} weighted)\nOwner: ${r.owner}\nEvidence: ${r.evidence}\nRisk: ${r.risk}\nAction: ${r.action}\n${r.deadline}`).join("\n\n") : "Confirm owners, next buyer actions, and close dates before issuing a deal-specific risk ranking."}${opportunities.length ? `\n\nBuild the next wave:\n${opportunities.join("\n")}` : ""}\n\nEvidence limits:\n${caveats.join("\n")}`;
   return { type: "revenue-risk", label, summary, risks, opportunities, caveats, text };
 }

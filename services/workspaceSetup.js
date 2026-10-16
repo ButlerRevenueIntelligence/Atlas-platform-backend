@@ -154,7 +154,7 @@ export function buildSetupReadiness({
   const accountingValid = financial && String(financial.currency).toUpperCase() === 'USD' && financialAge !== null && financialAge >= 0;
   const cards = [{
     id: 'pipeline',
-    label: demo ? 'Sample opportunity coverage' : 'Opportunity coverage',
+    label: 'Opportunity coverage',
     state: demo ? 'sample' : !open.length ? 'missing' : Object.values(missing).some(Boolean) || overdue ? 'partial' : 'available',
     detail: !open.length ? 'No open opportunities available in the USD workspace dataset.' : `${open.length} open opportunities · ${missing.closeDate} missing close dates · ${missing.owner} missing owners · ${missing.probability} missing/invalid probabilities · ${missing.amount} missing/invalid values · ${overdue} overdue close dates.`,
     href: '/deal-war-room',
@@ -181,7 +181,7 @@ export function buildSetupReadiness({
     id: 'revenue',
     label: 'Recorded revenue observations',
     state: !readDashboard ? 'restricted' : demo ? 'sample' : observedDays ? 'available' : 'missing',
-    detail: !readDashboard ? 'Overview access is required to inspect recorded-revenue coverage.' : demo ? 'Sample opportunities do not verify live revenue observations.' : observedDays ? `${observedDays} observed days from at least one source in the last 30 UTC days. Recorded zero values count; filled-in chart days do not.` : 'No original recorded-revenue observation days found in the last 30 UTC days.',
+    detail: !readDashboard ? 'Overview access is required to inspect recorded-revenue coverage.' : demo ? 'Revenue history is available in Revenue Planning.' : observedDays ? `${observedDays} observed days from at least one source in the last 30 UTC days. Recorded zero values count; filled-in chart days do not.` : 'No original recorded-revenue observation days found in the last 30 UTC days.',
     href: readDashboard ? '/revenue-planning' : null,
     required: selectedPriorities.includes('cash'),
     ...(readDashboard && !demo ? {
@@ -191,8 +191,8 @@ export function buildSetupReadiness({
     id: 'accounting',
     label: 'Accounting snapshot',
     state: !readDashboard ? 'restricted' : demo ? 'sample' : !accountingValid ? 'missing' : financialAge > 86400000 ? 'partial' : 'available',
-    detail: !readDashboard ? 'Overview access is required to inspect accounting coverage.' : demo ? 'No live accounting readiness is implied by this sample workspace.' : !accountingValid ? 'No usable USD accounting snapshot found.' : `Accounting snapshot read from ${new Date(financial.syncedAt).toISOString()}${financialAge > 86400000 ? '; over 24 hours old' : ''}. Reporting period: ${validDate(financial.periodStart) && validDate(financial.periodEnd) ? new Date(financial.periodStart).toISOString().slice(0, 10) + ' to ' + new Date(financial.periodEnd).toISOString().slice(0, 10) : 'not supplied'}. This is not a revenue-to-cash reconciliation.`,
-    href: readDashboard ? '/data-connectors?setup=1#connector-quickbooks' : null,
+    detail: !readDashboard ? 'Overview access is required to inspect accounting coverage.' : demo ? 'Inspect invoices, receipts and outstanding balances in Revenue to Cash.' : !accountingValid ? 'No usable USD accounting snapshot found.' : `Accounting snapshot read from ${new Date(financial.syncedAt).toISOString()}${financialAge > 86400000 ? '; over 24 hours old' : ''}. Reporting period: ${validDate(financial.periodStart) && validDate(financial.periodEnd) ? new Date(financial.periodStart).toISOString().slice(0, 10) + ' to ' + new Date(financial.periodEnd).toISOString().slice(0, 10) : 'not supplied'}. This is not a revenue-to-cash reconciliation.`,
+    href: readDashboard ? demo ? '/revenue-to-cash' : '/data-connectors?setup=1#connector-quickbooks' : null,
     required: selectedPriorities.includes('cash')
   }];
   const gaps = cards.filter(c => c.required && c.state !== 'available').map(c => ({

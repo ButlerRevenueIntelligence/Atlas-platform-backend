@@ -52,7 +52,7 @@ export function buildAccountCatalog({
           name,
           industry: clean(deal.industry),
           website: '',
-          source: 'Atlas sample data',
+          source: 'Atlas',
           primaryContactName: '',
           primaryContactEmail: '',
           aliases: [],

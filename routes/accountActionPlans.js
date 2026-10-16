@@ -1,3 +1,4 @@
+import { buildDemoExecution, withDemoRecords } from '../services/demoLeadership.js';
 import { accountPlanContext as context } from '../services/accountPlanContext.js';
 import express from 'express';
 import { requireAuth, requirePerm } from '../middleware/auth.js';
@@ -74,7 +75,8 @@ router.get('/', wrap(async (req, res) => {
       message: 'Account not found in this workspace'
     });
   }
-  const plansByKey = new Map(plans.map(plan => [plan.accountKey, plan]));
+  const visiblePlans = ctx.demo ? withDemoRecords(plans, buildDemoExecution(ctx.deals, ctx.now).plans, 'accountKey') : plans;
+  const plansByKey = new Map(visiblePlans.map(plan => [plan.accountKey, plan]));
   res.json({
     ok: true,
     workspaceMode: ctx.demo ? 'demo' : 'live',
@@ -96,7 +98,7 @@ router.get('/:accountKey', wrap(async (req, res) => {
   const account = ctx.catalog.accounts.find(a => a.key === key);
   const dealIds = new Set(account.dealIds);
   const deals = ctx.deals.filter(d => dealIds.has(d.id));
-  const [plan, members, actions] = await Promise.all([AccountActionPlan.findOne({
+  const [storedPlan, members, storedActions] = await Promise.all([AccountActionPlan.findOne({
     orgId: req.orgId,
     accountKey: key
   }).lean(), roster(req.orgId), RecoveryAction.find({
@@ -107,6 +109,9 @@ router.get('/:accountKey', wrap(async (req, res) => {
   }).sort({
     createdAt: -1
   }).limit(100).lean()]);
+  const scenario = ctx.demo ? buildDemoExecution(ctx.deals, ctx.now) : null;
+  const plan = storedPlan || scenario?.plans.find(p => p.accountKey === key) || null;
+  const actions = scenario ? withDemoRecords(storedActions, scenario.actions.filter(a => dealIds.has(a.dealId)), '_id') : storedActions;
   res.json({
     ok: true,
     workspaceMode: ctx.demo ? 'demo' : 'live',
@@ -120,7 +125,7 @@ router.get('/:accountKey', wrap(async (req, res) => {
     warnings: ctx.warnings,
     canEdit: canManagePlan(req.accountPlanMember.role, req.user.userId, plan),
     canReassign: ['owner', 'admin', 'manager'].includes(req.accountPlanMember.role),
-    canComment: req.accountPlanMember.role !== 'viewer',
+    canComment: req.accountPlanMember.role !== 'viewer' && Boolean(storedPlan),
     canAssignActions: ['owner', 'admin', 'manager'].includes(req.accountPlanMember.role),
     actions: actions.map(a => ({
       ...a,

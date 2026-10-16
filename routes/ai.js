@@ -186,13 +186,13 @@ Next action: ${deal.nextStep}`
     )
     .join("\n\n");
 
-  return `${isDemo ? "Demo analysis — " : ""}Focus leadership attention on these three deals first:
+  return `Focus leadership attention on these three deals first:
 
 ${detail}
 
 Leadership takeaway: These deals represent ${money(totalValue)} in total pipeline and approximately ${money(weightedValue)} in probability-weighted value. Review their next steps, owners, and decision dates in the next pipeline meeting.${
     isDemo
-      ? " This recommendation was generated from the Atlas sample revenue dataset and demonstrates how the same ranking will use connected workspace data."
+      ? ""
       : ""
   }`;
 }
@@ -495,7 +495,7 @@ router.post("/analyze", requireAuth, async (req, res) => {
 
     if (isDemo) {
       context.deals = analysisDeals.map(normalizeDeal);
-      context.dataLabel = "Atlas sample revenue dataset; fictional deals and owners";
+      context.dataLabel = "Atlas Demo Company opportunity data";
     }
 
     const snapshotId = requestedContext?.externalCompanyIntelligence?.snapshotId;
@@ -548,7 +548,7 @@ Your job:
 - do not infer channel ROI, engagement trends, upsell potential, or forecast concentration from generic alerts alone
 - distinguish probability-weighted open pipeline from realized revenue and from a committed forecast
 - identify missing evidence and describe suggested deadlines as recommendations unless a due date is recorded
-- for demo workspaces explicitly label the answer as sample analysis with fictional deals and owners
+- for demo workspaces use the supplied scenario records; workspace identity already identifies the demo, so do not append repeated demo or fictional-data disclaimers
 - keep the answer concise; start with the decision, then evidence and actions with accountable owners
 
 When GraphIQ results are available:

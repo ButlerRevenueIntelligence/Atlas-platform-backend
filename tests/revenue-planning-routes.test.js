@@ -295,7 +295,9 @@ test('plan defaults work without a GET body and every history read is tenant sco
   assert.equal(res.code, 200);
   assert.equal(res.body.canManage, false);
   assert.equal(res.body.targetIsSample, true);
-  assert.deepEqual(res.body.snapshots, []);
+  assert.equal(res.body.snapshots.length, 3);
+  assert.ok(res.body.snapshots.every(s => s.isDemoRecord));
+  assert.ok(res.body.snapshots.some(s => s.periodStatus === 'ended' && s.variance !== null));
 });
 test('summary chooses persisted targets for the same calendar period and measure', async t => {
   demo(t);
@@ -333,4 +335,24 @@ test('non-USD requests are rejected rather than silently reinterpreted', async (
   };
   assert.equal((await invoke('/target', 'put', req)).code, 400);
   assert.equal((await invoke('/snapshots', 'post', req)).code, 400);
+});
+test('saved workspace forecast takes precedence over the matching demo period', async t => {
+  demo(t);
+  t.mock.method(RevenueTarget, 'findOne', () => query(null));
+  const saved = {
+    _id: 'saved-by-team',
+    period,
+    metric: 'bookings',
+    forecast: 500000,
+    asOf: new Date(),
+    label: 'My saved forecast',
+    evidence: {
+      deals: []
+    }
+  };
+  t.mock.method(ForecastSnapshot, 'find', () => query([saved]));
+  const result = (await invoke('/plan', 'get', request())).body;
+  assert.equal(result.snapshots[0]._id, 'saved-by-team');
+  assert.equal(result.snapshots.filter(s => s.period === period).length, 1);
+  assert.ok(result.snapshots.some(s => s.isDemoRecord && s.period !== period));
 });
