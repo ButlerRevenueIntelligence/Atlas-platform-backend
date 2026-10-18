@@ -1,3 +1,4 @@
+import { graphIQDiagnostic, logGraphIQEvent } from '../services/graphiqDiagnostics.js';
 import cron from 'node-cron';
 import { randomUUID } from 'node:crypto';
 import GraphIQMonitor from '../models/GraphIQMonitor.js';
@@ -60,6 +61,9 @@ export async function runGraphIQMonitoring({
     }).lean();
     if (!monitor) break;
     summary.claimed++;
+    logGraphIQEvent('monitor_check_started', {
+      orgId: monitor.orgId
+    });
     const owner = {
       _id: monitor._id,
       orgId: monitor.orgId,
@@ -109,6 +113,9 @@ export async function runGraphIQMonitoring({
             reason = 'slack_unavailable_or_disabled';
             break;
           }
+          logGraphIQEvent('monitor_query_started', {
+            orgId: monitor.orgId
+          });
           const result = await retrieve({
             orgId: monitor.orgId,
             kind: search.kind,
@@ -130,12 +137,17 @@ export async function runGraphIQMonitoring({
             delivery
           });
         } catch (e) {
+          logGraphIQEvent('monitor_query_failed', {
+            orgId: monitor.orgId,
+            ...graphIQDiagnostic(e)
+          });
           state = 'error';
           disable = ['authentication_failed', 'access_denied', 'unsupported_schema', 'unsupported_tool', 'unsupported_protocol'].includes(e.code);
           reason = disable ? 'graphiq_access_check_required' : 'graphiq_check_failed';
           // Store a safe classification, never provider response bodies or secrets.
           results.push({
             ...search,
+            diagnostic: graphIQDiagnostic(e),
             error: ['authentication_failed', 'access_denied', 'unsupported_schema', 'unsupported_tool', 'unsupported_protocol'].includes(e.code) ? e.code : 'provider_unavailable'
           });
           break;
@@ -173,6 +185,11 @@ export async function runGraphIQMonitoring({
         claim: null
       }
     });
+    logGraphIQEvent('monitor_check_finished', {
+      orgId: monitor.orgId,
+      state,
+      results: results.length
+    });
     summary.completed++;
   }
   return summary;
@@ -180,13 +197,23 @@ export async function runGraphIQMonitoring({
 export function startGraphIQMonitoring() {
   let running = false,
     stopped = false;
+  logGraphIQEvent('monitor_scheduler_started');
+  let lastHeartbeat = 0;
   const task = cron.schedule('* * * * *', async () => {
     if (running || stopped) return;
     running = true;
     try {
-      await runGraphIQMonitoring();
+      const summary = await runGraphIQMonitoring();
+      if (summary.claimed || Date.now() - lastHeartbeat >= 300000) {
+        logGraphIQEvent('monitor_scheduler_tick', summary.reason ? {
+          code: summary.reason
+        } : summary);
+        lastHeartbeat = Date.now();
+      }
     } catch {
-      console.error('GraphIQ monitoring job failed; it will retry on a later tick.');
+      logGraphIQEvent('monitor_scheduler_failed', {
+        code: 'internal_error'
+      });
     } finally {
       running = false;
     }
