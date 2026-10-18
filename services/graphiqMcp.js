@@ -90,6 +90,39 @@ export class GraphIQMcpClient {
     this.deadline = Date.now() + 30000;
     this.session = null;
     this.version = null;
+    this.endpoint = GRAPHIQ_MCP_URL;
+  }
+  async post(options, stage) {
+    const redirectStatuses = [301, 302, 303, 307, 308];
+    let response = await this.fetch(this.endpoint, options);
+    if (!redirectStatuses.includes(response.status)) return response;
+    const status = response.status,
+      location = response.headers.get('location');
+    await response.body?.cancel().catch(() => {});
+    let target;
+    try {
+      if (!location || location.length > 2048) throw new Error();
+      target = new URL(location, this.endpoint);
+    } catch {}
+    // Only a single method-preserving canonical MCP redirect may receive credentials.
+    if (![307, 308].includes(status) || !target || target.origin !== new URL(GRAPHIQ_MCP_URL).origin || !['/mcp', '/mcp/'].includes(target.pathname) || target.username || target.password || target.search || target.hash || target.href === this.endpoint) {
+      fail('redirect_rejected', 'GraphIQ redirected to an unsupported endpoint. Ask GraphIQ to confirm the canonical MCP endpoint and API-key access.', 502, {
+        stage,
+        httpStatus: status
+      });
+    }
+    this.endpoint = target.href;
+    // Reuse the same body, id and abort signal; no new time budget for redirects.
+    response = await this.fetch(this.endpoint, options);
+    if (redirectStatuses.includes(response.status)) {
+      const status = response.status;
+      await response.body?.cancel().catch(() => {});
+      fail('redirect_rejected', 'GraphIQ returned repeated redirects. Ask GraphIQ to confirm its canonical MCP endpoint.', 502, {
+        stage,
+        httpStatus: status
+      });
+    }
+    return response;
   }
   async send(method, params, notification = false) {
     this.lastMethod = method;
@@ -100,9 +133,9 @@ export class GraphIQMcpClient {
     const id = randomUUID();
     let response;
     try {
-      response = await this.fetch(GRAPHIQ_MCP_URL, {
+      response = await this.post({
         method: 'POST',
-        redirect: 'error',
+        redirect: 'manual',
         signal: AbortSignal.timeout(Math.max(1, Math.min(this.timeout, this.deadline - Date.now()))),
         headers: {
           'Content-Type': 'application/json',
@@ -125,8 +158,9 @@ export class GraphIQMcpClient {
             params
           } : {})
         })
-      });
+      }, method);
     } catch (e) {
+      if (e instanceof GraphIQMcpError) throw e;
       const networkCode = networkFailureCode(e);
       fail('network_error', `Unable to reach GraphIQ MCP (${networkCode}, ${method}). Check backend connectivity and provider access.`, 502, {
         stage: method,
@@ -216,7 +250,7 @@ export class GraphIQMcpClient {
   async close() {
     if (!this.session) return;
     try {
-      const r = await this.fetch(GRAPHIQ_MCP_URL, {
+      const r = await this.fetch(this.endpoint, {
         method: 'DELETE',
         redirect: 'error',
         signal: AbortSignal.timeout(3000),

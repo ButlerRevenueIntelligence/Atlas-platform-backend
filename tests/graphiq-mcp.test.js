@@ -39,7 +39,7 @@ function transport({
     calls,
     fetchImpl: async (url, options) => {
       assert.equal(url, GRAPHIQ_MCP_URL);
-      assert.equal(options.redirect, 'error');
+      assert.equal(options.redirect, options.method === 'DELETE' ? 'error' : 'manual');
       assert.equal(options.headers['X-API-Key'], key);
       calls.push(options);
       if (options.method === 'DELETE') return new Response(null, {
