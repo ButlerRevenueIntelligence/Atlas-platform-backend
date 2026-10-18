@@ -142,13 +142,13 @@ export async function runGraphIQMonitoring({
             ...graphIQDiagnostic(e)
           });
           state = 'error';
-          disable = ['authentication_failed', 'access_denied', 'unsupported_schema', 'unsupported_tool', 'unsupported_protocol'].includes(e.code);
+          disable = ['redirect_rejected', 'authentication_failed', 'access_denied', 'unsupported_schema', 'unsupported_tool', 'unsupported_protocol'].includes(e.code);
           reason = disable ? 'graphiq_access_check_required' : 'graphiq_check_failed';
           // Store a safe classification, never provider response bodies or secrets.
           results.push({
             ...search,
             diagnostic: graphIQDiagnostic(e),
-            error: ['authentication_failed', 'access_denied', 'unsupported_schema', 'unsupported_tool', 'unsupported_protocol'].includes(e.code) ? e.code : 'provider_unavailable'
+            error: ['redirect_rejected', 'authentication_failed', 'access_denied', 'unsupported_schema', 'unsupported_tool', 'unsupported_protocol'].includes(e.code) ? e.code : 'provider_unavailable'
           });
           break;
         }
