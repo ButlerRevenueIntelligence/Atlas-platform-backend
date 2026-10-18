@@ -1,3 +1,5 @@
+import GraphIQResearch from '../models/GraphIQResearch.js';
+import {researchDto} from '../services/graphiqResearch.js';
 import { buildDemoExecution, withDemoRecords } from '../services/demoLeadership.js';
 import decisionRoutes from './leadershipDecisions.js';
 import LeadershipDecision from '../models/LeadershipDecision.js';
@@ -132,6 +134,8 @@ router.get('/briefing', wrap(async (req, res) => {
       $nin: ['disabled', 'suspended']
     }
   }).select('_id name email').lean();
+  const canReadResearch=(req.user.permissions || []).some(p=>['*','market_signals.view','clients.view'].includes(p));
+  const newsContext=!demo && canReadResearch ? researchDto(await GraphIQResearch.findOne({orgId:req.orgId,kind:'news',expiresAt:{$gt:now}}).sort({createdAt:-1}).lean()) : null;
   res.json({
     ok: true,
     asOf: now,
@@ -175,6 +179,7 @@ router.get('/briefing', wrap(async (req, res) => {
       lastSyncStatus: i.lastSyncStatus
     })),
     externalContext: scenario ? scenario.externalContext : matchExternalContext(snapshots, deals, now),
+    newsContext,
     externalEventsAvailable: false
   });
 }));
