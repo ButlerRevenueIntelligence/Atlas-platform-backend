@@ -1,7 +1,9 @@
+import mcpRoutes from './graphiqMcp.js';
 import CompanyIntelligence from "../models/CompanyIntelligence.js";
 import express from "express";
 
 const router = express.Router();
+router.use('/mcp',mcpRoutes);
 
 const GRAPHIQ_BASE_URL = "https://app.graphiq.ai";
 
