@@ -1,0 +1,23 @@
+# Continuous GraphIQ monitoring
+
+## Behavior and controls
+
+Workspace owners, admins and managers can save up to five GraphIQ company/news searches across Market Signals and Account Intelligence. Monitoring starts only when explicitly enabled. Choose hourly, every six hours (default) or daily. These are elapsed schedules in UTC; no browser needs to remain open. Save a search with **Monitor this search**, manage the shared list from either page, pause/resume, remove searches, or change frequency. Changes take effect on the next available job tick. The first check can notify on existing articles not previously delivered; subsequent checks reuse the existing 30-day Slack deduplication across manual and scheduled retrievals.
+
+The UI shows the last check, next eligible check, retrieval state, safe failures and per-query Slack outcomes. Retrieval success does not imply Slack delivery success. Status refreshes every minute while open and has a manual refresh. A query's results are capped at 20; this is not a complete historical news ingestion service. News is not automatically joined to a CRM account and does not establish buying intent.
+
+## Scheduler and access
+
+The backend starts a node-cron job every minute alongside existing integration jobs and stops its schedule on shutdown. It claims up to ten due workspaces sequentially per tick. Each workspace has a MongoDB lease for 30 minutes so replicas cannot normally perform the same scheduled run. Due work is sorted oldest first. Config revisions fence results before Slack delivery if settings changed during retrieval. A notification already dispatched when paused cannot be recalled. MongoDB unique orgId and due-work indexes on `graphiq_monitors`, and the existing Slack delivery unique/TTL indexes, must exist. Model initialization is awaited before scheduled claims; if autoIndex is disabled, provision indexes through the deployment index process.
+
+Only active, billable/trial workspaces with a still-active owner/admin/manager who saved the configuration can run. Ended unpaid trials, suspended workspaces and removed manager membership skip upstream requests. Disconnected Slack or GraphIQ notifications switched off also skip upstream usage. These waits retain the configured schedule and recheck eligibility at the cadence. A remaining manager can save the monitor to assume management.
+
+Missing backend GraphIQ credentials cause the scheduler to skip without calling upstream. MCP authentication/access failures (401/403), unsupported tools, protocols or schemas disable the monitor until a manager fixes access and resumes. Other provider failures back off from the configured interval up to 24 hours. A failed query stops the remaining queries in that run to avoid repeated quota/access errors. Secrets and provider response bodies are not stored in status. Prior successful research stays available until its normal expiration.
+
+Successful results use the same normalized GraphIQ research and shared company-profile persistence as manual MCP searches. Slack sends use the existing connected workspace webhook, validation, bounds and deduplication. Failed/uncertain Slack outcomes are shown separately; ambiguous delivery is not automatically resent. Research and results can become visible after a page refresh. Monitoring config uses compare-and-swap revisions; a stale concurrent save returns 409 instead of overwriting another session.
+
+## Deployment and operational limits
+
+Deploy backend before frontend. No new credentials or GraphIQ-native news subscription are needed. The Render backend must be running continuously: suspended/sleeping instances, restarts, downtime or a backlog delay checks. There is no instant/websocket feed or strict delivery-time SLA. After a restart, the minute tick resumes due work; an abandoned lease recovers after expiry. Each completed run schedules the next from completion, preventing a burst of missed historical runs. Watch queries use the same provider text-query adapter; Atlas does not inject speculative date filters. Five hourly searches can consume up to 120 search operations per workspace per day, plus MCP discovery calls; verify GraphIQ access, quotas and costs.
+
+After deployment verify MongoDB indexes, GraphIQ connection/tool discovery from Render, an hourly monitor and Slack acceptance in the configured channel. Confirm duplicate suppression, pause/resume, role restrictions, workspace switching and status on mobile. Live GraphIQ polling and real channel delivery were not tested in development; automated jobs and sends use mocks. Do not claim production monitoring is active until a saved search completes successfully in the deployed environment.

@@ -134,7 +134,7 @@ test('MCP requires intelligence permissions and explicit active membership', asy
 test('connection status never invokes the provider or exposes its key', async t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('Status is a local check'));
   const res = await invoke('/status', 'get', request());
-  assert.equal(res.body.automaticMonitoring, false);
+  assert.equal(res.body.automaticMonitoring, true);
   assert.equal(JSON.stringify(res.body).includes('X-API-Key'), false);
 });
 test('research history is workspace scoped and requires a fresh matching kind', async t => {
@@ -169,7 +169,7 @@ test('invalid kinds and caller-controlled raw arguments are rejected before prov
     assert.equal((await invoke('/research', 'post', req)).code, 400);
   }
 });
-test('discovery reports actual available search tools without persisting or claiming automatic alerts', async t => {
+test('discovery reports actual available search tools without persisting or enabling automatic alerts', async t => {
   network(t);
   t.mock.method(GraphIQResearch, 'create', () => assert.fail());
   const res = await invoke('/check', 'post', request());
@@ -177,7 +177,7 @@ test('discovery reports actual available search tools without persisting or clai
   assert.equal(res.body.toolCount, 2);
   assert.equal(res.body.searches.length, 2);
   assert.ok(res.body.searches.every(s => s.available));
-  assert.equal(res.body.automaticMonitoring, false);
+  assert.equal(res.body.automaticMonitoring, true);
 });
 test('news search stores normalized records in the authenticated workspace and ignores supplied org/source data', async t => {
   network(t);
