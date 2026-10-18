@@ -267,6 +267,30 @@ export class GraphIQMcpClient {
     this.session = null;
   }
 }
+// Recognize the provider's nullable string field without accepting arbitrary composition.
+function textRule(rule) {
+  if (!rule || rule.$ref || rule.oneOf || rule.allOf) return null;
+  if (rule.type === 'string' && !rule.anyOf) return rule;
+  if (Array.isArray(rule.anyOf)) return rule.anyOf.find(branch => branch?.type === 'string' && !branch.$ref && !branch.anyOf && !branch.oneOf && !branch.allOf) || null;
+  return null;
+}
+function bindText(rule, query) {
+  const branch = textRule(rule);
+  if (!branch || [rule, branch].some(r => r.enum || r.const !== undefined || r.pattern || query.length < (r.minLength || 0) || query.length > (r.maxLength ?? 10000))) fail('unsupported_schema', 'The query is incompatible with the discovered GraphIQ search schema.', 422);
+  return query;
+}
+function boundedOption(properties, args, key, value) {
+  const rule = properties[key];
+  if (!rule) return;
+  if (rule.$ref || rule.anyOf || rule.oneOf || rule.allOf || rule.const !== undefined) fail('unsupported_schema', 'GraphIQ search options need an adapter update.', 422);
+  if (typeof value === 'number') {
+    if (rule.type !== 'integer' || value < (rule.minimum ?? -Infinity) || value > (rule.maximum ?? Infinity) || rule.exclusiveMinimum !== undefined && value <= rule.exclusiveMinimum || rule.exclusiveMaximum !== undefined && value >= rule.exclusiveMaximum || rule.multipleOf !== undefined && value % rule.multipleOf !== 0 || rule.enum && !rule.enum.includes(value)) fail('unsupported_schema', 'GraphIQ search limits are incompatible with this view.', 422);
+  } else {
+    if (rule.type !== 'string' || !Array.isArray(rule.enum) || !rule.enum.includes(value)) return;
+    if (rule.pattern || value.length < (rule.minLength || 0) || value.length > (rule.maxLength ?? 10000)) fail('unsupported_schema', 'GraphIQ search options are incompatible with this view.', 422);
+  }
+  args[key] = value;
+}
 // Bind only schema-declared text search shapes. Unknown required fields fail closed.
 export function searchArguments(tool, query) {
   if (!tool || !['search_news', 'search_organizations'].includes(tool.name) || tool.annotations?.readOnlyHint === false) fail('unsupported_tool', 'The requested read-only GraphIQ search tool is unavailable.', 422);
@@ -275,7 +299,19 @@ export function searchArguments(tool, query) {
   const properties = schema.properties,
     args = {};
   const field = ['query', 'q', 'search', 'search_query'].find(key => properties[key]?.type === 'string');
-  if (field) {
+  if (properties.criteria) {
+    const criteria = properties.criteria;
+    if (criteria.type !== 'object' || !criteria.properties || criteria.$ref || criteria.anyOf || criteria.oneOf || criteria.allOf) fail('unsupported_schema', 'GraphIQ criteria need an adapter update.', 422);
+    const key = tool.name === 'search_news' ? 'text' : 'name';
+    if ((criteria.required || []).some(required => required !== key)) fail('unsupported_schema', 'GraphIQ criteria require additional fields not supported by this view.', 422);
+    args.criteria = {
+      [key]: bindText(criteria.properties[key], query)
+    };
+    boundedOption(properties, args, 'limit', 20);
+    boundedOption(properties, args, 'offset', 0);
+    boundedOption(properties, args, 'sort_by', tool.name === 'search_news' ? 'date' : 'relevance');
+    if (tool.name === 'search_news') boundedOption(properties, args, 'cluster', 'dedupe');
+  } else if (field) {
     const rule = properties[field];
     if (rule.enum || rule.pattern || query.length < (rule.minLength || 0) || query.length > (rule.maxLength || 10000)) fail('unsupported_schema', 'The query is incompatible with the discovered GraphIQ search schema.', 422);
     args[field] = query;
