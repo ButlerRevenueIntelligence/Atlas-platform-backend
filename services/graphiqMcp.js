@@ -1,16 +1,18 @@
+import { networkFailureCode } from './graphiqDiagnostics.js';
 import { randomUUID } from 'node:crypto';
 export const GRAPHIQ_MCP_URL = 'https://app.graphiq.ai/mcp';
 const VERSIONS = ['2025-03-26', '2025-06-18'];
 const LIMIT = 2 * 1024 * 1024;
 export class GraphIQMcpError extends Error {
-  constructor(code, message, status = 502) {
+  constructor(code, message, status = 502, diagnostic = {}) {
     super(message);
     this.code = code;
     this.status = status;
+    this.diagnostic = diagnostic;
   }
 }
-const fail = (code, message, status) => {
-  throw new GraphIQMcpError(code, message, status);
+const fail = (code, message, status, diagnostic) => {
+  throw new GraphIQMcpError(code, message, status, diagnostic);
 };
 function rpcResult(value, id) {
   const messages = Array.isArray(value) ? value : [value];
@@ -90,7 +92,11 @@ export class GraphIQMcpClient {
     this.version = null;
   }
   async send(method, params, notification = false) {
-    if (Date.now() >= this.deadline) fail('network_error', 'GraphIQ MCP request exceeded its time budget.');
+    this.lastMethod = method;
+    if (Date.now() >= this.deadline) fail('network_error', 'GraphIQ MCP request exceeded its time budget.', 502, {
+      stage: method,
+      networkCode: 'TIMEOUT'
+    });
     const id = randomUUID();
     let response;
     try {
@@ -120,15 +126,31 @@ export class GraphIQMcpClient {
           } : {})
         })
       });
-    } catch {
-      fail('network_error', 'Unable to reach GraphIQ MCP. Check backend connectivity and provider access.');
+    } catch (e) {
+      const networkCode = networkFailureCode(e);
+      fail('network_error', `Unable to reach GraphIQ MCP (${networkCode}, ${method}). Check backend connectivity and provider access.`, 502, {
+        stage: method,
+        networkCode
+      });
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      if (response.status === 401) fail('authentication_failed', 'GraphIQ rejected the backend API key. Check its MCP access.', 503);
-      if (response.status === 403) fail('access_denied', 'GraphIQ denied access. Check MCP entitlement and whether GraphIQ blocks this backend network.', 503);
-      if (response.status === 429) fail('rate_limited', 'GraphIQ rate limit reached. Try again later.', 429);
-      fail('provider_unavailable', 'GraphIQ MCP is unavailable or its session expired. Run the connection check again.', 503);
+      if (response.status === 401) fail('authentication_failed', 'GraphIQ rejected the backend API key. Check its MCP access.', 503, {
+        stage: method,
+        httpStatus: 401
+      });
+      if (response.status === 403) fail('access_denied', 'GraphIQ denied access. Check MCP entitlement and whether GraphIQ blocks this backend network.', 503, {
+        stage: method,
+        httpStatus: 403
+      });
+      if (response.status === 429) fail('rate_limited', 'GraphIQ rate limit reached. Try again later.', 429, {
+        stage: method,
+        httpStatus: 429
+      });
+      fail('provider_unavailable', 'GraphIQ MCP is unavailable or its session expired. Run the connection check again.', 503, {
+        stage: method,
+        httpStatus: response.status
+      });
     }
     if (method === 'initialize') {
       const session = response.headers.get('mcp-session-id');
@@ -143,7 +165,10 @@ export class GraphIQMcpClient {
       return await readMcpResponse(response, id);
     } catch (e) {
       if (e instanceof GraphIQMcpError) throw e;
-      fail('network_error', 'GraphIQ MCP response timed out or was interrupted.');
+      fail('network_error', 'GraphIQ MCP response timed out or was interrupted.', 502, {
+        stage: method,
+        networkCode: networkFailureCode(e)
+      });
     }
   }
   async initialize() {
@@ -250,6 +275,12 @@ export async function withGraphIQMcp(fn, options) {
     await client.initialize();
     const tools = await client.tools();
     return await fn(client, tools);
+  } catch (e) {
+    if (e instanceof GraphIQMcpError) e.diagnostic = {
+      stage: client.lastMethod,
+      ...e.diagnostic
+    };
+    throw e;
   } finally {
     await client.close();
   }

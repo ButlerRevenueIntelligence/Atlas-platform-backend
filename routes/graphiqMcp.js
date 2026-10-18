@@ -1,3 +1,4 @@
+import { graphIQDiagnostic, logGraphIQEvent } from '../services/graphiqDiagnostics.js';
 import { retrieveGraphIQResearch } from '../services/retrieveGraphIQResearch.js';
 import monitorRoutes from './graphiqMonitoring.js';
 import IntegrationConnection from '../models/IntegrationConnection.js';
@@ -33,11 +34,19 @@ const wrap = fn => async (req, res, next) => {
   try {
     await fn(req, res);
   } catch (e) {
-    if (e instanceof GraphIQMcpError) return res.status(e.status).json({
-      ok: false,
-      code: e.code,
-      message: e.message
-    });
+    if (e instanceof GraphIQMcpError) {
+      const diagnostic = graphIQDiagnostic(e);
+      logGraphIQEvent('request_failed', {
+        orgId: req.orgId,
+        ...diagnostic
+      });
+      return res.status(e.status).json({
+        ok: false,
+        code: e.code,
+        message: e.message,
+        diagnostic
+      });
+    }
     next(e);
   }
 };
