@@ -10,6 +10,7 @@ import { integrationWorkspace } from "./middleware/integrationWorkspace.js";
 import { requirePlan } from "./middleware/requirePlan.js";
 import { startIntegrationAutoSync } from "./jobs/integrationAutoSync.js";
 import { startSlackExecutiveBriefings } from "./jobs/slackExecutiveBriefing.js";
+import { startGraphIQMonitoring } from "./jobs/graphiqMonitoring.js";
 import { startSlackDealRiskAlerts } from "./services/slackDealRiskAlerts.js";
 
 import authRoutes from "./routes/auth.js";
@@ -446,6 +447,7 @@ let server;
 let syncStarted = false;
 let stopSlackDealRiskAlertJob = null;
 let stopSlackExecutiveBriefingJob = null;
+let stopGraphIQMonitoringJob = null;
 
 async function start() {
   try {
@@ -488,6 +490,7 @@ async function start() {
             startIntegrationAutoSync();
             stopSlackDealRiskAlertJob = startSlackDealRiskAlerts();
             stopSlackExecutiveBriefingJob = startSlackExecutiveBriefings();
+            stopGraphIQMonitoringJob = startGraphIQMonitoring();
 
             console.log(
               "Integration auto-sync and Slack alert jobs started"
@@ -541,6 +544,11 @@ async function shutdown(signal) {
     console.log(
       `${signal} received. Shutting down gracefully.`
     );
+
+    if (stopGraphIQMonitoringJob) {
+      stopGraphIQMonitoringJob();
+      stopGraphIQMonitoringJob = null;
+    }
 
     if (stopSlackDealRiskAlertJob) {
       stopSlackDealRiskAlertJob();

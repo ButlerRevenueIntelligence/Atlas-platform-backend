@@ -1,6 +1,6 @@
 # GraphIQ Slack notifications
 
-New GraphIQ news and company results retrieved from Market Signals or Account Intelligence can notify the workspace's existing Slack incoming webhook. Both MCP searches and legacy company searches participate. Operator searches, cached history reads, demo fixtures and empty/unstructured responses do not send notifications. This change does not schedule GraphIQ polling or backfill previous research.
+New GraphIQ news and company results retrieved from Market Signals or Account Intelligence can notify the workspace's existing Slack incoming webhook. Both MCP searches and legacy company searches participate. Operator searches, cached history reads, demo fixtures and empty/unstructured responses do not send notifications. Opt-in [continuous monitoring](graphiq-monitoring.md) also retrieves saved searches on a schedule. Cached history is not backfilled.
 
 ## Controls and payload
 
@@ -14,7 +14,7 @@ The `graphiq_slack_deliveries` collection requires its unique index on `orgId`, 
 
 News deduplicates by canonical source URL (tracking parameters removed), falling back to title, publisher and publication time. Company profiles deduplicate by name, website and description; a description change can notify again. Claims and payloads cap at 20 normalized results.
 
-Slack must return HTTP success with body `ok` to count as accepted. The UI does not claim channel readership or downstream delivery. Definite HTTP rejections become retryable after a bounded delay, only when a later matching retrieval occurs; there is no background retry worker. Network timeouts, server failures, unexpected success bodies, and failures persisting an attempted delivery are treated as uncertain and are not automatically resent. A process crash during sending also leaves the claim held until expiry. This favors avoiding duplicate notifications and is not an exactly-once guarantee.
+Slack must return HTTP success with body `ok` to count as accepted. The UI does not claim channel readership or downstream delivery. Definite HTTP rejections become retryable after a bounded delay, only when a later matching retrieval occurs; there is no separate Slack retry worker; a later saved-search check can retry a definite rejection. Network timeouts, server failures, unexpected success bodies, and failures persisting an attempted delivery are treated as uncertain and are not automatically resent. A process crash during sending also leaves the claim held until expiry. This favors avoiding duplicate notifications and is not an exactly-once guarantee.
 
 Research remains available if Slack is absent, disabled or fails. The UI shows acceptance, rejection, uncertain delivery or a skipped duplicate. Production GraphIQ access and an actual end-to-end Slack delivery must be checked after deployment; automated delivery tests mock Slack and do not send channel messages.
 

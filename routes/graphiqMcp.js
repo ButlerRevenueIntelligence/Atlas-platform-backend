@@ -1,11 +1,12 @@
+import { retrieveGraphIQResearch } from '../services/retrieveGraphIQResearch.js';
+import monitorRoutes from './graphiqMonitoring.js';
 import IntegrationConnection from '../models/IntegrationConnection.js';
 import { notifyGraphIQResearch, getGraphIQSlackStatus } from '../services/slackGraphIQAlerts.js';
 import express from 'express';
 import Membership from '../models/Membership.js';
 import GraphIQResearch from '../models/GraphIQResearch.js';
-import CompanyIntelligence from '../models/CompanyIntelligence.js';
-import { withGraphIQMcp, searchArguments, searchToolStatus, GraphIQMcpError } from '../services/graphiqMcp.js';
-import { normalizeResearch, researchDto } from '../services/graphiqResearch.js';
+import { withGraphIQMcp, searchToolStatus, GraphIQMcpError } from '../services/graphiqMcp.js';
+import { researchDto } from '../services/graphiqResearch.js';
 const router = express.Router();
 // Parent router supplies authenticated canonical workspace and CORE billing gates.
 router.use(async (req, res, next) => {
@@ -54,6 +55,7 @@ const upstream = fn => wrap(async (req, res) => {
     inFlight.delete(key);
   }
 });
+router.use('/monitoring', monitorRoutes);
 router.get('/notifications', wrap(async (req, res) => res.json({
   ok: true,
   ...(await getGraphIQSlackStatus(req.orgId)),
@@ -87,7 +89,7 @@ router.get('/status', wrap(async (req, res) => res.json({
   ok: true,
   configured: Boolean(process.env.GRAPHIQ_API_KEY),
   endpoint: 'https://app.graphiq.ai/mcp',
-  automaticMonitoring: false
+  automaticMonitoring: true
 })));
 router.post('/check', upstream(async (req, res) => {
   const result = await withGraphIQMcp(async (client, tools) => ({
@@ -107,7 +109,7 @@ router.post('/check', upstream(async (req, res) => {
     ok: true,
     ...result,
     checkedAt: new Date(),
-    automaticMonitoring: false
+    automaticMonitoring: true
   });
 }));
 router.get('/research', wrap(async (req, res) => {
@@ -137,41 +139,20 @@ router.post('/research', upstream(async (req, res) => {
   if (!['news', 'companies'].includes(kind) || typeof query !== 'string' || !query.trim() || query.length > 500) return res.status(400).json({
     message: 'Provide a company or news query of 1–500 characters'
   });
-  const name = kind === 'news' ? 'search_news' : 'search_organizations';
-  const result = await withGraphIQMcp(async (client, tools) => {
-    const tool = tools.find(t => t.name === name);
-    return client.call(name, searchArguments(tool, query.trim()));
-  });
-  const normalized = normalizeResearch(result, kind),
-    expiresAt = new Date(Date.now() + 86400000);
-  const snapshot = await GraphIQResearch.create({
+  const {
+    snapshot,
+    companySnapshotId,
+    records
+  } = await retrieveGraphIQResearch({
     orgId: req.orgId,
     kind,
-    query: query.trim(),
-    tool: name,
-    ...normalized,
-    expiresAt
+    query: query.trim()
   });
-  // Preserve the shared company-context contract for existing Atlas consumers.
-  let companySnapshotId = null;
-  if (kind === 'companies' && normalized.records.length) {
-    const company = await CompanyIntelligence.create({
-      orgId: req.orgId,
-      query: {
-        mcpQuery: query.trim()
-      },
-      data: {
-        organizations: normalized.records
-      },
-      expiresAt
-    });
-    companySnapshotId = String(company._id);
-  }
   const slackNotification = await notifyGraphIQResearch({
     orgId: req.orgId,
     kind,
     query: query.trim(),
-    records: normalized.records,
+    records,
     sourcePage: req.body.sourcePage
   });
   res.json({
