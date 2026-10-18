@@ -268,3 +268,29 @@ test('AI news context reloads only a valid unexpired workspace-owned news snapsh
   assert.equal(await loadNewsContext(orgId, '507f1f77bcf86cd799439099'), null);
   assert.equal(calls, 1);
 });
+
+test('Market Signals MCP results include Slack delivery status without making delivery a search requirement',async t=>{
+ network(t);
+ const {default:IntegrationConnection}=await import('../models/IntegrationConnection.js');
+ t.mock.method(IntegrationConnection,'findOne',filter=>{assert.equal(filter.orgId,orgId);assert.equal(filter.provider,'slack');assert.equal(filter.status,'connected');return {select:async()=>null};});
+ t.mock.method(GraphIQResearch,'create',async value=>({...value,_id:'research',createdAt:new Date()}));
+ const req=request();req.body={kind:'news',query:'Acme',sourcePage:'market-signals'};
+ const res=await invoke('/research','post',req);assert.equal(res.code,200);assert.equal(res.body.research.records[0].title,'Acme launches');assert.equal(res.body.slackNotification.reason,'slack_not_connected');
+});
+test('only active workspace managers may change GraphIQ Slack settings',async t=>{
+ const {default:IntegrationConnection}=await import('../models/IntegrationConnection.js');
+ t.mock.method(IntegrationConnection,'updateOne',async(filter,update)=>{assert.deepEqual(filter,{orgId,provider:'slack'});assert.deepEqual(update,{$set:{'settings.graphiqAlertsEnabled':false}});return {matchedCount:1};});
+ t.mock.method(IntegrationConnection,'findOne',()=>({select(){return this;},lean:async()=>({status:'connected',mode:'live',settings:{graphiqAlertsEnabled:false},metadata:{incomingWebhookChannel:'#leadership'}})}));
+ const req=request();req.graphiqMember={role:'viewer'};req.body={enabled:false};assert.equal((await invoke('/notifications','put',req)).code,403);
+ req.graphiqMember={role:'manager'};req.body={enabled:'false'};assert.equal((await invoke('/notifications','put',req)).code,400);
+ req.body={enabled:false};const res=await invoke('/notifications','put',req);assert.equal(res.body.enabled,false);assert.equal(res.body.channel,'#leadership');assert.equal(res.body.canManage,true);
+});
+test('legacy Account Intelligence company search reports its workspace Slack notification result',async t=>{
+ const {default:legacy}=await import('../routes/graphiq.js'),{default:IntegrationConnection}=await import('../models/IntegrationConnection.js');
+ const previous=process.env.GRAPHIQ_API_KEY;process.env.GRAPHIQ_API_KEY='test-key';t.after(()=>{if(previous===undefined)delete process.env.GRAPHIQ_API_KEY;else process.env.GRAPHIQ_API_KEY=previous;});
+ t.mock.method(globalThis,'fetch',async()=>new Response(JSON.stringify({entities:[{name:'Acme',website:'https://acme.example',description:'Manufacturer'}]}),{headers:{'content-type':'application/json'}}));
+ t.mock.method(CompanyIntelligence,'create',async value=>{assert.equal(value.orgId,orgId);return {_id:'snapshot'};});
+ t.mock.method(IntegrationConnection,'findOne',filter=>{assert.equal(filter.orgId,orgId);return {select:async()=>null};});
+ const req=request();req.body={organization:{capabilities:['machining']},sourcePage:'account-intelligence'};const res=response();await legacy.stack.find(l=>l.route?.path==='/organizations/search').route.stack[0].handle(req,res);
+ assert.equal(res.body.ok,true);assert.equal(res.body.slackNotification.reason,'slack_not_connected');
+});

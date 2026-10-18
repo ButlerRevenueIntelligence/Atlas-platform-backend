@@ -1,3 +1,5 @@
+import {notifyGraphIQResearch} from '../services/slackGraphIQAlerts.js';
+import {normalizeResearch} from '../services/graphiqResearch.js';
 import mcpRoutes from './graphiqMcp.js';
 import CompanyIntelligence from "../models/CompanyIntelligence.js";
 import express from "express";
@@ -70,8 +72,12 @@ router.post("/organizations/search", async (req, res) => {
     }
 
     const snapshot = await CompanyIntelligence.create({ orgId: req.orgId || req.user.orgId, query: organization, data, expiresAt: new Date(Date.now() + 86400000) });
+    const normalized=normalizeResearch({structuredContent:data},'companies');
+    const searchLabel=Array.isArray(organization.capabilities) ? organization.capabilities.filter(v=>typeof v==='string').join(', ').slice(0,500) : typeof organization.name==='string' ? organization.name : 'Company research';
+    const slackNotification=await notifyGraphIQResearch({orgId:req.orgId,kind:'companies',query:searchLabel,records:normalized.records,sourcePage:req.body.sourcePage});
     return res.json({
       ok: true,
+      slackNotification,
       snapshotId: String(snapshot._id),
       data,
     });

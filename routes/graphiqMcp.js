@@ -1,3 +1,5 @@
+import IntegrationConnection from '../models/IntegrationConnection.js';
+import { notifyGraphIQResearch, getGraphIQSlackStatus } from '../services/slackGraphIQAlerts.js';
 import express from 'express';
 import Membership from '../models/Membership.js';
 import GraphIQResearch from '../models/GraphIQResearch.js';
@@ -20,6 +22,7 @@ router.use(async (req, res, next) => {
     if (!member) return res.status(403).json({
       message: 'An active workspace membership is required'
     });
+    req.graphiqMember = member;
     next();
   } catch (e) {
     next(e);
@@ -51,6 +54,35 @@ const upstream = fn => wrap(async (req, res) => {
     inFlight.delete(key);
   }
 });
+router.get('/notifications', wrap(async (req, res) => res.json({
+  ok: true,
+  ...(await getGraphIQSlackStatus(req.orgId)),
+  canManage: ['owner', 'admin', 'manager'].includes(req.graphiqMember.role)
+})));
+router.put('/notifications', wrap(async (req, res) => {
+  if (!['owner', 'admin', 'manager'].includes(req.graphiqMember.role)) return res.status(403).json({
+    message: 'A workspace manager must change notification settings'
+  });
+  if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({
+    message: 'Choose whether GraphIQ notifications are enabled'
+  });
+  const result = await IntegrationConnection.updateOne({
+    orgId: req.orgId,
+    provider: 'slack'
+  }, {
+    $set: {
+      'settings.graphiqAlertsEnabled': req.body.enabled
+    }
+  });
+  if (!result.matchedCount) return res.status(404).json({
+    message: 'Connect Slack before changing its notifications'
+  });
+  res.json({
+    ok: true,
+    ...(await getGraphIQSlackStatus(req.orgId)),
+    canManage: true
+  });
+}));
 router.get('/status', wrap(async (req, res) => res.json({
   ok: true,
   configured: Boolean(process.env.GRAPHIQ_API_KEY),
@@ -135,8 +167,16 @@ router.post('/research', upstream(async (req, res) => {
     });
     companySnapshotId = String(company._id);
   }
+  const slackNotification = await notifyGraphIQResearch({
+    orgId: req.orgId,
+    kind,
+    query: query.trim(),
+    records: normalized.records,
+    sourcePage: req.body.sourcePage
+  });
   res.json({
     ok: true,
+    slackNotification,
     research: researchDto(snapshot),
     companySnapshotId
   });
