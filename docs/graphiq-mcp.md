@@ -10,7 +10,7 @@ The shared Company Research & News panel is added to Market Signals, Account Int
 
 MCP company results update the existing shared company-profile context contract. Existing REST profile searches remain unchanged and do not silently masquerade as MCP calls. The AI Operator can use explicitly selected news/company snapshots; the backend reloads them from the authenticated workspace and checks expiration. Caller-supplied article contents are not trusted. Selected valid news goes through the grounded LLM path rather than the internal-only deterministic briefing engines. Command Center's account-context tab shows the latest permitted live-workspace news search separately from company/account matches. Search results are not automatically associated with CRM accounts.
 
-Automatic monitoring, scheduled alerts, Slack delivery, GraphIQ's future news subscriptions, and all-tool autonomous agents are outside this change.
+Search-triggered Slack delivery is covered in [GraphIQ Slack notifications](graphiq-slack.md). Automatic monitoring, scheduled alerts, GraphIQ's future news subscriptions, and all-tool autonomous agents remain outside this change.
 
 ## Deployment and live verification
 
