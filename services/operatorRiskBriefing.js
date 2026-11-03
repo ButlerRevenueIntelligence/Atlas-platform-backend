@@ -33,6 +33,7 @@ export function buildRevenueRiskBriefing({ deals = [], orgName, isDemo = false, 
         evidence: `${timing}; ${Number.isFinite(deal.daysSinceActivity) ? `${deal.daysSinceActivity} days since recorded activity` : "activity date not recorded"}.`,
         risk: deal.risk, action: deal.nextStep, deadline };
     });
+  const missingProbabilities=open.filter(deal=>deal.probabilityRecorded===false).length;
   const missingOwners = open.filter((deal) => !deal.owner || deal.owner === "Owner not recorded").length;
   const missingDates = open.filter((deal) => !Number.isFinite(deal.daysToClose)).length;
   const summary = nearTerm.length
@@ -45,6 +46,7 @@ export function buildRevenueRiskBriefing({ deals = [], orgName, isDemo = false, 
   const caveats = [
     "Probability-weighted pipeline is potential deal value, not realized revenue or a committed forecast.",
     "Channel ROI and account expansion trends are not established by these deal records; validate attribution and account history before reallocating budget or claiming upsell momentum.",
+    ...(missingProbabilities ? [`${missingProbabilities} open opportunities lack recorded probabilities; weighted totals contain no estimate for those deals.`] : []),
     ...(missingOwners ? [`${missingOwners} open opportunities lack a recorded owner; assign accountability this week.`] : []),
     ...(missingDates ? [`${missingDates} open opportunities lack a close date; the near-term exposure may be incomplete.`] : []),
     ...(!isDemo && (!revenueSource || revenueSource === "none") ? ["No realized-revenue source is available; this briefing assesses pipeline execution only."] : []),

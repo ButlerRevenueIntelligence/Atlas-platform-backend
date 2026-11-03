@@ -5,7 +5,7 @@ import Organization from "../models/Organization.js";
 import Membership from "../models/Membership.js";
 import { getUnifiedWorkspaceData } from "../services/workspaceData.js";
 
-import { buildDemoWorkspaceDeals } from "../services/demoWorkspace.js";
+import { buildDemoWorkspaceDeals, buildDemoWorkspaceMetrics } from "../services/demoWorkspace.js";
 
 const router = express.Router();
 
@@ -117,29 +117,7 @@ function detectWorkspaceMode(org) {
   return "live";
 }
 
-function buildDemoMetrics() {
-  const today = new Date();
-  const metrics = [];
-
-  for (let i = 29; i >= 0; i -= 1) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-
-    const revenue = 1200 + ((29 - i) % 7) * 180 + i * 9;
-    const spend = 260 + ((29 - i) % 5) * 28 + i * 2;
-    const leads = 10 + ((29 - i) % 6) + Math.floor(i / 8);
-
-    metrics.push({
-      date: d.toISOString().slice(0, 10),
-      dateISO: d.toISOString(),
-      revenue,
-      spend,
-      leads,
-    });
-  }
-
-  return metrics;
-}
+function buildDemoMetrics() { return buildDemoWorkspaceMetrics(); }
 
 function buildDemoDeals(org) {
   return buildDemoWorkspaceDeals(org);
