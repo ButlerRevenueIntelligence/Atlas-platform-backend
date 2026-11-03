@@ -40,8 +40,11 @@ test('LinkedIn reports the failing stage and parameter without exposing raw prov
   });
 });
 test('LinkedIn discovery through the registered sync rejects form-encoded structures and imports performance', async t => {
-  const connection = {accessToken: 'test', externalAccountId: '123', status: 'connected', metadata: {}, async save() {}};
-  t.mock.method(IntegrationConnection, 'findOne', () => ({select: async () => connection}));
+  const connection = {accessToken: 'test', externalAccountId: '123', status: 'error', metadata: {}, async save() {}};
+  t.mock.method(IntegrationConnection, 'findOne', filter => {
+    assert.deepEqual(filter.status, {$in: ['connected', 'error']});
+    return {select: async () => connection};
+  });
   t.mock.method(Organization, 'findByIdAndUpdate', async () => ({}));
   const writes = [];
   t.mock.method(SourceMetricDaily, 'bulkWrite', async rows => writes.push(...rows));

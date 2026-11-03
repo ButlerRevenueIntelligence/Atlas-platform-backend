@@ -58,16 +58,29 @@ export async function saveDailyMetrics(orgId, provider, accountId, records) {
 }
 
 export async function googleToken(connection) {
+  const expires = connection.tokenExpiresAt ? new Date(connection.tokenExpiresAt).getTime() : null;
+  if (connection.accessToken && expires !== null && expires > Date.now() + 60000) return connection.accessToken;
   if (!connection.refreshToken) {
-    if (connection.tokenExpiresAt && new Date(connection.tokenExpiresAt) <= new Date()) throw new Error("Google authorization expired; reconnect");
+    if (!connection.accessToken || expires !== null && expires <= Date.now()) {
+      throw Object.assign(new Error("Google authorization expired; reconnect Google."), {status: 401, reconnectRequired: true});
+    }
     return connection.accessToken;
   }
-  const tokens = await request("https://oauth2.googleapis.com/token", {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: connection.refreshToken,
-      client_id: process.env.GOOGLE_CLIENT_ID || "", client_secret: process.env.GOOGLE_CLIENT_SECRET || "" }),
-  });
-  if (typeof tokens?.access_token !== "string" || !tokens.access_token) throw new Error("Google token renewal returned no access token. Reconnect Google.");
+  let tokens;
+  try {
+    tokens = await request("https://oauth2.googleapis.com/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: connection.refreshToken,
+        client_id: process.env.GOOGLE_CLIENT_ID || "", client_secret: process.env.GOOGLE_CLIENT_SECRET || "" }),
+    });
+  } catch (error) {
+    if (error.providerError === "invalid_grant") {
+      error.status = 401;
+      error.reconnectRequired = true;
+    }
+    throw error;
+  }
+  if (typeof tokens?.access_token !== "string" || !tokens.access_token) throw new Error("Google token renewal returned no access token. Retry or reconnect Google.");
   connection.accessToken = tokens.access_token;
   connection.tokenExpiresAt = new Date(Date.now() + Number(tokens.expires_in || 3600) * 1000);
   if (tokens.refresh_token) connection.refreshToken = tokens.refresh_token;

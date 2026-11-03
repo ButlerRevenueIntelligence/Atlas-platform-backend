@@ -2298,9 +2298,6 @@ function buildLinkedInAdsAuthUrl(orgId) {
   }
 
   const scope = [
-  "openid",
-  "profile",
-  "email",
   "r_ads",
   "r_ads_reporting",
 ].join(" ");
@@ -5228,7 +5225,7 @@ const refreshTokenExpiresIn =
       throw new Error("LinkedIn did not return an access token");
     }
 
-    const profile = await getLinkedInProfile(accessToken);
+    const profile = await getLinkedInProfile(accessToken).catch(() => null);
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -5240,7 +5237,7 @@ const refreshTokenExpiresIn =
     }
 
     const sameLinkedInUser = profile?.sub && profile.sub === connection.metadata?.sub;
-    const savedAdAccountId = sameLinkedInUser ? connection.metadata?.selectedAdAccountId || connection.metadata?.adAccounts?.find(account => String(account.id) === String(connection.externalAccountId))?.id || null : null;
+    const savedAdAccountId = (!profile?.sub || sameLinkedInUser) ? connection.metadata?.selectedAdAccountId || connection.metadata?.adAccounts?.find(account => String(account.id) === String(connection.externalAccountId))?.id || null : null;
     const savedAdAccountName = savedAdAccountId ? connection.externalAccountName : "LinkedIn Ads";
     connection.status = "connected";
     connection.mode = "live";
@@ -5255,7 +5252,7 @@ const refreshTokenExpiresIn =
     connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
     connection.externalAccountId = savedAdAccountId;
     connection.externalAccountName = savedAdAccountName;
-    connection.scopes = ["openid", "profile", "email", "r_ads", "r_ads_reporting"];
+    connection.scopes = String(tokenData?.scope || "r_ads r_ads_reporting").split(/[ ,]+/).filter(Boolean);
     connection.lastSyncAt = null;
     connection.lastSyncStatus = "never";
     connection.lastError = null;
@@ -7960,7 +7957,7 @@ syncPost("/linkedin_ads/sync", requireAuth, async (req, res) => {
     connection = await IntegrationConnection.findOne({
       orgId,
       provider: "linkedin_ads",
-      status: "connected",
+      status: { $in: ["connected", "error"] },
     }).select("+accessToken +refreshToken");
 
     if (!connection || !connection.accessToken) {

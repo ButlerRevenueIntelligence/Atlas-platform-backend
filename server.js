@@ -48,7 +48,6 @@ import trialRoutes from "./routes/trial.js";
 import hubspotSyncRoutes from "./routes/hubspotSync.js";
 import importsRoutes from "./routes/imports.js";
 import ghlRoutes from "./routes/ghl.js";
-import linkedinAdsRoutes from "./routes/linkedinAds.js";
 import graphiqRoutes from "./routes/graphiq.js";
 import quickBooksRoutes from "./routes/quickbooks.js";
 
@@ -190,10 +189,8 @@ app.use("/api/me", meRoutes);
 app.use("/api/hubspot", hubspotSyncRoutes);
 app.use("/api/imports", importsRoutes);
 
-app.use(
-  "/api/integrations/linkedin_ads",
-  linkedinAdsRoutes
-);
+// LinkedIn OAuth is handled by integrationsRoute below with signed state,
+// workspace authorization and persisted token expiration/refresh credentials.
 
 /**
  * OAuth callbacks need to be accessible without normal

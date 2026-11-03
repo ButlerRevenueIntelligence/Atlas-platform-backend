@@ -70,7 +70,8 @@ export async function ensureLinkedInAccessToken(connection) {
   });
   const data = await response.json().catch(() => null);
   if (!response.ok || typeof data?.access_token !== 'string' || !data.access_token || !(Number(data.expires_in) > 0)) throw Object.assign(new Error('LinkedIn token renewal failed. Reconnect LinkedIn Ads.'), {
-    status: response.ok ? 502 : response.status
+    status: data?.error === 'invalid_grant' ? 401 : response.ok ? 502 : response.status,
+    reconnectRequired: data?.error === 'invalid_grant'
   });
   connection.accessToken = data.access_token;
   if (data.refresh_token) connection.refreshToken = data.refresh_token;
