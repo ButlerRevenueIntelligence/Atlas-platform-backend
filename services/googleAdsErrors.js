@@ -6,6 +6,7 @@ export function googleAdsFailure(error) {
   const reasons = details.map(detail => detail.reason).filter(Boolean);
   const allCodes = [...codes, ...reasons];
   const hints = {
+    CLOUD_PROJECT_NOT_APPROVED_FOR_PRODUCTION: 'The Google Cloud project has test access only. Apply for Explorer or higher access on the Google Ads API Overview page in Google Cloud Console.',
     USER_PERMISSION_DENIED: 'The connected Google user cannot access this ad account through the selected manager. Check Google Ads Access and security, then reconnect with the correct Google user or select an accessible client account.',
     DEVELOPER_TOKEN_NOT_APPROVED: 'The Google Ads developer token is not approved for this account. Check its access level in Google Ads API Center.',
     DEVELOPER_TOKEN_PROHIBITED: 'Google rejected the developer token for this Cloud project. Check the developer token and Google Cloud project configuration.',
@@ -30,6 +31,8 @@ export function googleAdsFailure(error) {
 export function googleAdsLoginCustomerId(connection, configuredManager) {
   const normalize = value => String(value || '').replace(/^customers\//, '').replace(/-/g, '');
   const target = normalize(connection.externalAccountId);
+  const selected = connection.metadata?.advertiserAccounts?.find(account => account.id === target);
+  if (selected) return selected.loginCustomerId ? normalize(selected.loginCustomerId) : null;
   const directAccounts = connection.metadata?.accessibleCustomers || [];
   // OAuth discovery lists directly accessible accounts, not manager descendants.
   if (directAccounts.some(value => normalize(value) === target)) return null;

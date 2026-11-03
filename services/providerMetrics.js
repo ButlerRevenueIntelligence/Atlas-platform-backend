@@ -55,7 +55,7 @@ export async function saveDailyMetrics(orgId, provider, accountId, records) {
   return rows.size;
 }
 
-async function googleToken(connection) {
+export async function googleToken(connection) {
   if (!connection.refreshToken) {
     if (connection.tokenExpiresAt && new Date(connection.tokenExpiresAt) <= new Date()) throw new Error("Google authorization expired; reconnect");
     return connection.accessToken;
@@ -188,6 +188,9 @@ export async function syncAdditionalProvider(provider, orgId, override = {}) {
   } catch (error) {
     if (provider === "google_ads") {
       googleAdsFailure(error);
+      if (error.googleCode === "REQUESTED_METRICS_FOR_MANAGER") {
+        connection.metadata = {...(connection.metadata || {}), needsSelection: true};
+      }
       console.error("Google Ads sync failed:", {
         event: "google_ads_sync_failed", orgId: String(orgId),
         accountId: connection.externalAccountId, status: error.status || null,

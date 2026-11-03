@@ -101,6 +101,8 @@ async function fixture(t, options = {}) {
     }), {
       status: options.adsError ? 403 : 200
     });
+    const match = url.match(/customers\/(\d+)\/googleAds:searchStream$/);
+    if (match) return new Response(JSON.stringify([{results:[{customer:{id:match[1],descriptiveName:`Advertiser ${match[1]}`,manager:false,status:'ENABLED'}}]}]),{status:200});
     throw new Error(`Unexpected mocked URL: ${url}`);
   });
   const authRes = response();
