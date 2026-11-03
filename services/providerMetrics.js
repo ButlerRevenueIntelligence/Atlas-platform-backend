@@ -1,3 +1,4 @@
+import { linkedInRequest } from "./linkedinApi.js";
 import { ensureLinkedInAccessToken } from "./integrationImportMaintenance.js";
 import { googleAdsFailure, googleAdsLoginCustomerId } from "./googleAdsErrors.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
@@ -122,9 +123,10 @@ async function linkedin(connection, orgId, override) {
   const query = `q=analytics&pivot=ACCOUNT&timeGranularity=DAILY&dateRange=(start:${restDate(start)},end:${restDate(end)})&accounts=List(urn%3Ali%3AsponsoredAccount%3A${encodeURIComponent(accountId)})&fields=dateRange,costInLocalCurrency,impressions,clicks,externalWebsiteConversions,oneClickLeads`;
   const headers = { Authorization: `Bearer ${accessToken}`, "LinkedIn-Version": "202608", "X-Restli-Protocol-Version": "2.0.0" };
   const [data, account] = await Promise.all([
-    request(`https://api.linkedin.com/rest/adAnalytics?${query}`, { headers }),
-    request(`https://api.linkedin.com/rest/adAccounts/${encodeURIComponent(accountId)}`, { headers }),
+    linkedInRequest(`https://api.linkedin.com/rest/adAnalytics?${query}`, headers),
+    linkedInRequest(`https://api.linkedin.com/rest/adAccounts/${encodeURIComponent(accountId)}`, headers),
   ]);
+  if (!Array.isArray(data.elements)) throw new Error("LinkedIn performance report returned an invalid metrics list; no metrics were imported");
   if (!account.currency) throw new Error("LinkedIn account currency is unavailable");
   const rows = (data.elements || []).map(row => ({
     date: `${row.dateRange.start.year}-${String(row.dateRange.start.month).padStart(2, "0")}-${String(row.dateRange.start.day).padStart(2, "0")}`,

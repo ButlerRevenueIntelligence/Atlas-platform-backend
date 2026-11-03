@@ -1,4 +1,5 @@
 import express from "express";
+import { linkedInRequest } from "../services/linkedinApi.js";
 import { fetchZohoPages, fetchLinkedInPages, selectSavedLinkedInAccount, ensureLinkedInAccessToken } from "../services/integrationImportMaintenance.js";
 import { ensureSlackAccessToken } from "../services/slackAuth.js";
 import { registerProviderSync, runRegisteredSync } from "../services/providerSyncRegistry.js";
@@ -7972,36 +7973,11 @@ syncPost("/linkedin_ads/sync", requireAuth, async (req, res) => {
     const accessToken = await ensureLinkedInAccessToken(connection);
 
     async function linkedInGet(url) {
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "LinkedIn-Version": "202608",
-          "X-Restli-Protocol-Version": "2.0.0",
-        },
+      return linkedInRequest(url, {
+        Authorization: `Bearer ${accessToken}`,
+        "LinkedIn-Version": "202608",
+        "X-Restli-Protocol-Version": "2.0.0",
       });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-  console.error(
-    "LinkedIn API error details:",
-    JSON.stringify(data, null, 2)
-  );
-
-  const error = new Error(
-    data?.message ||
-      data?.serviceErrorCode ||
-      "LinkedIn API request failed"
-  );
-
-  error.status = response.status;
-  error.linkedinData = data;
-
-  throw error;
-}
-
-      return data;
     }
 
     let adAccounts = [];
@@ -8098,7 +8074,12 @@ syncPost("/linkedin_ads/sync", requireAuth, async (req, res) => {
       },
     });
   } catch (err) {
-  console.error("LinkedIn Ads sync error:", err);
+  console.error("LinkedIn Ads sync error:", {status: err?.status, stage: err?.linkedinStage, message: err?.message});
+  if (connection) {
+    connection.lastSyncStatus = "failed";
+    connection.lastError = err.message;
+    await connection.save();
+  }
 
   if (err?.status === 401 && connection) {
     connection.lastSyncStatus = "failed";

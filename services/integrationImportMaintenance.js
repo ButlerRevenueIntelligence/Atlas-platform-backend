@@ -1,3 +1,4 @@
+import { linkedInPageUrl } from "./linkedinApi.js";
 export async function fetchZohoPages(fetchPage, fields) {
   const records = [],
     seen = new Set();
@@ -25,19 +26,18 @@ export async function fetchZohoPages(fetchPage, fields) {
   }
 }
 export async function fetchLinkedInPages(fetchPage, initialUrl) {
-  const root = new URL(initialUrl),
-    rows = [],
+  const rows = [],
     seen = new Set();
-  root.searchParams.set('pageSize', '100');
+  let pageToken = null;
   for (;;) {
-    const data = await fetchPage(root.href);
+    const data = await fetchPage(linkedInPageUrl(initialUrl, pageToken));
     if (!Array.isArray(data?.elements)) throw new Error('LinkedIn returned an invalid search page; import stopped.');
     rows.push(...data.elements);
     const next = data.metadata?.nextPageToken;
     if (!next) return rows;
     if (typeof next !== 'string' || seen.has(next)) throw new Error('LinkedIn pagination did not advance; import stopped.');
     seen.add(next);
-    root.searchParams.set('pageToken', next);
+    pageToken = next;
   }
 }
 export function selectSavedLinkedInAccount(accounts, savedId) {
