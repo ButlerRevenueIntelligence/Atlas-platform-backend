@@ -47,8 +47,11 @@ export async function markSyncSuccess(connection) {
   );
 }
 
-async function markSyncFailed(connection, error) {
-  connection.status = "error";
+export async function markSyncFailed(connection, error) {
+  const adsProvider = ["google_ads", "linkedin_ads"].includes(connection.provider);
+  const authorizationFailed = error?.status === 401 || error?.reconnectRequired === true;
+  // A reporting, permission, quota or network failure does not revoke OAuth.
+  connection.status = adsProvider && !authorizationFailed ? "connected" : "error";
   connection.lastSyncStatus = "failed";
   connection.lastError = String(error?.message || "Unknown sync error");
   await connection.save();
