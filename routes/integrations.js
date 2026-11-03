@@ -1,7 +1,8 @@
 import express from "express";
 import { registerProviderSync, runRegisteredSync } from "../services/providerSyncRegistry.js";
 import { clientForAccount } from "../services/accountLinks.js";
-import { syncAdditionalProvider, saveDailyMetrics } from "../services/providerMetrics.js";
+import { syncAdditionalProvider, saveDailyMetrics, googleToken } from "../services/providerMetrics.js";
+import { discoverGoogleAdsAdvertisers, applyGoogleAdsAdvertisers } from "../services/googleAdsAccounts.js";
 import Stripe from "stripe";
 import crypto from "crypto";
 import Organization from "../models/Organization.js";
@@ -2480,6 +2481,9 @@ async function formatIntegrations(orgId) {
         accessibleCustomers: Array.isArray(live?.metadata?.accessibleCustomers)
           ? live.metadata.accessibleCustomers
           : [],
+        advertiserAccounts: live?.metadata?.advertiserAccounts || [],
+        accountDiscoveryWarnings: live?.metadata?.accountDiscoveryWarnings || [],
+        accountsDiscoveredAt: live?.metadata?.accountsDiscoveredAt || null,
         properties: Array.isArray(live?.metadata?.properties)
           ? live.metadata.properties
           : [],
@@ -3570,6 +3574,9 @@ router.get("/google_ads/status", requireAuth, async (req, res) => {
         : [],
       needsSelection: !!connection?.metadata?.needsSelection,
       selectedCustomer: connection?.metadata?.selectedCustomer || null,
+      advertiserAccounts: connection?.metadata?.advertiserAccounts || [],
+      accountDiscoveryWarnings: connection?.metadata?.accountDiscoveryWarnings || [],
+      accountsDiscoveredAt: connection?.metadata?.accountsDiscoveredAt || null,
     });
   } catch (err) {
     console.error("GOOGLE ADS status error:", err);
@@ -3864,7 +3871,27 @@ router.post("/bitrix24/connect-webhook", requireAuth, async (req, res) => {
 /* SELECT ACCOUNT / PROPERTY        */
 /* -------------------------------- */
 
-router.post("/google_ads/select-account", requireAuth, async (req, res) => {
+router.post("/google_ads/refresh-accounts", integrationWorkspace, async (req, res) => {
+  try {
+    const orgId = getOrgId(req);
+    const connection = await IntegrationConnection.findOne({orgId, provider: "google_ads", status: {$in: ["connected", "error"]}}).select("+accessToken +refreshToken");
+    if (!connection) return res.status(404).json({ok: false, message: "Connect Google Ads before refreshing accounts."});
+    const accessToken = await googleToken(connection);
+    const roots = await getGoogleAdsAccessibleCustomers(accessToken);
+    const discovery = await discoverGoogleAdsAdvertisers(accessToken, roots);
+    applyGoogleAdsAdvertisers(connection, discovery, roots);
+    await connection.save();
+    return res.json({ok: true, accounts: discovery.accounts, warnings: discovery.warnings,
+      message: discovery.accounts.length ? "Google Ads advertiser accounts refreshed. Select the account that owns the campaigns." : "No enabled advertiser accounts were found. Link an advertiser account to your Google Ads manager, or reconnect with a Google user who can access one.",
+      integrations: await formatIntegrations(orgId),
+    });
+  } catch (error) {
+    console.error("Google Ads account refresh failed:", {event: "google_ads_accounts_failed", status: error.status || null, googleCode: error.googleCode || null, requestId: error.requestId || null});
+    return res.status(error.status || 500).json({ok: false, message: error.message});
+  }
+});
+
+router.post("/google_ads/select-account", integrationWorkspace, async (req, res) => {
   try {
     const orgId = getOrgId(req);
     const { customerId } = req.body || {};
@@ -3881,26 +3908,15 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
       return res.status(404).json({ ok: false, message: "Google Ads connection not found" });
     }
 
-    const accessibleCustomers = Array.isArray(connection?.metadata?.accessibleCustomers)
-      ? connection.metadata.accessibleCustomers
-      : [];
-
-    const normalizedTarget = String(customerId).replace(/\D/g, "");
-
-    const matched = accessibleCustomers.find((item) => {
-      const normalizedItem = String(item).replace("customers/", "").replace(/\D/g, "");
-      return normalizedItem === normalizedTarget;
+    const normalizedTarget = String(customerId).replace(/-/g, "").trim();
+    const matched = (connection.metadata?.advertiserAccounts || []).find(account =>
+      account.id === normalizedTarget && account.manager === false && account.status === "ENABLED"
+    );
+    if (!matched) return res.status(400).json({
+      ok: false, message: "Refresh Google Ads accounts and select an enabled advertiser/client account. Manager accounts cannot be synced.",
     });
-
-    if (!matched) {
-      return res.status(400).json({
-        ok: false,
-        message: "Selected account is not in accessible customers list",
-      });
-    }
-
-    const externalAccountId = String(matched).replace("customers/", "");
-    const externalAccountName = `Google Ads ${externalAccountId}`;
+    const externalAccountId = matched.id;
+    const externalAccountName = matched.name;
 
     connection.externalAccountId = externalAccountId;
     connection.externalAccountName = externalAccountName;
@@ -3911,7 +3927,8 @@ router.post("/google_ads/select-account", requireAuth, async (req, res) => {
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
-      selectedCustomer: matched,
+      selectedCustomer: matched.resourceName,
+      loginCustomerId: matched.loginCustomerId || null,
       needsSelection: false,
     };
 
@@ -4528,10 +4545,7 @@ router.get("/google_ads/callback", async (req, res) => {
       throw error;
     }
 
-    const needsSelection = customers.length > 1;
-    const selectedCustomer = customers.length === 1 ? customers[0] : null;
-    const externalAccountId = selectedCustomer ? selectedCustomer.replace("customers/", "") : null;
-    const externalAccountName = externalAccountId ? `Google Ads ${externalAccountId}` : null;
+    const discovery = await discoverGoogleAdsAdvertisers(accessToken, customers);
 
     let connection = await IntegrationConnection.findOne({
       orgId,
@@ -4558,8 +4572,6 @@ router.get("/google_ads/callback", async (req, res) => {
     connection.refreshToken = usableRefreshToken;
     connection.tokenType = tokenData?.token_type || null;
     connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
-    connection.externalAccountId = externalAccountId;
-    connection.externalAccountName = externalAccountName;
     connection.scopes = scopes;
     connection.lastSyncAt = null;
     connection.lastSyncStatus = "never";
@@ -4569,10 +4581,10 @@ router.get("/google_ads/callback", async (req, res) => {
       googleUserEmail: profile?.email || null,
       googleUserName: profile?.name || null,
       accessibleCustomers: customers,
-      selectedCustomer,
-      needsSelection,
     };
 
+    applyGoogleAdsAdvertisers(connection, discovery, customers);
+    const needsSelection = connection.metadata.needsSelection;
     await connection.save();
 
     await updateOrgIntegrationSummary(orgId, "google_ads", {
