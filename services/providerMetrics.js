@@ -1,3 +1,4 @@
+import { googleAdsFailure, googleAdsLoginCustomerId } from "./googleAdsErrors.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import SourceMetricDaily from "../models/SourceMetricDaily.js";
 import Account from "../models/Account.js";
@@ -12,12 +13,19 @@ export function reportingDates(now = new Date()) {
 
 async function request(url, options = {}) {
   const response = await fetch(url, { ...options, signal: AbortSignal.timeout(60000) });
-  const data = await response.json();
-  if (!response.ok || data?.error) {
-    const error = new Error(data?.error?.message || data?.error_description || data?.message || `${response.status}: provider request failed`);
-    error.status = response.status;
+  const data = await response.json().catch(() => null);
+  const envelope = Array.isArray(data) ? data.find(page => page?.error) : data;
+  if (!response.ok || envelope?.error) {
+    const error = new Error(envelope?.error?.message || envelope?.error_description || envelope?.message || `${response.status}: provider request failed`);
+    const providerStatus = Number(envelope?.error?.code);
+    error.status = response.ok ? (providerStatus >= 400 && providerStatus <= 599 ? providerStatus : 502) : response.status;
+    error.providerDetails = envelope?.error?.details || [];
+    error.providerStatus = envelope?.error?.status || null;
+    error.providerError = envelope?.error || null;
+    error.requestId = response.headers?.get?.("request-id") || null;
     throw error;
   }
+  if (data === null) throw new Error("Provider returned an invalid JSON response; no metrics were imported");
   return data;
 }
 
@@ -71,7 +79,7 @@ async function googleAds(connection, orgId) {
   const token = await googleToken(connection);
   const { start, end } = reportingDates();
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "developer-token": process.env.GOOGLE_ADS_DEVELOPER_TOKEN };
-  const manager = String(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "").replace(/\D/g, "");
+  const manager = googleAdsLoginCustomerId(connection, process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
   if (manager) headers["login-customer-id"] = manager;
   const data = await request(`https://googleads.googleapis.com/${process.env.GOOGLE_ADS_API_VERSION || "v25"}/customers/${accountId}/googleAds:searchStream`, {
     method: "POST", headers, body: JSON.stringify({ query: `SELECT segments.date, customer.currency_code, metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions FROM customer WHERE segments.date BETWEEN '${start}' AND '${end}'` }),
@@ -178,6 +186,14 @@ export async function syncAdditionalProvider(provider, orgId, override = {}) {
     await connection.save();
     return result;
   } catch (error) {
+    if (provider === "google_ads") {
+      googleAdsFailure(error);
+      console.error("Google Ads sync failed:", {
+        event: "google_ads_sync_failed", orgId: String(orgId),
+        accountId: connection.externalAccountId, status: error.status || null,
+        googleCode: error.googleCode, requestId: error.requestId,
+      });
+    }
     connection.lastSyncStatus = "failed"; connection.lastError = error.message;
     await connection.save();
     throw error;
