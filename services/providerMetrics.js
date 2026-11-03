@@ -1,3 +1,4 @@
+import { ensureLinkedInAccessToken } from "./integrationImportMaintenance.js";
 import { googleAdsFailure, googleAdsLoginCustomerId } from "./googleAdsErrors.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import SourceMetricDaily from "../models/SourceMetricDaily.js";
@@ -65,6 +66,7 @@ export async function googleToken(connection) {
     body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: connection.refreshToken,
       client_id: process.env.GOOGLE_CLIENT_ID || "", client_secret: process.env.GOOGLE_CLIENT_SECRET || "" }),
   });
+  if (typeof tokens?.access_token !== "string" || !tokens.access_token) throw new Error("Google token renewal returned no access token. Reconnect Google.");
   connection.accessToken = tokens.access_token;
   connection.tokenExpiresAt = new Date(Date.now() + Number(tokens.expires_in || 3600) * 1000);
   if (tokens.refresh_token) connection.refreshToken = tokens.refresh_token;
@@ -114,11 +116,11 @@ async function ga4(connection, orgId) {
 async function linkedin(connection, orgId, override) {
   const accountId = override.accountId || connection.externalAccountId;
   if (!accountId) throw new Error("Select a LinkedIn Ads account first");
-  if (connection.tokenExpiresAt && new Date(connection.tokenExpiresAt) <= new Date()) throw new Error("LinkedIn authorization expired; reconnect");
+  const accessToken = await ensureLinkedInAccessToken(connection);
   const { start, end } = reportingDates();
   const restDate = date => { const [year, month, day] = date.split("-").map(Number); return `(year:${year},month:${month},day:${day})`; };
   const query = `q=analytics&pivot=ACCOUNT&timeGranularity=DAILY&dateRange=(start:${restDate(start)},end:${restDate(end)})&accounts=List(urn%3Ali%3AsponsoredAccount%3A${encodeURIComponent(accountId)})&fields=dateRange,costInLocalCurrency,impressions,clicks,externalWebsiteConversions,oneClickLeads`;
-  const headers = { Authorization: `Bearer ${connection.accessToken}`, "LinkedIn-Version": "202608", "X-Restli-Protocol-Version": "2.0.0" };
+  const headers = { Authorization: `Bearer ${accessToken}`, "LinkedIn-Version": "202608", "X-Restli-Protocol-Version": "2.0.0" };
   const [data, account] = await Promise.all([
     request(`https://api.linkedin.com/rest/adAnalytics?${query}`, { headers }),
     request(`https://api.linkedin.com/rest/adAccounts/${encodeURIComponent(accountId)}`, { headers }),
