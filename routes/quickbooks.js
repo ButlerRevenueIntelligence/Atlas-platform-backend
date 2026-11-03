@@ -184,7 +184,7 @@ async function ensureAccessToken(connection) {
   return connection.accessToken;
 }
 
-async function qboRequest({ realmId, accessToken, path, query = {} }) {
+export async function qboRequest({ realmId, accessToken, path, query = {} }) {
   const params = new URLSearchParams(query);
   const minorVersion = String(process.env.QUICKBOOKS_MINOR_VERSION || "").trim();
   if (minorVersion) params.set("minorversion", minorVersion);
@@ -201,10 +201,13 @@ async function qboRequest({ realmId, accessToken, path, query = {} }) {
     }
   );
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = data?.Fault?.Error?.[0]?.Detail || data?.Fault?.Error?.[0]?.Message;
-    throw new Error(detail || `QuickBooks request failed (${response.status})`);
+  const data = await response.json().catch(() => null);
+  const fault = data?.Fault || data?.IntuitResponse?.Fault;
+  if (!response.ok || fault || data === null || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length === 0) {
+    const detail = fault?.Error?.[0]?.Detail || fault?.Error?.[0]?.Message;
+    const error = new Error(detail || `QuickBooks request failed (${response.status}); no report was imported`);
+    error.status = response.ok ? 502 : response.status;
+    throw error;
   }
   return data;
 }

@@ -1,4 +1,6 @@
 import express from "express";
+import { fetchZohoPages, fetchLinkedInPages, selectSavedLinkedInAccount, ensureLinkedInAccessToken } from "../services/integrationImportMaintenance.js";
+import { ensureSlackAccessToken } from "../services/slackAuth.js";
 import { registerProviderSync, runRegisteredSync } from "../services/providerSyncRegistry.js";
 import { clientForAccount } from "../services/accountLinks.js";
 import { syncAdditionalProvider, saveDailyMetrics, googleToken } from "../services/providerMetrics.js";
@@ -1202,7 +1204,8 @@ function normalizePipedriveApiDomain(value) {
     value || "https://api.pipedrive.com"
   )
     .trim()
-    .replace(/\/+$/, "");
+    .replace(/\/+$/, "")
+    .replace(/\/api$/i, "");
 }
 
 async function ensurePipedriveAccessToken(
@@ -1406,7 +1409,7 @@ async function pipedriveApiRequest(
   return data;
 }
 
-async function getPipedriveUserInfo(
+export async function getPipedriveUserInfo(
   accessToken,
   apiDomain = null
 ) {
@@ -1416,7 +1419,7 @@ async function getPipedriveUserInfo(
     );
 
   const response = await fetch(
-    `${base}/v1/users/me`,
+    `${base}/api/v1/users/me`,
     {
       method: "GET",
       headers: {
@@ -1620,24 +1623,24 @@ async function exchangeGA4CodeForTokens(code) {
   return exchangeGoogleCodeForTokens(code, buildGA4RedirectUri());
 }
 
-async function getGA4AccountSummaries(accessToken) {
-  const res = await fetch(
-    "https://analyticsadmin.googleapis.com/v1beta/accountSummaries",
-    {
-      method: "GET",
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }
-  );
-
-  const data = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    throw new Error(
-      data?.error?.message || "Failed to fetch accessible GA4 properties"
-    );
-  }
-
-  return Array.isArray(data?.accountSummaries) ? data.accountSummaries : [];
+export async function getGA4AccountSummaries(accessToken) {
+  const accounts = [], seen = new Set();
+  let pageToken = "";
+  do {
+    const query = new URLSearchParams({pageSize: "200"});
+    if (pageToken) query.set("pageToken", pageToken);
+    const response = await fetch(`https://analyticsadmin.googleapis.com/v1beta/accountSummaries?${query}`, {
+      headers: {Authorization: `Bearer ${accessToken}`}, signal: AbortSignal.timeout(30000),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data === null || data.error) throw new Error(data?.error?.message || "Failed to fetch accessible GA4 properties");
+    if (data.accountSummaries !== undefined && !Array.isArray(data.accountSummaries)) throw new Error("Invalid GA4 account list");
+    accounts.push(...(data.accountSummaries || []));
+    pageToken = data.nextPageToken || "";
+    if (pageToken && (typeof pageToken !== "string" || seen.has(pageToken))) throw new Error("GA4 account pagination did not advance");
+    if (pageToken) seen.add(pageToken);
+  } while (pageToken);
+  return accounts;
 }
 
 /* -------------------------------- */
@@ -3152,7 +3155,7 @@ if (
       connection.status === "connected"
     ) {
       try {
-        const tokenToRevoke = connection.accessToken;
+        const tokenToRevoke = await ensureSlackAccessToken(connection);
 
         if (!tokenToRevoke) {
           throw new Error("Slack access token is missing");
@@ -4750,7 +4753,7 @@ router.get("/ga4/callback", async (req, res) => {
 
     if (!accessToken) throw new Error("No access token returned");
 
-    const profile = await getGoogleUserProfile(accessToken);
+    const profile = await getGoogleUserProfile(accessToken).catch(() => null);
     const accountSummaries = await getGA4AccountSummaries(accessToken);
 
     const properties = accountSummaries.flatMap((account) => {
@@ -5235,6 +5238,9 @@ const refreshTokenExpiresIn =
       connection = new IntegrationConnection({ orgId, provider: "linkedin_ads" });
     }
 
+    const sameLinkedInUser = profile?.sub && profile.sub === connection.metadata?.sub;
+    const savedAdAccountId = sameLinkedInUser ? connection.metadata?.selectedAdAccountId || connection.metadata?.adAccounts?.find(account => String(account.id) === String(connection.externalAccountId))?.id || null : null;
+    const savedAdAccountName = savedAdAccountId ? connection.externalAccountName : "LinkedIn Ads";
     connection.status = "connected";
     connection.mode = "live";
     connection.connectedAt = new Date();
@@ -5242,12 +5248,12 @@ const refreshTokenExpiresIn =
     connection.accessToken = accessToken;
     connection.refreshToken =
   refreshToken ||
-  connection.refreshToken ||
+  (sameLinkedInUser ? connection.refreshToken : null) ||
   null;
     connection.tokenType = "Bearer";
     connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
-    connection.externalAccountId = profile?.sub || null;
-    connection.externalAccountName = profile?.name || profile?.email || "LinkedIn";
+    connection.externalAccountId = savedAdAccountId;
+    connection.externalAccountName = savedAdAccountName;
     connection.scopes = ["openid", "profile", "email", "r_ads", "r_ads_reporting"];
     connection.lastSyncAt = null;
     connection.lastSyncStatus = "never";
@@ -5257,6 +5263,7 @@ const refreshTokenExpiresIn =
       email: profile?.email || null,
       name: profile?.name || null,
       sub: profile?.sub || null,
+      selectedAdAccountId: savedAdAccountId,
     };
 
     await connection.save();
@@ -5331,10 +5338,10 @@ router.get("/slack/callback", async (req, res) => {
     connection.connectedAt = new Date();
     connection.disconnectedAt = null;
     connection.accessToken = accessToken;
-    connection.refreshToken = null;
+    connection.refreshToken = tokenData?.refresh_token || null;
     connection.webhookUrl = webhook.url;
     connection.tokenType = tokenData?.token_type || "bot";
-    connection.tokenExpiresAt = null;
+    connection.tokenExpiresAt = Number(tokenData?.expires_in) > 0 ? new Date(Date.now() + Number(tokenData.expires_in) * 1000) : null;
     connection.externalAccountId = teamId;
     connection.externalAccountName = teamName;
     connection.scopes = String(tokenData?.scope || "")
@@ -6117,62 +6124,18 @@ syncPost("/zoho_crm/sync", requireAuth, async (req, res) => {
     .trim()
     .replace(/\/+$/, "");
     async function zohoGetAll(moduleName) {
-      let page = 1;
-      let more = true;
-      const allRecords = [];
-
-      while (more) {
-        const fields =
-  moduleName === "Accounts"
-    ? "id,Account_Name,Website,Industry,Phone"
-    : "id,Deal_Name,Account_Name,Amount,Stage,Closing_Date,Probability";
-
-const params = new URLSearchParams({
-  page: String(page),
-  per_page: "200",
-  fields,
-});
-
-const response = await fetch(
-  `${zohoApiDomain}/crm/v8/${moduleName}?${params.toString()}`,
-          {
-            method: "GET",
-            headers: {
-              Authorization: `Zoho-oauthtoken ${accessToken}`,
-            },
-          }
-        );
-
-        const data = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-  console.error(
-    "Zoho API request failed:",
-    {
-      moduleName,
-      status: response.status,
-      data,
-    }
-  );
-
-  throw new Error(
-    `${moduleName}: ${
-      data?.message ||
-      data?.code ||
-      "Zoho API request failed"
-    }`
-  );
-}
-
-        const rows = Array.isArray(data?.data) ? data.data : [];
-        allRecords.push(...rows);
-
-        const info = data?.info || {};
-        more = !!info.more_records;
-        page += 1;
-      }
-
-      return allRecords;
+      const fields = moduleName === "Accounts"
+        ? "id,Account_Name,Website,Industry,Phone"
+        : "id,Deal_Name,Account_Name,Amount,Stage,Closing_Date,Probability";
+      return fetchZohoPages(async params => {
+        const response = await fetch(`${zohoApiDomain}/crm/v8/${moduleName}?${params}`, {
+          method: "GET", headers: {Authorization: `Zoho-oauthtoken ${accessToken}`}, signal: AbortSignal.timeout(60000),
+        });
+        if (response.status === 204) return {data: [], info: {more_records: false}};
+        const data = await response.json().catch(() => null);
+        if (!response.ok || data?.status === "error") throw new Error(`${moduleName}: ${data?.message || data?.code || "Zoho API request failed"}`);
+        return data;
+      }, fields);
     }
 
     const [zohoAccounts, zohoDeals] = await Promise.all([
@@ -8006,29 +7969,7 @@ syncPost("/linkedin_ads/sync", requireAuth, async (req, res) => {
       });
     }
 
-    const accessToken = connection.accessToken;
-    const tokenExpiresAt = connection.tokenExpiresAt
-  ? new Date(connection.tokenExpiresAt)
-  : null;
-
-if (
-  tokenExpiresAt &&
-  tokenExpiresAt.getTime() <= Date.now() + 60_000
-) {
-  connection.lastSyncStatus = "failed";
-  connection.lastError =
-    "LinkedIn access token expired. Reconnect LinkedIn Ads.";
-
-  await connection.save();
-
-  return res.status(401).json({
-    ok: false,
-    reconnectRequired: true,
-    provider: "linkedin_ads",
-    message:
-      "LinkedIn Ads authorization expired. Please reconnect LinkedIn Ads.",
-  });
-}
+    const accessToken = await ensureLinkedInAccessToken(connection);
 
     async function linkedInGet(url) {
       const response = await fetch(url, {
@@ -8066,13 +8007,9 @@ if (
     let adAccounts = [];
 
     try {
-      const adAccountsResponse = await linkedInGet(
+      adAccounts = await fetchLinkedInPages(linkedInGet,
         "https://api.linkedin.com/rest/adAccounts?q=search&search=(status:(values:List(ACTIVE)))"
       );
-
-      adAccounts = Array.isArray(adAccountsResponse?.elements)
-        ? adAccountsResponse.elements
-        : [];
     } catch (err) {
       const msg = String(err?.message || "").toLowerCase();
 
@@ -8088,7 +8025,7 @@ if (
       }
     }
 
-    const primaryAccount = adAccounts[0] || null;
+    const primaryAccount = selectSavedLinkedInAccount(adAccounts, connection.externalAccountId === connection.metadata?.sub ? null : connection.externalAccountId);
 
     const externalAccountId =
       primaryAccount?.id != null ? String(primaryAccount.id) : null;
@@ -8102,15 +8039,9 @@ if (
 
     if (externalAccountId) {
       try {
-        const campaignsResponse = await linkedInGet(
-  `https://api.linkedin.com/rest/adAccounts/${encodeURIComponent(
-    externalAccountId
-  )}/adCampaigns?q=search`
-);
-
-        campaigns = Array.isArray(campaignsResponse?.elements)
-          ? campaignsResponse.elements
-          : [];
+        campaigns = await fetchLinkedInPages(linkedInGet,
+          `https://api.linkedin.com/rest/adAccounts/${encodeURIComponent(externalAccountId)}/adCampaigns?q=search`
+        );
       } catch (err) {
         const msg = String(err?.message || "").toLowerCase();
 
@@ -8138,6 +8069,7 @@ if (
     connection.lastError = null;
     connection.metadata = {
       ...(connection.metadata || {}),
+      selectedAdAccountId: externalAccountId,
       adAccounts,
       campaigns,
       syncedAt: new Date(),
@@ -8336,12 +8268,10 @@ syncPost("/meta_ads/sync", requireAuth, async (req, res) => {
         );
       }) || null;
 
-    if (!selectedAccount) {
-      selectedAccount =
-        connection?.metadata?.selectedAccount ||
-        accounts[0] ||
-        null;
+    if (!selectedAccount && savedAccountId) {
+      throw new Error("The previously selected Meta ad account is no longer accessible. Atlas did not switch accounts; reconnect with the correct account access.");
     }
+    if (!selectedAccount) selectedAccount = accounts[0] || null;
 
     if (!selectedAccount?.id) {
       throw new Error(
