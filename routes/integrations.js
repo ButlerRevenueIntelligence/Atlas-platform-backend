@@ -1458,7 +1458,12 @@ function buildGoogleAdsAuthUrl(orgId) {
 
   if (!clientId || !redirectUri || !orgId) return null;
 
-  const scope = ["https://www.googleapis.com/auth/adwords"].join(" ");
+  const scope = [
+    "https://www.googleapis.com/auth/adwords",
+    "openid",
+    "email",
+    "profile",
+  ].join(" ");
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -1500,11 +1505,10 @@ async function exchangeGoogleCodeForTokens(code, redirectUriOverride = null) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(
-      data?.error_description ||
-        data?.error ||
-        "Failed to exchange Google OAuth code"
-    );
+    const error = new Error("Google OAuth token exchange failed");
+    error.googleCode = typeof data?.error === "string" ? data.error : null;
+    error.status = res.status;
+    throw error;
   }
 
   return data;
@@ -1532,7 +1536,9 @@ async function getGoogleAdsAccessibleCustomers(accessToken) {
   ).trim();
 
   if (!developerToken) {
-    throw new Error("GOOGLE_ADS_DEVELOPER_TOKEN is missing");
+    const error = new Error("Google Ads developer token is not configured");
+    error.callbackCode = "google_ads_developer_token_missing";
+    throw error;
   }
 
   const loginCustomerId = String(
@@ -1561,9 +1567,12 @@ async function getGoogleAdsAccessibleCustomers(accessToken) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(
-      data?.error?.message || "Failed to fetch accessible Google Ads customers"
-    );
+    const error = new Error("Google Ads account discovery failed");
+    error.status = res.status;
+    error.googleCode = data?.error?.details?.flatMap(detail => detail.errors || [])
+      .map(item => item.errorCode && Object.values(item.errorCode)[0]).find(Boolean) || data?.error?.details?.find(detail => detail.reason)?.reason || data?.error?.status || null;
+    error.requestId = res.headers.get("request-id") || null;
+    throw error;
   }
 
   return Array.isArray(data?.resourceNames) ? data.resourceNames : [];
@@ -4438,9 +4447,34 @@ const me =
   }
 });
 
+export function googleAdsCallbackErrorCode(error, stage) {
+  const safeCodes = new Set([
+    "google_ads_developer_token_missing", "google_ads_no_accessible_accounts",
+    "google_ads_offline_access_required",
+  ]);
+  if (safeCodes.has(error.callbackCode)) return error.callbackCode;
+  if (stage === "token_exchange") {
+    if (error.googleCode === "invalid_grant") return "google_ads_authorization_expired";
+    if (["invalid_client", "unauthorized_client"].includes(error.googleCode)) return "google_ads_oauth_configuration_error";
+    return "google_ads_token_exchange_failed";
+  }
+  if (stage === "account_discovery") {
+    if (/DEVELOPER_TOKEN/.test(error.googleCode || "")) return "google_ads_developer_token_rejected";
+    if (/SERVICE_DISABLED|API_DISABLED/.test(error.googleCode || "")) return "google_ads_api_disabled";
+    if (error.status === 401 || error.status === 403) return "google_ads_account_access_denied";
+    return "google_ads_account_discovery_failed";
+  }
+  if (stage === "save_connection") return "google_ads_connection_save_failed";
+  return "google_ads_callback_failed";
+}
+
 router.get("/google_ads/callback", async (req, res) => {
+  let stage = "state";
   try {
-    const { code, state } = req.query;
+    const { code, state, error: consentError } = req.query;
+    if (consentError) {
+      return res.redirect(formatOauthErrorRedirect("google_ads", consentError === "access_denied" ? "google_ads_access_denied" : "google_ads_consent_failed"));
+    }
     if (!code || !state) return res.status(400).send("Missing code or state");
 
     let parsedState;
@@ -4468,6 +4502,7 @@ router.get("/google_ads/callback", async (req, res) => {
     const org = await ensureOrg(orgId);
     if (!org) return res.status(404).send("Workspace not found");
 
+    stage = "token_exchange";
     const tokenData = await exchangeGoogleCodeForTokens(code);
     const accessToken = tokenData?.access_token || null;
     const refreshToken = tokenData?.refresh_token || null;
@@ -4479,11 +4514,18 @@ router.get("/google_ads/callback", async (req, res) => {
 
     if (!accessToken) throw new Error("No access token returned");
 
-    const profile = await getGoogleUserProfile(accessToken);
+    // Display-only profile data must never gate Google Ads authorization.
+    // This also lets an in-flight older authorization (Ads scope only) complete.
+    const profile = scopes.some(scope => ["openid", "email", "profile", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"].includes(scope))
+      ? await getGoogleUserProfile(accessToken).catch(() => null)
+      : null;
+    stage = "account_discovery";
     const customers = await getGoogleAdsAccessibleCustomers(accessToken);
 
     if (!customers.length) {
-      throw new Error("No accessible Google Ads accounts were found for this Google login");
+      const error = new Error("No accessible Google Ads accounts");
+      error.callbackCode = "google_ads_no_accessible_accounts";
+      throw error;
     }
 
     const needsSelection = customers.length > 1;
@@ -4500,12 +4542,20 @@ router.get("/google_ads/callback", async (req, res) => {
       connection = new IntegrationConnection({ orgId, provider: "google_ads" });
     }
 
+    stage = "save_connection";
+    const sameGoogleUser = profile?.email && profile.email === connection.metadata?.googleUserEmail;
+    const usableRefreshToken = refreshToken || (sameGoogleUser ? connection.refreshToken : null);
+    if (!usableRefreshToken) {
+      const error = new Error("Offline access was not granted");
+      error.callbackCode = "google_ads_offline_access_required";
+      throw error;
+    }
     connection.status = "connected";
     connection.mode = "live";
     connection.connectedAt = new Date();
     connection.disconnectedAt = null;
     connection.accessToken = accessToken;
-    connection.refreshToken = refreshToken;
+    connection.refreshToken = usableRefreshToken;
     connection.tokenType = tokenData?.token_type || null;
     connection.tokenExpiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000) : null;
     connection.externalAccountId = externalAccountId;
@@ -4536,8 +4586,13 @@ router.get("/google_ads/callback", async (req, res) => {
       `${getFrontendUrl()}/integrations?connected=google_ads&mode=live&needsSelection=${needsSelection ? "1" : "0"}`
     );
   } catch (err) {
-    console.error("Google Ads callback error:", err);
-    return res.redirect(formatOauthErrorRedirect("google_ads"));
+    const code = googleAdsCallbackErrorCode(err, stage);
+    console.error("Google Ads callback failed:", {
+      event: "google_ads_oauth_failed", stage, code,
+      status: err.status || null, googleCode: err.googleCode || null,
+      requestId: err.requestId || null,
+    });
+    return res.redirect(formatOauthErrorRedirect("google_ads", code));
   }
 });
 
