@@ -324,6 +324,10 @@ export async function getUnifiedWorkspaceData(orgId, { days = 30 } = {}) {
   }, {}));
   return {
     channelMetrics,
+    metricObservationDays: {
+      spend: [...new Set((selectedSourceRows.some(row => row.provider !== "ga4") ? selectedSourceRows.filter(row => String(row.currency || "USD").toUpperCase() === "USD") : baseMetrics).map(row => dayKey(row.date)).filter(Boolean))],
+      leads: [...new Set((selectedSourceRows.length ? selectedSourceRows.filter(row => !selectedSourceRows.some(item => item.provider === "ga4") || row.provider === "ga4") : baseMetrics).map(row => dayKey(row.date)).filter(Boolean))],
+    },
     // Original observation days distinguish genuine zero records from generated gap-fill rows.
     revenueObservationDays: {
       stripe: [...new Set(stripeRows.filter(row => String(row.currency || "USD").toUpperCase() === "USD").map(row => dayKey(row.date)).filter(Boolean))],

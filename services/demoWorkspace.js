@@ -98,3 +98,8 @@ export function buildDemoWorkspaceDeals(org, now = new Date()) {
   }));
   return [...active, ...closed];
 }
+
+export function buildDemoWorkspaceMetrics(now=new Date()) {
+ const metrics=[];for(let i=29;i>=0;i--){const d=new Date(now);d.setDate(now.getDate()-i);metrics.push({date:d.toISOString().slice(0,10),dateISO:d.toISOString(),revenue:1200+((29-i)%7)*180+i*9,spend:260+((29-i)%5)*28+i*2,leads:10+((29-i)%6)+Math.floor(i/8)});}
+ return metrics;
+}
