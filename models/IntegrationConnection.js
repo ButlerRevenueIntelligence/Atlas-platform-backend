@@ -147,6 +147,11 @@ const IntegrationConnectionSchema = new mongoose.Schema(
       default: null,
     },
 
+    lastSyncAttemptAt: {
+      type: Date,
+      default: null,
+    },
+
     lastSyncAt: {
       type: Date,
       default: null,

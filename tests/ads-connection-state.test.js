@@ -10,7 +10,8 @@ import IntegrationConnection from '../models/IntegrationConnection.js';
 const json = (body, status = 200) => ({ok: status < 400, status, json: async () => body});
 const conn = provider => ({provider, accessToken: 'existing-access', refreshToken: 'refresh', metadata: {accountId: '123'}, status: 'connected', async save() {this.saved = true;}});
 for (const provider of ['google_ads', 'linkedin_ads']) {
-  test(`${provider} keeps authorization connected after reporting, permission, rate-limit and network failures`, async () => {
+  test(`${provider} keeps authorization connected after reporting, permission, rate-limit and network failures`, async t => {
+    t.mock.method(IntegrationConnection, "updateOne", async () => ({matchedCount:1}));
     for (const status of [400, 403, 429, 500, undefined]) {
       const c = conn(provider);
       await markSyncFailed(c, Object.assign(new Error('Actual provider error'), {status}));
@@ -21,7 +22,8 @@ for (const provider of ['google_ads', 'linkedin_ads']) {
       assert.deepEqual(c.metadata, {accountId: '123'});
     }
   });
-  test(`${provider} reports an authorization error when renewal requires reconnection`, async () => {
+  test(`${provider} reports an authorization error when renewal requires reconnection`, async t => {
+    t.mock.method(IntegrationConnection, "updateOne", async () => ({matchedCount:1}));
     const c = conn(provider);
     await markSyncFailed(c, Object.assign(new Error('Authorization expired'), {status: 401}));
     assert.equal(c.status, 'error');
