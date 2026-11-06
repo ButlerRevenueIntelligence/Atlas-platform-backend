@@ -11,7 +11,7 @@ export async function runRegisteredSync(provider, orgId) {
   const handler = handlers.get(provider);
   if (!handler) throw new Error(`No sync implementation for ${provider}`);
   const key = `${orgId}:${provider}`;
-  if (running.has(key)) throw new Error("Sync already running");
+  if (running.has(key)) throw Object.assign(new Error("Sync already running"), {code: "SYNC_IN_PROGRESS", status: 409});
   running.add(key);
   try {
     let result;
@@ -24,6 +24,8 @@ export async function runRegisteredSync(provider, orgId) {
     if (statusCode >= 400 || result?.ok !== true) {
       const error = new Error(result?.error || result?.message || `${provider} sync did not complete`);
       error.status = statusCode >= 400 ? statusCode : 500;
+      if (result?.code) error.code = result.code;
+      if (result?.reconnectRequired) error.reconnectRequired = true;
       throw error;
     }
     return result;

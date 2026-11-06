@@ -2154,6 +2154,7 @@ async function refreshSalesforceAccessToken(refreshToken) {
     `${loginUrl}/services/oauth2/token`,
     {
       method: "POST",
+      signal: AbortSignal.timeout(60000),
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
       },
@@ -2164,11 +2165,9 @@ async function refreshSalesforceAccessToken(refreshToken) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(
-      data?.error_description ||
-        data?.error ||
-        "Failed to refresh Salesforce access token"
-    );
+    throw Object.assign(new Error(data?.error === "invalid_grant"
+      ? "Salesforce authorization expired or was revoked. Reconnect Salesforce."
+      : "Salesforce token renewal failed; retry the sync."), {status: data?.error === "invalid_grant" ? 401 : response.status, reconnectRequired: data?.error === "invalid_grant"});
   }
 
   if (!data?.access_token) {
@@ -2216,6 +2215,7 @@ async function salesforceApiRequest({
     `${cleanInstanceUrl}${path}`,
     {
       method: "GET",
+      signal: AbortSignal.timeout(60000),
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
@@ -2260,6 +2260,7 @@ async function salesforceQueryAll({
       path: nextPath,
     });
 
+    if (!Array.isArray(data?.records)) throw Object.assign(new Error("Salesforce returned an invalid records page; sync was not completed."), {status: 502});
     if (Array.isArray(data?.records)) {
       records.push(...data.records);
     }
@@ -2473,6 +2474,7 @@ async function formatIntegrations(orgId) {
         status: live.status || "disconnected",
         connected: live.status === "connected",
         lastSync: live.lastSyncAt || null,
+        lastSyncAttemptAt: live.lastSyncAttemptAt || null,
         connectedAt: live.connectedAt || summary.connectedAt || null,
         mode: live.mode || summary.mode || "demo",
         externalAccountId: live.externalAccountId || null,
@@ -3737,6 +3739,7 @@ router.get("/salesforce/status", requireAuth, async (req, res) => {
       externalAccountId: connection?.externalAccountId || null,
       externalAccountName: connection?.externalAccountName || null,
       lastSyncAt: connection?.lastSyncAt || null,
+      lastSyncAttemptAt: connection?.lastSyncAttemptAt || null,
       lastSyncStatus: connection?.lastSyncStatus || "never",
       lastError: connection?.lastError || null,
       instanceUrl: connection?.metadata?.instanceUrl || null,
@@ -7573,7 +7576,7 @@ syncPost("/salesforce/sync", requireAuth, async (req, res) => {
     connection = await IntegrationConnection.findOne({
       orgId,
       provider: "salesforce",
-      status: "connected",
+      status: { $in: ["connected", "error"] },
     }).select("+accessToken +refreshToken");
 
     if (!connection) {
@@ -7879,7 +7882,11 @@ await connection.save();
       },
     };
 
-    await connection.save();
+    const persisted = await IntegrationConnection.updateOne(
+      {_id: connection._id, orgId, provider: "salesforce", status: {$in: ["connected", "error"]}},
+      {$set: {status: "connected", mode: "live", lastSyncAt: syncedAt, lastSyncStatus: "success", lastError: null, syncCursor: connection.syncCursor, "metadata.instanceUrl": instanceUrl, "metadata.lastSalesforceSync": connection.metadata.lastSalesforceSync}}
+    );
+    if (persisted.matchedCount === 0) throw Object.assign(new Error("Salesforce sync cancelled because the connection was disconnected."), {code: "SYNC_CANCELLED", status: 409});
 
     await updateOrgIntegrationSummary(
       orgId,
@@ -7910,8 +7917,7 @@ await connection.save();
       err?.salesforceResponse || err
     );
 
-    if (connection) {
-      connection.lastSyncAt = new Date();
+    if (connection && err?.code !== "SYNC_CANCELLED") {
       connection.lastSyncStatus = "failed";
       connection.lastError =
         err?.message || "Salesforce sync failed";
@@ -7931,9 +7937,10 @@ await connection.save();
         .includes("session expired");
 
     return res
-      .status(authorizationError ? 401 : 500)
+      .status(err?.code === "SYNC_CANCELLED" ? 409 : authorizationError ? 401 : 500)
       .json({
         ok: false,
+        code: err?.code || null,
         message: authorizationError
           ? "Salesforce authorization expired. Please reconnect Salesforce."
           : "Failed to sync Salesforce",

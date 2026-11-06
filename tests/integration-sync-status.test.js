@@ -15,7 +15,7 @@ test("successful scheduled sync clears stale failure fields from a separate prov
     save() { throw new Error("A stale document save cannot clear unchanged fields"); },
   };
   t.mock.method(IntegrationConnection, "updateOne", async (filter, update) => {
-    assert.deepEqual(filter, { _id: "connection-a", orgId: "workspace-a", provider: "salesforce" });
+    assert.deepEqual(filter, { _id: "connection-a", orgId: "workspace-a", provider: "salesforce", status: {$in: ["connected", "error"]} });
     Object.assign(stored, update.$set);
     return { matchedCount: 1, modifiedCount: 1 };
   });
