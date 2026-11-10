@@ -1,0 +1,22 @@
+{
+  "version": "draft-2026-11-10",
+  "approved": false,
+  "legalEntity": "",
+  "reviewedAt": "",
+  "common": {
+    "purpose": "Atlas analyzes connected business records to support revenue reports, risk identification, and recommended next actions. AI answers can be incomplete or inaccurate and need human review.",
+    "aiProcessing": "The code can send your question, workspace name, selected deal and account evidence, revenue metrics, and selected external intelligence to the OpenAI API. Some answers are calculated within Atlas without an OpenAI request. Production provider terms, training treatment, retention, and access conditions are awaiting verification.",
+    "otherProviders": "External company and news research uses GraphIQ. Slack can receive workspace alerts and briefings when configured. The complete production hosting, database, monitoring, and support provider list is awaiting verification.",
+    "saleAndTraining": "Sale, advertising, unrelated use, and AI model-training policies must be verified and published before this agreement can be accepted.",
+    "storageAndAccess": "The backend stores imported records and credentials in MongoDB. Production locations, access controls, encryption configuration, and retention must be verified.",
+    "retentionAndDeletion": "Disconnecting a source does not by itself delete imported records. Export and deletion procedures, deadlines, provider retention, and backup expiration must be verified before release.",
+    "contact": ""
+  },
+  "documents": {
+    "agreement": {"title": "Data Processing Agreement", "text": ""},
+    "terms": {"title": "Terms of Service", "text": ""},
+    "privacy": {"title": "Privacy Policy", "text": ""},
+    "providers": {"title": "Service Providers", "text": ""}
+  },
+  "connectors": {}
+}

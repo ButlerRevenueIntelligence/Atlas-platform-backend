@@ -13,6 +13,10 @@ import { startSlackExecutiveBriefings } from "./jobs/slackExecutiveBriefing.js";
 import { startGraphIQMonitoring } from "./jobs/graphiqMonitoring.js";
 import { startSlackDealRiskAlerts } from "./services/slackDealRiskAlerts.js";
 
+import dataAccessRoutes from "./routes/dataAccess.js";
+import { integrationDataAccess, aiDataAccess } from "./middleware/dataAccess.js";
+import { validateOAuthReview } from "./services/dataAccess.js";
+
 import authRoutes from "./routes/auth.js";
 import dashboardRoutes from "./routes/dashboard.js";
 import integrationsRoute from "./routes/integrations.js";
@@ -186,6 +190,7 @@ app.use("/api/me", meRoutes);
 /**
  * IMPORT AND CONNECTION ROUTES
  */
+app.use("/api/data-access", dataAccessRoutes);
 app.use("/api/hubspot", hubspotSyncRoutes);
 app.use("/api/imports", importsRoutes);
 
@@ -222,18 +227,23 @@ function integrationPlanGate(req, res, next) {
     integrationOAuthCallbacks.has(req.path);
 
   if (isOAuthCallback) {
-    return next();
+    return validateOAuthReview(req, res, next);
   }
 
-  return integrationWorkspace(req, res, () => coreIntegrationPlanGate(req, res, next));
+  return integrationWorkspace(req, res, () => coreIntegrationPlanGate(req, res, () => integrationDataAccess(req, res, next)));
 }
 
 function quickBooksPlanGate(req, res, next) {
   if (req.method === "GET" && req.path === "/callback") {
-    return next();
+    const path = req.url;
+    req.url = `/quickbooks${path}`;
+    return validateOAuthReview(req, res, () => { req.url = path; return next(); });
   }
 
-  return integrationWorkspace(req, res, () => coreIntegrationPlanGate(req, res, next));
+  return integrationWorkspace(req, res, () => coreIntegrationPlanGate(req, res, () => {
+    const path = req.url; req.url = `/quickbooks${path}`;
+    return integrationDataAccess(req, res, () => { req.url = path; return next(); });
+  }));
 }
 
 app.use(
@@ -345,6 +355,7 @@ app.use(
 app.use(
   "/api/graphiq",
   integrationWorkspace,
+  aiDataAccess,
   requirePlan("CORE"),
   graphiqRoutes
 );

@@ -1,3 +1,4 @@
+import { requireDataAccess } from "./dataAccess.js";
 const handlers = new Map();
 const running = new Set();
 
@@ -10,6 +11,7 @@ export function registerProviderSync(provider, handler) {
 export async function runRegisteredSync(provider, orgId) {
   const handler = handlers.get(provider);
   if (!handler) throw new Error(`No sync implementation for ${provider}`);
+  await requireDataAccess(orgId, provider);
   const key = `${orgId}:${provider}`;
   if (running.has(key)) throw Object.assign(new Error("Sync already running"), {code: "SYNC_IN_PROGRESS", status: 409});
   running.add(key);

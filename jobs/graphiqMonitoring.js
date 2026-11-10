@@ -1,3 +1,4 @@
+import { requireAIDataAccess } from "../services/dataAccess.js";
 import { graphIQDiagnostic, logGraphIQEvent } from '../services/graphiqDiagnostics.js';
 import cron from 'node-cron';
 import { randomUUID } from 'node:crypto';
@@ -82,6 +83,7 @@ export async function runGraphIQMonitoring({
       disable = false;
     const results = [];
     try {
+      await requireAIDataAccess(monitor.orgId);
       const org = await Organization.findById(monitor.orgId).select('accessStatus billing paymentStatus trial').lean();
       const member = await Membership.findOne({
         orgId: monitor.orgId,

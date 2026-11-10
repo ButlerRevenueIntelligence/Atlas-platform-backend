@@ -1,3 +1,4 @@
+import { mayProcessData } from "./dataAccess.js";
 import Deal from "../models/Deal.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import Organization from "../models/Organization.js";
@@ -166,6 +167,7 @@ async function saveDeliveryFailure(connection, error) {
 }
 
 async function scanConnection(connection, now = new Date()) {
+  if (!await mayProcessData(connection.orgId, "slack")) return;
   const webhookUrl = String(connection.webhookUrl || "").trim();
   if (!webhookUrl) return { sent: 0, skipped: true };
 
@@ -304,6 +306,7 @@ export async function runSlackDealRiskAlertScan() {
 }
 
 export async function notifyMajorProbabilityDrop({ orgId, beforeDeal, afterDeal }) {
+  if (!await mayProcessData(orgId, "slack")) return;
   const before = Number(beforeDeal?.probability);
   const after = Number(afterDeal?.probability);
 

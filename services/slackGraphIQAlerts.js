@@ -1,3 +1,4 @@
+import { mayProcessData } from "./dataAccess.js";
 import { createHash, randomUUID } from 'node:crypto';
 import IntegrationConnection from '../models/IntegrationConnection.js';
 import Organization from '../models/Organization.js';
@@ -163,6 +164,7 @@ export async function notifyGraphIQResearch({
   let connection, claimScope;
   let attempted = false;
   try {
+    if (!await mayProcessData(orgId, "slack")) return {state:"skipped",reason:"data_access_required"};
     connection = await IntegrationConnection.findOne({
       orgId,
       provider: 'slack',

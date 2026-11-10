@@ -1,3 +1,4 @@
+import { mayProcessData } from "../services/dataAccess.js";
 import cron from "node-cron";
 import Deal from "../models/Deal.js";
 import IntegrationConnection from "../models/IntegrationConnection.js";
@@ -339,6 +340,7 @@ function briefingBlocks(briefing, { preview = false } = {}) {
 }
 
 async function sendBriefing(connection, { preview = false } = {}) {
+  if (!await mayProcessData(connection.orgId, "slack")) return false;
   const webhookUrl = String(connection.webhookUrl || "").trim();
   if (!webhookUrl) return false;
 

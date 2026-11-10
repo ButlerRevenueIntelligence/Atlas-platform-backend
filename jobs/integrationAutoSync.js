@@ -1,3 +1,4 @@
+import { requireDataAccess } from "../services/dataAccess.js";
 import cron from "node-cron";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import { runRegisteredSync } from "../services/providerSyncRegistry.js";
@@ -75,11 +76,12 @@ export async function syncScheduledConnection(connection, {sync = runProviderSyn
   if (!orgId || !provider) return {skipped: true};
   const started = Date.now();
   try {
+    await requireDataAccess(orgId, provider);
     if (!await prepareSyncAttempt(connection)) return {skipped: true};
     await sync(provider, orgId);
     if (!await markSyncSuccess(connection)) return {skipped: true};
   } catch (error) {
-    if (["SYNC_IN_PROGRESS", "SYNC_CANCELLED"].includes(error?.code)) {
+    if (["SYNC_IN_PROGRESS", "SYNC_CANCELLED", "DATA_ACCESS_REQUIRED", "DATA_ACCESS_NOT_PUBLISHED"].includes(error?.code)) {
       console.log({event: "integration_sync_skipped", orgId, provider, reason: error.code, at: new Date().toISOString()});
       return {skipped: true};
     }
