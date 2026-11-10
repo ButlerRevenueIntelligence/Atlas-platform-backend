@@ -1,3 +1,5 @@
+import { integrationWorkspace } from "../middleware/integrationWorkspace.js";
+import { spreadsheetDataAccess } from "../middleware/dataAccess.js";
 import express from "express";
 import mongoose from "mongoose";
 import { requireAuth } from "../middleware/auth.js";
@@ -139,7 +141,7 @@ function detectRowType(row) {
   return "unknown";
 }
 
-router.post("/spreadsheet", requireAuth, async (req, res) => {
+router.post("/spreadsheet", integrationWorkspace, spreadsheetDataAccess, async (req, res) => {
   try {
     const ctx = await getOrgContext(req);
 

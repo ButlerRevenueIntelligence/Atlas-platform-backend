@@ -1,6 +1,7 @@
 import {buildAskAtlasEvidence,specificWorkspaceAnswer,answerEvidenceMetadata,askAtlasMessages,wantsExternalEvidence} from '../services/askAtlasEvidence.js';
 import {loadNewsContext} from '../services/graphiqResearch.js';
 // backend/routes/ai.js
+import { aiDataAccess } from "../middleware/dataAccess.js";
 import CompanyIntelligence from "../models/CompanyIntelligence.js";
 import express from "express";
 import OpenAI from "openai";
@@ -329,7 +330,7 @@ router.post("/insights", requireAuth, async (req, res) => {
 /* -------------------------------- */
 /* OpenAI analysis                  */
 /* -------------------------------- */
-router.post("/analyze", requireAuth, async (req, res) => {
+router.post("/analyze", requireAuth, aiDataAccess, async (req, res) => {
   try {
     const userId = req.user?.userId || req.user?.id;
     const orgId = req.user?.orgId;

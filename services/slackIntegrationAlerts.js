@@ -1,3 +1,4 @@
+import { mayProcessData } from "./dataAccess.js";
 import crypto from "crypto";
 import IntegrationConnection from "../models/IntegrationConnection.js";
 import Organization from "../models/Organization.js";
@@ -53,6 +54,7 @@ function shouldSendFailure(previous, nextFingerprint, now) {
 }
 
 async function getSlackConnection(orgId) {
+  if (!await mayProcessData(orgId, "slack")) return null;
   return IntegrationConnection.findOne({
     orgId,
     provider: "slack",
