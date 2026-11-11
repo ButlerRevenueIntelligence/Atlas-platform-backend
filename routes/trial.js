@@ -1,3 +1,4 @@
+import { DEFAULT_TRIAL_PLAN } from "../utils/trialPlan.js";
 import express from "express";
 import Organization from "../models/Organization.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -54,7 +55,7 @@ router.post("/start", requireAuth, async (req, res) => {
     const now = new Date();
     const endsAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-    org.plan = "GROWTH";
+    org.plan = DEFAULT_TRIAL_PLAN;
     org.paymentStatus = "pending";
     org.accessStatus = "active";
     org.approvedForAccess = true;

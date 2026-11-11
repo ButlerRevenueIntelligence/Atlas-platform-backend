@@ -1,3 +1,4 @@
+import { DEFAULT_TRIAL_PLAN } from "../utils/trialPlan.js";
 // backend/routes/workspaces.js
 import express from "express";
 import mongoose from "mongoose";
@@ -183,7 +184,7 @@ router.post("/", requireAuth, async (req, res) => {
       industry,
 
       // Billing-controlled values must never come directly from the client.
-      plan: "SCALE",
+      plan: DEFAULT_TRIAL_PLAN,
 
       trial,
 
