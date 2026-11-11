@@ -1,3 +1,4 @@
+import { DEFAULT_TRIAL_PLAN } from "../utils/trialPlan.js";
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -211,7 +212,7 @@ router.post("/signup", async (req, res) => {
       name: `${name}'s Workspace`,
       slug,
       ownerId: user._id,
-      plan: "SCALE",
+      plan: DEFAULT_TRIAL_PLAN,
       trial: {
         startedAt: new Date(),
         endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
