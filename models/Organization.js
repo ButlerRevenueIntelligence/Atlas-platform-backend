@@ -52,6 +52,9 @@ const billingSchema = new mongoose.Schema(
     stripeCustomerId: { type: String, default: null, index: true },
     stripeSubscriptionId: { type: String, default: null, index: true },
     stripePriceId: { type: String, default: null },
+    enterpriseAdditionalSeats: { type: Number, default: 0, min: 0 },
+    seatLockToken: { type: String },
+    seatLockUntil: { type: Date },
     status: {
       type: String,
       enum: ["inactive", "active", "past_due", "canceled", "trialing"],

@@ -5,6 +5,8 @@ import { requireAuth } from "../middleware/auth.js";
 import Membership from "../models/Membership.js";
 import User from "../models/User.js";
 
+import { updateSeatedMembership } from '../services/workspaceSeats.js';
+
 const router = express.Router();
 
 const ALLOWED_ROLES = [
@@ -268,7 +270,7 @@ router.get("/", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("GET /api/members error:", err);
 
-    return res.status(500).json({
+    return res.status(err.status || 500).json({
       ok: false,
       message: err?.message || "Server error",
     });
@@ -305,7 +307,7 @@ router.post("/", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("POST /api/members error:", err);
 
-    return res.status(500).json({
+    return res.status(err.status || 500).json({
       ok: false,
       message: err?.message || "Server error",
     });
@@ -469,20 +471,7 @@ router.patch(
         });
       }
 
-      const updated =
-        await Membership.findOneAndUpdate(
-          {
-            _id: membershipId,
-            orgId: ctx.orgId,
-          },
-          {
-            $set: updates,
-          },
-          {
-            new: true,
-            runValidators: true,
-          }
-        ).lean();
+      const updated = await updateSeatedMembership(ctx.orgId, membershipId, updates);
 
       await syncUserWorkspaceMembership({
         userId: updated.userId,
@@ -506,7 +495,7 @@ router.patch(
         err
       );
 
-      return res.status(500).json({
+      return res.status(err.status || 500).json({
         ok: false,
         message: err?.message || "Server error",
       });
@@ -547,7 +536,7 @@ router.post(
         err
       );
 
-      return res.status(500).json({
+      return res.status(err.status || 500).json({
         ok: false,
         message: err?.message || "Server error",
       });
@@ -669,7 +658,7 @@ router.delete(
         err
       );
 
-      return res.status(500).json({
+      return res.status(err.status || 500).json({
         ok: false,
         message: err?.message || "Server error",
       });

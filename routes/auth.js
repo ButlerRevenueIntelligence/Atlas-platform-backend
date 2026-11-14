@@ -11,6 +11,8 @@ import Membership from "../models/Membership.js";
 
 import { requireAuth } from "../middleware/auth.js";
 
+import { createSeatedMembership } from '../services/workspaceSeats.js';
+
 const router = express.Router();
 
 const resend = process.env.RESEND_API_KEY
@@ -1052,7 +1054,7 @@ router.get("/force-create-membership", async (req, res) => {
       });
     }
 
-    const membership = await Membership.create({
+    const membership = await createSeatedMembership({
       userId: user._id,
       orgId: user.orgId,
       workspaceId: user.orgId,

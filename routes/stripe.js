@@ -8,12 +8,21 @@ import Membership from "../models/Membership.js";
 import User from "../models/User.js";
 import { requireAuth } from "../middleware/auth.js";
 
+import { additionalSeatQuantity, subscriptionPlanItem, seatQuantity, enterpriseMonthlyCents, validateMonthlyPrice, ENTERPRISE_SEAT_CENTS, ENTERPRISE_BASE_CENTS } from '../utils/enterpriseBilling.js';
+import { seatCapacity, seatsUsed, withSeatLock } from '../services/workspaceSeats.js';
+
 const router = express.Router();
+const seatPriceId = process.env.STRIPE_PRICE_ENTERPRISE_SEAT || '';
+async function validateEnterprisePrices() {
+  validateMonthlyPrice(await stripe.prices.retrieve(PLAN_CONFIG.ENTERPRISE.priceId), ENTERPRISE_BASE_CENTS);
+  if (!seatPriceId) throw Object.assign(new Error('Additional Enterprise seats are not configured. Contact Atlas support.'), { status: 503 });
+  validateMonthlyPrice(await stripe.prices.retrieve(seatPriceId), ENTERPRISE_SEAT_CENTS);
+}
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-const stripe = stripeSecretKey
+export const stripe = stripeSecretKey
   ? new Stripe(stripeSecretKey)
   : null;
 
@@ -159,9 +168,9 @@ async function getAuthorizedWorkspace(req, options = {}) {
   );
 
   const orgId = toObjectId(
-    req.user?.orgId ||
-      req.headers["x-org-id"] ||
-      req.headers["x-workspace-id"]
+    req.headers["x-org-id"] ||
+      req.headers["x-workspace-id"] ||
+      req.user?.orgId
   );
 
   if (!userId || !orgId) {
@@ -229,13 +238,12 @@ async function getAuthorizedWorkspace(req, options = {}) {
 async function syncSubscriptionToWorkspace({
   subscription,
   organization = null,
+  lockHeld = false,
 }) {
   if (!subscription) return null;
 
   const subscriptionId = subscription.id || null;
   const customerId = subscription.customer || null;
-  const priceId =
-    subscription.items?.data?.[0]?.price?.id || null;
 
   const metadataOrgId = toObjectId(
     subscription.metadata?.orgId
@@ -262,6 +270,10 @@ async function syncSubscriptionToWorkspace({
 
   if (!org) return null;
 
+  const apply = async (org) => {
+  // Read current state after acquiring the workspace lock, never the event's old quantity.
+  subscription = await stripe.subscriptions.retrieve(subscription.id);
+  const priceId = subscriptionPlanItem(subscription, PLAN_CONFIG)?.price?.id || null;
   const mappedPlan = planFromPriceId(priceId);
   const state = subscriptionAccessState(
     subscription.status
@@ -283,6 +295,8 @@ async function syncSubscriptionToWorkspace({
     stripeCustomerId: customerId,
     stripeSubscriptionId: subscriptionId,
     stripePriceId: priceId,
+    enterpriseAdditionalSeats: mappedPlan === 'ENTERPRISE' && ['active', 'trialing'].includes(subscription.status)
+      ? additionalSeatQuantity(subscription, seatPriceId) : 0,
     status: state.billingStatus,
     currentPeriodEnd:
       currentPeriodEnd(subscription),
@@ -306,6 +320,8 @@ async function syncSubscriptionToWorkspace({
   await org.save();
 
   return org;
+  };
+  return lockHeld ? apply(org) : withSeatLock(org._id, apply);
 }
 
 /**
@@ -357,6 +373,15 @@ router.get("/summary", requireAuth, async (req, res) => {
         hasSubscription: Boolean(
           billing.stripeSubscriptionId
         ),
+        seats: {
+          included: 25,
+          additional: organization.plan === 'ENTERPRISE' ? Math.max(0, billing.enterpriseAdditionalSeats || 0) : 0,
+          capacity: organization.plan === 'ENTERPRISE' ? seatCapacity(organization) : null,
+          used: await seatsUsed(organization._id),
+          baseMonthlyCents: ENTERPRISE_BASE_CENTS,
+          additionalMonthlyCents: ENTERPRISE_SEAT_CENTS,
+          canManage: organization.plan === 'ENTERPRISE' && billing.status === 'active' && Boolean(seatPriceId && billing.stripeSubscriptionId),
+        },
         trial: organization.trial || null,
         role,
         canManage: ["owner", "admin"].includes(
@@ -461,6 +486,10 @@ router.post(
         .select("email")
         .lean();
 
+      const used = await seatsUsed(organization._id);
+      const totalSeats = requestedPlan === 'ENTERPRISE' ? seatQuantity(req.body?.seats ?? 25) : 0;
+      if (requestedPlan === 'ENTERPRISE' && totalSeats < used) return res.status(409).json({ ok: false, message: 'Choose enough seats for all current members.' });
+      if (requestedPlan === 'ENTERPRISE' && totalSeats > 25) await validateEnterprisePrices();
       const checkoutPayload = {
         mode: "subscription",
         line_items: [
@@ -486,6 +515,10 @@ router.post(
         },
       };
 
+      if (requestedPlan === 'ENTERPRISE' && totalSeats > 25) {
+        checkoutPayload.line_items.push({ price: seatPriceId, quantity: totalSeats - 25 });
+      }
+
       if (existingCustomerId) {
         checkoutPayload.customer =
           existingCustomerId;
@@ -509,14 +542,52 @@ router.post(
         err
       );
 
-      return res.status(500).json({
+      return res.status(err.status || 500).json({
         ok: false,
-        message:
-          "Unable to start secure checkout.",
+        message: err.status ? err.message : "Unable to start secure checkout.",
       });
     }
   }
 );
+
+// Purchased capacity changes only after Stripe successfully applies the subscription update.
+router.post('/enterprise-seats', express.json(), requireAuth, async (req, res) => {
+  try {
+    if (!stripe) return res.status(503).json({ ok: false, message: 'Stripe is not configured.' });
+    const context = await getAuthorizedWorkspace(req, { requireManager: true });
+    if (context.error) return res.status(context.error.status).json({ ok: false, message: context.error.message });
+    const total = seatQuantity(req.body?.seats);
+    if (req.body?.confirmed !== true) return res.status(400).json({ ok: false, message: 'Confirm the recurring price and prorated billing before changing seats.' });
+    await validateEnterprisePrices();
+    await withSeatLock(context.organization._id, async org => {
+      if (org.plan !== 'ENTERPRISE' || org.billing?.status !== 'active' || !org.billing?.stripeSubscriptionId) {
+        throw Object.assign(new Error('An active paid Enterprise subscription is required.'), { status: 409 });
+      }
+      if (total < await seatsUsed(org._id)) throw Object.assign(new Error('Disable or remove members before reducing purchased seats below current usage.'), { status: 409 });
+      const subscription = await stripe.subscriptions.retrieve(org.billing.stripeSubscriptionId);
+      const base = subscriptionPlanItem(subscription, PLAN_CONFIG);
+      if (base?.price?.id !== PLAN_CONFIG.ENTERPRISE.priceId || base.quantity !== 1 || subscription.status !== 'active' || subscription.pending_update) {
+        throw Object.assign(new Error('This subscription requires billing support before seats can be changed.'), { status: 409 });
+      }
+      const currentExtra = additionalSeatQuantity(subscription, seatPriceId);
+      const extra = total - 25;
+      if (currentExtra !== extra) {
+        const item = subscription.items.data.find(i => i.price?.id === seatPriceId);
+        const items = extra === 0 ? [{ id: item.id, deleted: true }] : [item ? { id: item.id, quantity: extra } : { price: seatPriceId, quantity: extra }];
+        await stripe.subscriptions.update(subscription.id, {
+          items,
+          proration_behavior: extra > currentExtra ? 'always_invoice' : 'create_prorations',
+          payment_behavior: 'error_if_incomplete',
+        });
+      }
+      await syncSubscriptionToWorkspace({ subscription, organization: org, lockHeld: true });
+    });
+    return res.json({ ok: true, seats: total, monthlyCents: enterpriseMonthlyCents(total) });
+  } catch (err) {
+    console.error('ENTERPRISE SEATS ERROR:', err.message);
+    return res.status(err.status || (err.type === 'StripeCardError' ? 402 : 500)).json({ ok: false, message: err.type === 'StripeCardError' ? 'Payment could not be completed. Update your payment method in Manage Billing and retry; additional seats have not been granted.' : err.status ? err.message : 'Unable to change seats. Refresh billing before retrying.' });
+  }
+});
 
 /**
  * POST /api/stripe/create-portal-session
@@ -564,9 +635,19 @@ router.post(
         });
       }
 
+      let enterprisePortalConfiguration;
+      if (context.organization.plan === 'ENTERPRISE') {
+        enterprisePortalConfiguration = process.env.STRIPE_ENTERPRISE_PORTAL_CONFIGURATION;
+        if (!enterprisePortalConfiguration) return res.status(503).json({ ok: false, message: 'Enterprise billing management is being configured. Contact Atlas support.' });
+        const configuration = await stripe.billingPortal.configurations.retrieve(enterprisePortalConfiguration);
+        if (!configuration.active || configuration.features?.subscription_update?.enabled) {
+          return res.status(503).json({ ok: false, message: 'Enterprise billing management requires configuration. Contact Atlas support.' });
+        }
+      }
       const session =
         await stripe.billingPortal.sessions.create(
           {
+            ...(enterprisePortalConfiguration ? { configuration: enterprisePortalConfiguration } : {}),
             customer: customerId,
             return_url: `${getFrontendUrl()}/billing`,
           }
