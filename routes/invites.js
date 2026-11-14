@@ -12,6 +12,8 @@ import Organization from "../models/Organization.js";
 import User from "../models/User.js";
 import { sendInviteEmail } from "../utils/sendInviteEmail.js";
 
+import { createSeatedMembership } from '../services/workspaceSeats.js';
+
 const router = express.Router();
 
 const ALLOWED_INVITE_ROLES = [
@@ -980,7 +982,7 @@ router.post("/:token/accept", async (req, res) => {
       });
     }
 
-    const membership = await Membership.create({
+    const membership = await createSeatedMembership({
       userId: user._id,
       orgId: invite.orgId,
       workspaceId: invite.orgId,
@@ -1055,8 +1057,9 @@ router.post("/:token/accept", async (req, res) => {
       });
     }
 
-    return res.status(500).json({
+    return res.status(err.status || 500).json({
       ok: false,
+      code: err.code,
       message:
         err?.message || "Failed to accept invitation",
     });
